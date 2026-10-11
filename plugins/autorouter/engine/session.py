@@ -78,11 +78,24 @@ def import_ses(board, path: Path) -> None:
         raise RuntimeError(f"KiCad could not import the routed session {path.name}")
 
 
+_REMOVED = []        # proxies of removed items, kept alive (see BoardActions._forget)
+
+
 def remove_tracks(board) -> int:
-    """Remove every track, arc and via. KiCad keeps the removed items for undo."""
+    """Remove every track, arc and via. Inside KiCad the removed items go to
+    the undo list; headless they become Python-owned and are kept alive here."""
     items = list(board.GetTracks())
     for item in items:
         board.Remove(item)
+        try:
+            item.thisown = 0          # Python must never delete board items
+        except Exception:
+            pass
+    _REMOVED.extend(items)
+    try:
+        board.BuildConnectivity()
+    except Exception:
+        pass
     return len(items)
 
 

@@ -188,6 +188,10 @@ class BoardActions:
         self.verify_fn = verify_fn
         self._added: List[Any] = []         # items the last edit created, for rollback
         self._undo: List[Callable[[], None]] = []   # how to put the last edit back
+        # Items removed from the board outside KiCad's action-plugin wrapper
+        # become Python-owned; dropping them while the connectivity still
+        # points at them crashes KiCad's Python. Keep them for the session.
+        self._graveyard: List[Any] = []
 
     def apply(self, actions: List[dict]) -> List[ActionResult]:
         results = []
@@ -209,8 +213,14 @@ class BoardActions:
                     for item in self._added:
                         try:
                             self.board.Remove(item)
+                            item.thisown = 0
+                            self._graveyard.append(item)
                         except Exception:
                             pass
+                    try:
+                        self.board.BuildConnectivity()
+                    except Exception:
+                        pass
                     for undo in reversed(self._undo):
                         try:
                             undo()
@@ -447,15 +457,28 @@ class BoardActions:
                 d = math.hypot(x - (ax + tt * dx), y - (ay + tt * dy))
             if d <= r:
                 victims.append(t)
-        for t in victims:
-            self.board.Remove(t)
+        self._forget(victims)
         return len(victims)
+
+    def _forget(self, items) -> None:
+        for item in items:
+            self.board.Remove(item)
+            # never let Python delete a board item: KiCad's bindings cannot
+            # destroy them safely (inside KiCad the undo list owns them anyway)
+            try:
+                item.thisown = 0
+            except Exception:
+                pass
+        self._graveyard.extend(items)
+        try:
+            self.board.BuildConnectivity()
+        except Exception:
+            pass
 
     def _remove_tracks(self, nets: List[str]) -> int:
         codes = {self._net(n).GetNetCode() for n in nets}
         items = [t for t in self.board.GetTracks() if t.GetNetCode() in codes]
-        for item in items:
-            self.board.Remove(item)
+        self._forget(items)
         return len(items)
 
     def _add_track(self, act: dict) -> int:

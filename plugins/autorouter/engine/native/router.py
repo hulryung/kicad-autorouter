@@ -746,18 +746,26 @@ class Router:
         reach = int(6_000_000 / grid.pitch)                    # 6 mm
         x0, x1 = max(0, cx - reach), min(grid.w - 1, cx + reach)
         y0, y1 = max(0, cy - reach), min(grid.h - 1, cy + reach)
-        own_exit = {cell}
-        ex, ey, px, py, _ = net.endpoints.get(cell, (None,) * 5)
+        # Real copper of the net within reach (not its clearance zone): other
+        # pads' exits, routed centrelines, fanout and stitching vias.
+        near = int(1_000_000 / grid.pitch)
+        copper: Set[int] = set()
+        for cl in net.clusters:
+            copper |= cl.cells
+        for path in self.paths.values():
+            if path.conn.net == code:
+                copper.update(path.cells)
+                for x, y in path.path.vias:
+                    vx, vy = grid.cell_x(x), grid.cell_y(y)
+                    if grid.inside(vx, vy):
+                        copper.add(grid.index(layer, vx, vy))
         goals: Set[int] = set()
-        base = layer * grid.plane
-        for gy in range(y0, y1 + 1):
-            row = base + gy * grid.w
-            for gx in range(x0, x1 + 1):
-                idx = row + gx
-                if owners[idx] == code and idx not in own_exit:
-                    # skip the pad's own stub lane (within 1 mm of the exit)
-                    if abs(gx - cx) + abs(gy - cy) > int(1_000_000 / grid.pitch):
-                        goals.add(idx)
+        for idx in copper:
+            l_, gx, gy = grid.unpack(idx)
+            if l_ != layer or idx == cell:
+                continue
+            if x0 <= gx <= x1 and y0 <= gy <= y1 and abs(gx - cx) + abs(gy - cy) > near:
+                goals.add(idx)
         if not goals:
             return None
         anchors = [grid.unpack(g)[1:] for g in list(goals)[:8]]

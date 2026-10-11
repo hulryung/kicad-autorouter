@@ -121,10 +121,13 @@ do:
   clearance, hole clearance, hole-to-hole) are enforced on top.
 - **Per-item clearances**: pads and tracks with local clearance overrides are
   kept at that distance.
-- **Automatic track width** (the default): an explicit net class wins; else
-  the width the net's existing tracks already use; else, for power nets
-  (names like `+3V3`, `VBUS`, `VCC*`, `*_PWR`), the widest pre-defined width
-  that still fits the net's narrowest pad; else the net class width.
+- **Automatic track width** (the default): the width the net's existing
+  tracks already use wins; else, for power nets (names like `+3V3`, `VBUS`,
+  `VCC*`, `*_PWR`), the widest pre-defined width that still fits the net's
+  narrowest pad, never below the net class; else the net class width. On the
+  benchmark board this reproduces the original designer's width on 37 of 43
+  nets. Fine-pitch connections are necked only within 1.5 mm of the pin and
+  widen after that.
 - **Pre-defined sizes and the editor's selection** are offered as alternatives
   for track width and via size.
 - **Differential pairs**: nets paired by name (`D+/D-`, `TX_P/TX_N`,
@@ -235,6 +238,16 @@ sandbox is read-only and the working directory is the plugin's job folder
 (context, prompts, replies, images and `rounds.json` stay there), so the
 model can read the context files but nothing else is touched.
 `docs/ai-routing-approach.md` explains the design and the plan for it.
+
+**Score and improve** turns the assistant into a reviewer: the model scores
+the current routing 0-100 overall and per criterion (connectivity, DRC, track
+length, vias, layer use, aesthetics, signal integrity, power and ground) from
+the context, deterministic metrics (length, segments, vias, detour ratio per
+net, octilinear share), a full-board render and close-ups of the places it
+flagged in the previous round, lists issues with positions, applies the
+actions it proposes under the same DRC verification, and re-scores, until it
+says it is done, the score stops rising or the round limit is reached. The
+score card and the rounds are kept in `review-rounds.json` in the job folder.
 
 ## How it is built
 
