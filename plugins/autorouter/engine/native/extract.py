@@ -471,26 +471,33 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             # the grid search must be able to start on the exit cell
             if any(own[grid.index(li, ecx, ecy)] not in (0, code) for li in pl):
                 continue
-            # the stub itself is checked exactly, as the DRC would: the escape
-            # lane may legally be narrower than what the owner maps assume
-            stub_shapes = [pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(pos.x, pos.y), pcbnew.VECTOR2I(ex, ey), stub_w),
-                           pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(ex, ey), pcbnew.VECTOR2I(gx, gy), stub_w)]
+            # The stub is checked exactly, as the DRC would (the escape lane may
+            # legally be narrower than what the owner maps assume). A single
+            # straight piece from the pad centre to the grid cell is preferred,
+            # as a designer would draw it; if that grazes a neighbour, the
+            # on-axis piece plus a short jog is tried.
             margin = stub_w // 2 + net.rules.clearance + 2 * safety
             lane_box = (min(pos.x, ex, gx) - margin, min(pos.y, ey, gy) - margin,
                         max(pos.x, ex, gx) + margin, max(pos.y, ey, gy) + margin)
-            clear = True
-            for li in pl:
-                for shape, other, other_clr in copper_near(li, lane_box):
-                    if other == code:
-                        continue
+            nearby = [(shape, other, other_clr) for li in pl
+                      for shape, other, other_clr in copper_near(li, lane_box) if other != code]
+
+            def lane_clear(shapes):
+                for shape, other, other_clr in nearby:
                     need = max(net.rules.clearance, other_clr) + safety
-                    if any(shape.Collide(stub, need) for stub in stub_shapes):
-                        clear = False
-                        break
-                if not clear:
-                    break
-            if not clear:
-                continue
+                    if any(shape.Collide(stub, need) for stub in shapes):
+                        return False
+                return True
+
+            single = [pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(pos.x, pos.y), pcbnew.VECTOR2I(gx, gy), stub_w)]
+            if lane_clear(single):
+                stub_shapes = single
+                ex, ey = gx, gy                      # exit point is the cell itself: one piece
+            else:
+                stub_shapes = [pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(pos.x, pos.y), pcbnew.VECTOR2I(ex, ey), stub_w),
+                               pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(ex, ey), pcbnew.VECTOR2I(gx, gy), stub_w)]
+                if not lane_clear(stub_shapes):
+                    continue
             # and this lane's clearance zone must not cover another net's exit
             width, clearance = net.rules.key
             zone_r = max(clearance, ds.m_MinClearance) + width // 2 + safety + stub_w // 2

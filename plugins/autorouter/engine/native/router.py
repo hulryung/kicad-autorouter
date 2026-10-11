@@ -49,59 +49,83 @@ class _Path:
         self.via_cells: List[int] = []
 
 
-def _smooth(grid: Grid, cells: List[int], passable) -> List[int]:
-    """Straighten staircases. A run of cells that only uses two neighbouring
-    directions (say east and north-east) is a zig-zag the grid search left
-    behind; a hand-routed trace would make it one straight piece and one
-    diagonal piece. Each such run is replaced by the two-piece version whose
-    cells are all passable (tried with either piece first), so clearances
-    still hold. Layer changes are never touched."""
-    if len(cells) < 4:
-        return cells
+def _two_piece(grid: Grid, a: int, b: int, passable) -> Optional[List[int]]:
+    """Cells of an octilinear two-piece path from cell a to cell b on one
+    layer (a diagonal run and a straight run, either order), or None if any
+    cell is blocked or a diagonal step would cut a corner."""
     plane, w = grid.plane, grid.w
+    layer = a // plane
+    ax, ay = a % w, (a % plane) // w
+    bx, by = b % w, (b % plane) // w
+    dx, dy = bx - ax, by - ay
+    sx = (dx > 0) - (dx < 0)
+    sy = (dy > 0) - (dy < 0)
+    ndiag = min(abs(dx), abs(dy))
+    nstraight = abs(dx) - ndiag if abs(dx) > abs(dy) else abs(dy) - ndiag
+    diag = (sx, sy)
+    straight = (sx, 0) if abs(dx) > abs(dy) else (0, sy)
+    for order in ((diag, ndiag, straight, nstraight), (straight, nstraight, diag, ndiag)):
+        d1, n1, d2, n2 = order
+        x, y = ax, ay
+        cells = []
+        ok = True
+        for d, n in ((d1, n1), (d2, n2)):
+            for _ in range(n):
+                nx, ny = x + d[0], y + d[1]
+                idx = layer * plane + ny * w + nx
+                if not passable(idx):
+                    ok = False
+                    break
+                if d[0] and d[1] and not (passable(layer * plane + y * w + nx) and
+                                          passable(layer * plane + ny * w + x)):
+                    ok = False
+                    break
+                cells.append(idx)
+                x, y = nx, ny
+            if not ok:
+                break
+        if ok:
+            return cells
+    return None
+
+
+def _smooth(grid: Grid, cells: List[int], passable) -> List[int]:
+    """Straighten a cell path the way a designer would redraw it: from each
+    point, jump as far ahead as a two-piece octilinear path (one straight run
+    and one diagonal run) can reach through free cells, so wiggles and
+    staircases collapse into at most two segments. Layer changes are kept
+    where they are; only runs on a single layer are rewritten."""
+    plane = grid.plane
+    n = len(cells)
+    if n < 3:
+        return cells
     out = [cells[0]]
-    i, n = 0, len(cells)
+    i = 0
     while i < n - 1:
         layer = cells[i] // plane
-        dirs = []
-        j = i
-        while j + 1 < n and cells[j + 1] // plane == layer:
-            d = cells[j + 1] - cells[j]
-            if d not in dirs:
-                if len(dirs) == 2:
-                    break
-                dirs.append(d)
-            j += 1
-        if len(dirs) == 2 and j - i >= 3:
-            counts = {d: 0 for d in dirs}
-            for k in range(i, j):
-                counts[cells[k + 1] - cells[k]] += 1
-            replaced = None
-            for first, second in ((dirs[0], dirs[1]), (dirs[1], dirs[0])):
-                seq = [first] * counts[first] + [second] * counts[second]
-                cur, new_cells, ok = cells[i], [], True
-                for d in seq:
-                    nxt = cur + d
-                    if abs(nxt % w - cur % w) > 1 or not (0 <= nxt < grid.size) or not passable(nxt):
-                        ok = False
-                        break
-                    # no corner cutting on diagonal pieces
-                    dx = (nxt % w) - (cur % w)
-                    dy = ((nxt % plane) // w) - ((cur % plane) // w)
-                    if dx and dy and not (passable(cur + dx) and passable(cur + dy * w)):
-                        ok = False
-                        break
-                    new_cells.append(nxt)
-                    cur = nxt
-                if ok and cur == cells[j]:
-                    replaced = new_cells
-                    break
+        # the last index of this layer run
+        end = i
+        while end + 1 < n and cells[end + 1] // plane == layer:
+            end += 1
+        if end == i:                                   # a via step: keep it
+            out.append(cells[i + 1])
+            i += 1
+            continue
+        # farthest j reachable with a two-piece path (binary search is unsafe,
+        # reachability is not monotone, so walk back from the end)
+        j = end
+        replaced = None
+        while j > i + 1:
+            replaced = _two_piece(grid, cells[i], cells[j], passable)
             if replaced is not None:
-                out.extend(replaced)
-                i = j
-                continue
-        out.append(cells[i + 1])
-        i += 1
+                break
+            j -= 1
+        if replaced is None:
+            out.append(cells[i + 1])
+            i += 1
+        else:
+            out.extend(replaced)
+            i = j
     return out
 
 
@@ -147,7 +171,25 @@ def _with_pad_entries(grid: Grid, net: NetInfo, cells: List[int], segments):
             out = [(l, x2, y2, x1, y1, w) for l, x1, y1, x2, y2, w in reversed(extra)] + out
         else:
             out = out + extra
-    return out
+    return _merge_collinear(out)
+
+
+def _merge_collinear(segments):
+    """Join consecutive segments that continue in the same direction on the
+    same layer with the same width (a stub running straight into its route)."""
+    merged = []
+    for seg in segments:
+        if merged:
+            prev = merged[-1]
+            if (prev[0] == seg[0] and (prev[3], prev[4]) == (seg[1], seg[2])
+                    and tuple(prev[5:]) == tuple(seg[5:])):
+                ax, ay = prev[3] - prev[1], prev[4] - prev[2]
+                bx, by = seg[3] - seg[1], seg[4] - seg[2]
+                if ax * by - ay * bx == 0 and ax * bx + ay * by > 0:
+                    merged[-1] = tuple(prev[:3]) + (seg[3], seg[4]) + tuple(prev[5:])
+                    continue
+        merged.append(seg)
+    return merged
 
 
 class Router:
