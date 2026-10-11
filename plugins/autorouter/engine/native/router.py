@@ -267,9 +267,11 @@ class Router:
                     owners[idx] = net.code
                     routed[idx] = path.pid
                 elif cur != net.code and cur != BLOCKED:
+                    # overlaps another net's zone: blocked for everyone. It stays
+                    # rip-up-able only if that other zone was routed copper too
+                    # (routed[idx] already names a path); fixed copper underneath
+                    # means ripping this path would not free the cell.
                     owners[idx] = BLOCKED
-                    if routed[idx] == 0:
-                        routed[idx] = path.pid
         r_hole = rp.via_drill // 2 + p.hole_to_hole + p.max_via_drill // 2
         for x, y in rp.vias:
             path.via_cells += grid.disc_cells(0, x, y, r_hole)
@@ -319,6 +321,30 @@ class Router:
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, self.opts.allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, **kwargs)
+
+    def _blockers(self, conn: Connection, cells: List[int]) -> Set[int]:
+        """Paths of other nets that a soft route runs through: along its cells
+        and, where it changes layer, under the via barrel on every layer."""
+        routed = self.routed[self._key(conn)]
+        grid = self.grid
+        net = self.p.nets[conn.net]
+        width = conn.width or net.rules.width
+        reach = max(0, int(math.ceil((net.rules.via_diameter - width) / 2 / grid.pitch))) + 1
+        spots = list(cells)
+        for k in range(1, len(cells)):
+            if cells[k] // grid.plane != cells[k - 1] // grid.plane:
+                _, cx, cy = grid.unpack(cells[k])
+                for dx in range(-reach, reach + 1):
+                    for dy in range(-reach, reach + 1):
+                        if dx * dx + dy * dy <= reach * reach and grid.inside(cx + dx, cy + dy):
+                            for layer in range(grid.layers):
+                                spots.append(grid.index(layer, cx + dx, cy + dy))
+        out: Set[int] = set()
+        for idx in spots:
+            pid = routed[idx]
+            if pid and pid in self.paths and self.paths[pid].conn.net != conn.net:
+                out.add(pid)
+        return out
 
     def _rippable(self, pid: int, for_conn: Connection) -> bool:
         path = self.paths.get(pid)
@@ -418,10 +444,7 @@ class Router:
                 if not cells:
                     still.append(conn)
                     continue
-                routed = self.routed[self._key(conn)]
-                blockers = sorted({routed[c] for c in cells
-                                   if routed[c] and self.paths.get(routed[c]) and
-                                   self.paths[routed[c]].conn.net != conn.net})
+                blockers = sorted(self._blockers(conn, cells))
                 if len(blockers) > MAX_BLOCKERS:
                     still.append(conn)
                     continue
