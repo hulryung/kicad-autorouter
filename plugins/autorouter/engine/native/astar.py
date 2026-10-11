@@ -1,8 +1,8 @@
 """One connection: A* from every cell of the source cluster to any cell of
 the target cluster, across routable layers with vias.
 
-Costs are integers: 10 per straight cell, 14 per diagonal, doubled for a
-straight move against the layer's preferred direction,
+Costs are integers: 10 per straight cell along the layer's preferred
+direction, 15 against it, 18 per diagonal,
 plus a small turn penalty and the via cost. The heuristic is octile distance
 to the nearest target anchor, so it stays admissible for in-layer moves.
 """
@@ -11,7 +11,13 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .grid import BLOCKED, Grid
 
-STRAIGHT, DIAGONAL, AGAINST_STRAIGHT = 10, 14, 20
+# Costs per move. Against the layer's preferred direction a straight move costs
+# 1.5x; a diagonal is half along, half against, so it costs the mean of the
+# two straight costs times sqrt(2): 14 * 1.25 = 17.5 -> 18. That keeps a
+# straight run against the preferred direction (15 per cell) cheaper than a
+# zig-zag of diagonals (18 per cell), while a true 45-degree move is still
+# cheaper than an L (18 vs 25).
+STRAIGHT, DIAGONAL, AGAINST_STRAIGHT = 10, 18, 15
 # (dx, dy, is_diagonal)
 MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
          (1, 1, True), (1, -1, True), (-1, 1, True), (-1, -1, True))

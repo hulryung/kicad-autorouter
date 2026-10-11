@@ -93,12 +93,14 @@ def tight_pads(fp, limit: int) -> Set[str]:
     return tight
 
 
-def pad_escape(pad, fp, rules: NetRules, pitch: int) -> Optional[List[Tuple[int, int]]]:
+def pad_escape(pad, fp, rules: NetRules, pitch: int,
+               towards: Optional[Tuple[int, int]] = None) -> Optional[List[Tuple[int, int]]]:
     """Where a track may leave an SMD pad: points on the pad's long axis, just
     far enough past either pad end that the track is clear of the neighbouring
-    pads (clearance + half width + one cell), the side pointing away from the
-    footprint centre first. None for through-hole pads, which can be entered
-    from any side."""
+    pads (clearance + half width + one cell). The side facing `towards` (the
+    nearest other pad of the net) comes first, else the side pointing away
+    from the footprint centre. None for through-hole pads, which can be
+    entered from any side."""
     if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN):
         return None
     size = pad.GetSize()
@@ -118,9 +120,12 @@ def pad_escape(pad, fp, rules: NetRules, pitch: int) -> Optional[List[Tuple[int,
     for sign in (1, -1):
         ex = pos.x + sign * axis[0] * reach
         ey = pos.y + sign * axis[1] * reach
-        away = (ex - centre.x) ** 2 + (ey - centre.y) ** 2
-        options.append((away, int(round(ex)), int(round(ey))))
-    options.sort(reverse=True)                       # away from the footprint centre first
+        if towards is not None:
+            score = -((ex - towards[0]) ** 2 + (ey - towards[1]) ** 2)   # nearer the target first
+        else:
+            score = (ex - centre.x) ** 2 + (ey - centre.y) ** 2          # away from the centre first
+        options.append((score, int(round(ex)), int(round(ey))))
+    options.sort(reverse=True)
     return [(ex, ey) for _, ex, ey in options]
 
 
@@ -435,12 +440,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # that lane is free of other nets' copper.
     say("Planning pad escapes...")
     exit_owner: Dict[int, int] = {}            # exit cell -> net, to keep lanes apart
+    positions_by_net: Dict[int, List[Tuple[int, int]]] = {}
+    for pad, code, pl, pos, own_cells, centre in pending:
+        positions_by_net.setdefault(code, []).append((pos.x, pos.y))
     for pad, code, pl, pos, own_cells, centre in pending:
         fp = footprint_of(pad)
         net = nets[code]
         own = owners[net.rules.key]
         stub_w = net.rules.width
-        escapes = pad_escape(pad, fp, net.rules, pitch)
+        others = [q for q in positions_by_net[code] if q != (pos.x, pos.y)]
+        towards = min(others, key=lambda q: (q[0] - pos.x) ** 2 + (q[1] - pos.y) ** 2) if others else None
+        escapes = pad_escape(pad, fp, net.rules, pitch, towards)
         if escapes and fp is not None and options.neck_down:
             key = fp.GetReference()
             if key not in tight_by_fp:
