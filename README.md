@@ -1,31 +1,29 @@
 # KiCad Autorouter
 
-Autoroute the open board with [Freerouting](https://www.freerouting.org/) without
-leaving KiCad's PCB editor.
+Autoroute the open board without leaving KiCad's PCB editor. Two engines:
 
-Until now the Freerouting workflow was: *File → Export → Specctra DSN*, start the
-Java application, open the file, route, export a `.ses`, switch back to KiCad,
-*File → Import → Specctra Session*. This plugin folds all of that into one
-toolbar button:
+- **Built-in router** (default). Reads pads, existing copper, keepouts, the
+  board outline and the net-class rules through KiCad's PCB API, routes on a
+  multi-layer grid with A* (vias, preferred directions per layer, clearance and
+  track width per net class) and puts each connection's tracks and vias on
+  the board **as soon as it is found**, so you watch the board fill in. No
+  files, no external programs, one undo step.
+- **Freerouting**. The classic Java autorouter, driven headless: Specctra DSN
+  out, session back in, with pass-by-pass progress in the dialog. The jar and,
+  if needed, a Java runtime are downloaded into the plugin's data folder on
+  first use.
 
-1. The board is exported to Specctra DSN behind the scenes.
-2. Freerouting 2.5 runs **headless, in the background**, and the dialog shows
-   pass-by-pass progress (unrouted connections, violations, optimizer passes)
-   with a live log. The run can be cancelled at any time.
-3. The routed session is imported into the open board as **one undoable step**
-   (Ctrl+Z puts the board back exactly as it was).
-
-The routing engine stays Freerouting's Java implementation. It is **not bundled**:
-the plugin downloads the pinned release and, if no suitable Java is installed, a
-Temurin JRE from adoptium.net into its own data folder on first use. Nothing is
-installed system-wide and no admin rights are needed.
+Either way the dialog shows live progress, can be cancelled, and Ctrl+Z puts
+the board back exactly as it was.
 
 ## Requirements
 
 - KiCad 9.0 or 10.0 (the SWIG action-plugin API). KiCad 11 drops that API; an
   IPC-API build is on the roadmap, see below.
-- Internet access on first use (about 120 MB: engine 62 MB, JRE 55 MB), or a
-  Java 25+ runtime already on the machine and a copy of `freerouting-2.5.0.jar`.
+- The built-in router needs nothing else.
+- Freerouting needs internet access on first use (about 120 MB: engine 62 MB,
+  JRE 55 MB), or a Java 25+ runtime already on the machine and a copy of
+  `freerouting-2.5.0.jar`.
 - macOS (Apple Silicon and Intel), Windows x64, Linux x64/arm64.
 
 ## Installation
@@ -50,22 +48,74 @@ Then **Tools → External Plugins → Refresh Plugins** in the PCB editor.
 
 ## Using it
 
-Open a board, click **Autorouter**.
+Open a board, click **Autorouter**, pick an engine, click **Route**.
 
 | Tab | What you set |
 |-----|--------------|
-| **Routing** | Max passes, optimizer threads and stop threshold, via / plane-via / rip-up costs, optimizer strategies, JVM heap, extra engine arguments, SMD fanout, and whether to remove the existing tracks first. By default existing routing is kept and only unrouted connections are routed. |
-| **Layers & net classes** | Which copper layers Freerouting may route on, an optional preferred-direction override per layer, and net classes to leave unrouted (power nets you want to pour or route by hand). |
-| **Engine** | Where Java and the Freerouting jar come from. Leave both empty for auto-detection and the managed download. |
+| **Routing** | The engine. For the built-in router: routing grid pitch, via cost, search budget per connection, retry pass, nets to leave unrouted (name patterns such as `GND,*_PLANE`, for nets that get a copper pour), **track width and via size** (per-net net class sizes, the editor's current track/via choice, or any of the board's pre-defined sizes from Board Setup), and **what to route**: the whole board, only the items selected in the editor, or only the footprints of chosen schematic sheets. Whether to remove the existing tracks first; by default existing routing is kept and only unrouted connections are routed. |
+| **Layers & nets** | Which copper layers may be routed, an optional preferred-direction override per layer, and net classes to leave unrouted. Both engines honour these. |
+| **Freerouting** | Passes, optimizer threads and threshold, via / plane-via / rip-up costs, strategies, JVM heap, extra arguments, SMD fanout, and where Java and the jar come from (leave empty for auto-detection and the managed download). |
 
-Click **Route**. On the first run the dialog asks before downloading the engine.
-When the engine finishes, the routing is already in the board. Options are
-remembered between runs.
+Options are remembered between runs.
 
-Each run's DSN and SES files are kept in the data folder
-(`jobs/<timestamp>-<board>/`, last 10 runs) for inspection; **Open job folder**
-takes you there. Net class and design rules (clearance, track width, via size)
-come from the board's net classes through KiCad's DSN export, as they always have.
+### KiCad's routing settings
+
+The built-in router takes its sizes from the board the way KiCad's own tools
+do:
+
+- **Net classes**: track width, clearance, via diameter and drill come from
+  each net's effective net class (assignments and patterns from Board Setup
+  are resolved by KiCad). Board minimums (track width, via size, clearance,
+  hole clearance, hole-to-hole) are enforced on top.
+- **Per-item clearances**: pads and tracks with local clearance overrides are
+  kept at that distance.
+- **Pre-defined sizes and the editor's selection**: the *Track width* and
+  *Via size* choices in the dialog list the board's pre-defined sizes and the
+  editor's current toolbar choice, so a run can use "0.2 mm everywhere" or
+  "what I have selected right now" instead of the net classes.
+
+Not read yet: custom DRC rules (`.kicad_dru`) that set track width or via size
+per condition (their clearances are honoured through the per-item clearance),
+and differential-pair widths/gaps.
+
+### Routing part of a board
+
+*What to route* on the Routing tab:
+
+- **Selected items**: select footprints, pads, tracks or vias in the editor
+  before opening the dialog. Connections that touch a selected footprint, and
+  all connections of a selected track's or via's net, are routed; everything
+  else stays as it is.
+- **Schematic sheets**: tick one or more sheets (the list comes from the
+  footprints' sheet names). Connections touching a footprint from those
+  sheets are routed.
+
+Only the chosen connections are searched; the rest of the board is still an
+obstacle, and existing tracks of other nets are respected.
+
+### How the built-in router works
+
+1. **Read** (PCB API, a few seconds): every pad, track, via, keepout and copper
+   graphic is rasterized onto one occupancy grid per distinct (track width,
+   clearance) pair, already inflated by the clearance plus half the track
+   width, so the search only asks "may this net's centreline pass here?".
+   Pads of the same net that are already joined by copper form clusters; the
+   connections to route are a minimum spanning tree over each net's clusters,
+   much like KiCad's ratsnest.
+2. **Route** (worker thread): connections are routed shortest first with a
+   multi-source, multi-layer A* (8 directions, no corner cutting, preferred
+   direction per layer, via cost, turn penalty). A routed connection becomes
+   an obstacle for the ones after it. Failed connections get a second try with
+   a larger budget and cheaper vias.
+3. **Apply** (PCB API, main thread): each path becomes `PCB_TRACK` segments and
+   through `PCB_VIA`s with the net class's sizes, added to the open board at
+   once. KiCad records the whole run as one undo step.
+
+Limits of this first version: no rip-up and reroute (a connection that cannot
+be routed is reported, not forced through), through vias only, zones are not
+obstacles (KiCad refills them around the new tracks), and the grid is uniform,
+so very fine-pitch parts want a smaller pitch (slower) or a hand-routed escape.
+The Freerouting engine remains the stronger choice for dense boards.
 
 ### Data folder
 
@@ -86,46 +136,60 @@ everything the plugin ever downloaded.
 plugins/autorouter/
   __init__.py        registers the action plugin (skipped outside the PCB editor)
   plugin.py          pcbnew.ActionPlugin: the toolbar button
-  dialog.py          wx dialog: options, engine setup, progress, log
+  dialog.py          wx dialog: engine choice, options, progress, log; drives both engines
   settings.py        settings.json in the data folder
-  engine/            no pcbnew or wx here, unit-testable with plain Python
-    freerouting.py   pinned release, jar lookup/download, RouteOptions → command line
-    java.py          find a Java ≥ 25 (settings, JAVA_HOME, PATH, managed, vendor dirs) or install a Temurin JRE
+  engine/
+    native/          the built-in router
+      extract.py     board -> RoutingProblem through pcbnew (pads, copper, keepouts, outline, rules)
+      grid.py        multi-layer owner grid and rasterizers (discs, thick segments, polygons)
+      astar.py       one connection: multi-source, multi-layer A*
+      router.py      all connections: ordering, retries, obstacle updates, progress
+      apply.py       RoutedPath -> PCB_TRACK / PCB_VIA on the board
+      problem.py     the data model shared by the above
+    freerouting.py   Freerouting release pin, jar lookup/download, options -> command line
+    java.py          find a Java >= 25 or install a Temurin JRE into the data folder
     runner.py        the engine subprocess on a worker thread, cancel support
-    progress.py      Freerouting log lines → stage / pass / unrouted / violations
-    session.py       the pcbnew side: DSN export, SES import, layers, net classes, job folders
+    progress.py      Freerouting log lines -> stage / pass / unrouted / violations
+    session.py       the pcbnew side of Freerouting: DSN export, SES import, job folders
     download.py      download with progress, sha256 check, safe archive extraction
     paths.py         data folder and platform names
 ```
 
-The engine release is pinned in `engine/freerouting.py` (`RELEASE`: version,
+Only `extract.py`, `apply.py`, `session.py`, `plugin.py` and `dialog.py` import
+pcbnew or wx; everything else runs and is tested with a plain Python.
+
+The Freerouting release is pinned in `engine/freerouting.py` (`RELEASE`: version,
 jar sha256, required Java). Freerouting 2.5.0 also ships native CLI binaries;
 they are not used because 2.5.0's native build crashes at the first routing
-pass (a GraalVM serialization error) — the jar works.
+pass (a GraalVM serialization error) while the jar works.
 
 ## Tests
 
 ```bash
-python3 scripts/run-tests.py        # offline: command line, progress parser, settings
-# with KiCad's Python the end-to-end test runs too (needs Java 25+ and the jar;
-# KICAD_AUTOROUTER_E2E_DOWNLOAD=1 lets it download the jar):
+python3 scripts/run-tests.py        # offline: router core on synthetic grids, command line, progress parser, settings
+# with KiCad's Python the end-to-end tests run too:
 /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 scripts/run-tests.py
+# the built-in router on any board, with KiCad's DRC on the result:
+<KiCad python3> tests/test_native_e2e.py path/to/board.kicad_pcb --skip GND --out /tmp/routed
 ```
 
-The end-to-end test takes `tests/fixtures/obd2-adapter.kicad_pcb`, strips its
-tracks, exports DSN, routes it through the real engine, imports the SES and
-checks that tracks came back with nothing left unrouted.
+`test_native_e2e.py` reads a board through pcbnew, routes it with the built-in
+router, saves a copy and runs `kicad-cli pcb drc` on it; `test_e2e_headless.py`
+does the same round trip through Freerouting (needs Java 25+ and the jar;
+`KICAD_AUTOROUTER_E2E_DOWNLOAD=1` lets it download the jar). Both use
+`tests/fixtures/obd2-adapter.kicad_pcb` by default.
 
 Packaging: `python3 scripts/build-package.py` writes the PCM zip to `release/`.
 
 ## Roadmap
 
-- **KiCad 11 / IPC API build.** KiCad 11 removes the SWIG plugin API that
-  provides the DSN export and SES import used here. The IPC build needs its own
-  Specctra DSN writer and SES reader on top of `kicad-python`; the engine,
-  runner, progress and dialog code is runtime-independent and carries over.
-- Route only the selected nets.
-- Pass KiCad's custom DRC rules through to the engine as a `.rules` file.
+- Built-in router: rip-up and reroute for failed connections, blind/buried
+  vias, zone-aware routing, routing only the selected nets, a progress preview
+  of the search front.
+- **KiCad 11 / IPC API build.** KiCad 11 removes the SWIG plugin API. The
+  built-in router's board reading and track writing move to `kicad-python`;
+  the Freerouting path additionally needs its own DSN writer and SES reader.
+- Pass KiCad's custom DRC rules through to Freerouting as a `.rules` file.
 
 ## License
 

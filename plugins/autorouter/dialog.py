@@ -1,21 +1,34 @@
-"""The Autorouter dialog: routing options, engine setup, live progress."""
-import os
-import threading
-from pathlib import Path
-from typing import Optional
+"""The Autorouter dialog: engine choice, options, live progress.
 
+Two engines share the dialog. The built-in router reads the board through the
+PCB API, searches on a worker thread and puts each connection's copper on the
+board as soon as it is found. Freerouting runs as an external process on a
+DSN export and its session is imported at the end.
+"""
+import threading
+import time
+from pathlib import Path
+from typing import List, Optional
+
+import pcbnew
 import wx
 
 from . import __version__
 from .engine import freerouting, java, session
-from .engine.freerouting import RELEASE, RouteOptions, SELECTION_STRATEGIES, UPDATE_STRATEGIES
+from .engine.freerouting import (ENGINE_BUILTIN, ENGINE_FREEROUTING, RELEASE, RouteOptions,
+                                 SELECTION_STRATEGIES, UPDATE_STRATEGIES)
+from .engine.native import apply as native_apply, extract as native_extract, router as native_router
+from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
+                                    SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
 from .engine.paths import data_dir
-from .engine.progress import ProgressParser, STAGE_DONE
+from .engine.progress import ProgressParser
 from .engine.runner import EngineRun
 from .log import get_logger
 from .settings import Settings
 
 logger = get_logger("dialog")
+ENGINES = ((ENGINE_BUILTIN, "Built-in router (KiCad PCB API, routes live on the board)"),
+           (ENGINE_FREEROUTING, f"Freerouting {RELEASE.version} (external Java engine, DSN/SES)"))
 
 
 def _mb(n: Optional[int]) -> str:
@@ -24,24 +37,35 @@ def _mb(n: Optional[int]) -> str:
 
 class AutorouterDialog(wx.Dialog):
     def __init__(self, parent, board):
-        super().__init__(parent, title=f"Autorouter  (Freerouting {RELEASE.version})",
+        super().__init__(parent, title="Autorouter",
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         self.board = board
         self.settings = Settings.load()
         self.layers = session.copper_layers(board)
         self.net_classes = session.net_class_names(board)
+        self.sizes = native_extract.board_sizes(board)
+        self.sheets = native_extract.sheets(board)
+        try:
+            self.sel_refs, self.sel_nets = native_extract.selection_scope(board, pcbnew.GetCurrentSelection())
+        except Exception:
+            self.sel_refs, self.sel_nets = [], []
         self.run: Optional[EngineRun] = None
         self.parser: Optional[ProgressParser] = None
         self.job: Optional[session.JobFiles] = None
+        self.engine_log = None
         self.applied = False
-        self._cancel_download = False
+        self.busy = False
+        self._cancel = False
         self._java: Optional[java.JavaInfo] = None
         self._jar: Optional[Path] = None
+        self._native_layers = None
+        self._last_refresh = 0.0
 
         self._build()
         self._load_options(self.settings.options)
         self._refresh_engine_status()
-        self.SetMinSize((620, 640))
+        self._on_engine_choice(None)
+        self.SetMinSize((660, 680))
         self.Fit()
         self.CentreOnParent()
         self.Bind(wx.EVT_CLOSE, self._on_close)
@@ -52,8 +76,8 @@ class AutorouterDialog(wx.Dialog):
         root = wx.BoxSizer(wx.VERTICAL)
         self.notebook = wx.Notebook(self)
         self.notebook.AddPage(self._routing_page(self.notebook), "Routing")
-        self.notebook.AddPage(self._layers_page(self.notebook), "Layers && net classes")
-        self.notebook.AddPage(self._engine_page(self.notebook), "Engine")
+        self.notebook.AddPage(self._layers_page(self.notebook), "Layers && nets")
+        self.notebook.AddPage(self._freerouting_page(self.notebook), "Freerouting")
         root.Add(self.notebook, 0, wx.EXPAND | wx.ALL, 8)
 
         progress = wx.StaticBoxSizer(wx.VERTICAL, self, "Progress")
@@ -61,16 +85,16 @@ class AutorouterDialog(wx.Dialog):
         self.gauge = wx.Gauge(self, range=1000)
         self.log = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
         self.log.SetFont(wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE)))
-        self.log.SetMinSize((-1, 160))
+        self.log.SetMinSize((-1, 150))
         progress.Add(self.status, 0, wx.EXPAND | wx.ALL, 4)
         progress.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 4)
         progress.Add(self.log, 1, wx.EXPAND | wx.ALL, 4)
         root.Add(progress, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
 
         buttons = wx.BoxSizer(wx.HORIZONTAL)
-        self.open_jobs = wx.Button(self, label="Open job folder")
+        self.open_jobs = wx.Button(self, label="Open data folder")
         self.open_jobs.Bind(wx.EVT_BUTTON, lambda e: self._open_folder(
-            self.job.directory if self.job else data_dir() / "jobs"))
+            self.job.directory if self.job else data_dir()))
         buttons.Add(self.open_jobs, 0, wx.RIGHT, 8)
         buttons.AddStretchSpacer()
         self.route_btn = wx.Button(self, label="Route")
@@ -88,6 +112,14 @@ class AutorouterDialog(wx.Dialog):
 
     def _routing_page(self, parent):
         page = wx.Panel(parent)
+        box = wx.BoxSizer(wx.VERTICAL)
+
+        self.engine_choice = wx.RadioBox(page, label="Engine", choices=[label for _, label in ENGINES],
+                                         majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        self.engine_choice.Bind(wx.EVT_RADIOBOX, self._on_engine_choice)
+        box.Add(self.engine_choice, 0, wx.EXPAND | wx.ALL, 10)
+
+        native = wx.StaticBoxSizer(wx.VERTICAL, page, "Built-in router")
         grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=10)
         grid.AddGrowableCol(1)
 
@@ -100,40 +132,61 @@ class AutorouterDialog(wx.Dialog):
             grid.Add(ctrl, 0, wx.EXPAND)
             return ctrl
 
-        self.passes = row("Max routing passes", wx.SpinCtrl(page, min=0, max=100000, initial=100),
-                          "Upper limit for autorouter passes. 0 = no limit.")
-        self.threads = row("Optimizer threads", wx.SpinCtrl(page, min=-1, max=256, initial=0),
-                           "0 = engine default (CPU cores - 1), -1 = skip the optimizer stage.")
-        self.threshold = row("Optimizer stop threshold (%)",
-                             wx.SpinCtrlDouble(page, min=0.0, max=100.0, initial=2.5, inc=0.5),
-                             "Stop optimizing when a pass improves the score by less than this. "
-                             "0.5-1 thorough, 2.5 balanced, 5+ quick.")
-        self.threshold.SetDigits(1)
-        self.via_costs = row("Via cost", wx.SpinCtrl(page, min=0, max=100000, initial=50),
-                             "Higher = fewer vias, longer traces.")
-        self.plane_via_costs = row("Plane via cost", wx.SpinCtrl(page, min=0, max=100000, initial=5))
-        self.ripup_costs = row("Start rip-up cost", wx.SpinCtrl(page, min=0, max=100000, initial=100))
-        self.update_strategy = row("Optimizer update strategy",
-                                   wx.Choice(page, choices=list(UPDATE_STRATEGIES)))
-        self.hybrid_ratio = row("Hybrid ratio (global:prioritized)", wx.TextCtrl(page, value="1:1"))
-        self.selection_strategy = row("Optimizer item selection",
-                                      wx.Choice(page, choices=list(SELECTION_STRATEGIES)))
-        self.heap = row("JVM max heap (MB, 0 = default)", wx.SpinCtrl(page, min=0, max=262144, initial=0),
-                        "Raise for very large boards if the engine runs out of memory.")
-        self.extra = row("Extra engine arguments", wx.TextCtrl(page),
-                         "Passed to Freerouting verbatim, e.g. --router.job_timeout=00:30:00")
+        self.pitch = row("Routing grid (mm)", wx.SpinCtrlDouble(page, min=0.025, max=2.0, initial=0.1, inc=0.025),
+                         "Track centrelines snap to this grid. Smaller is more precise and slower; "
+                         "about half the smallest pad pitch works well.")
+        self.pitch.SetDigits(3)
+        self.native_via_cost = row("Via cost (grid cells)", wx.SpinCtrl(page, min=0, max=100000, initial=50),
+                                   "A via costs as much as this many cells of straight track.")
+        self.native_budget = row("Search budget per connection (k cells)",
+                                 wx.SpinCtrl(page, min=10, max=100000, initial=400),
+                                 "A* gives up on a connection after expanding this many cells.")
+        self.skip_nets = row("Nets to leave unrouted", wx.TextCtrl(page),
+                             "Comma-separated net names or patterns, e.g. GND,+3V3,*_PLANE. "
+                             "Use it for nets that get a copper pour.")
+        # Track width and via size: KiCad's own settings, chosen the way the
+        # editor's toolbar offers them.
+        mm = lambda nm: f"{nm / 1e6:g} mm"
+        cur_w = self.sizes["current_track_width"]
+        cur_v = self.sizes["current_via"]
+        self.track_choices = [(SIZE_NETCLASS, 0, "Net class width (per net)"),
+                              (SIZE_CURRENT, 0, f"Editor's current track width ({mm(cur_w)})")]
+        self.track_choices += [(SIZE_FIXED, w, f"Pre-defined {mm(w)}") for w in self.sizes["track_widths"]]
+        self.track_size = row("Track width", wx.Choice(page, choices=[c[2] for c in self.track_choices]),
+                              "Net class sizes are KiCad's default. The other entries are the board's "
+                              "pre-defined sizes (Board Setup) and the editor's current selection.")
+        self.via_choices = [(SIZE_NETCLASS, (0, 0), "Net class via (per net)"),
+                            (SIZE_CURRENT, cur_v, f"Editor's current via ({mm(cur_v[0])} / {mm(cur_v[1])})")]
+        self.via_choices += [(SIZE_FIXED, v, f"Pre-defined {mm(v[0])} / {mm(v[1])}") for v in self.sizes["via_sizes"]]
+        self.via_size = row("Via size (diameter / drill)", wx.Choice(page, choices=[c[2] for c in self.via_choices]))
+        native.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
+        self.native_vias = wx.CheckBox(page, label="Allow vias")
+        self.native_retry = wx.CheckBox(page, label="Retry failed connections with a bigger budget and cheaper vias")
+        native.Add(self.native_vias, 0, wx.LEFT | wx.BOTTOM, 6)
+        native.Add(self.native_retry, 0, wx.LEFT | wx.BOTTOM, 6)
+        box.Add(native, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
-        checks = wx.BoxSizer(wx.VERTICAL)
-        self.fanout = wx.CheckBox(page, label="Fan out SMD pads before routing")
+        scope = wx.StaticBoxSizer(wx.HORIZONTAL, page, "What to route (built-in router)")
+        sel_label = (f"Selected items ({len(self.sel_refs)} footprints, {len(self.sel_nets)} nets)"
+                     if (self.sel_refs or self.sel_nets) else "Selected items (nothing selected)")
+        self.scope_choice = wx.RadioBox(page, choices=["Whole board", sel_label, "Schematic sheets:"],
+                                        majorDimension=1, style=wx.RA_SPECIFY_COLS)
+        if not (self.sel_refs or self.sel_nets):
+            self.scope_choice.EnableItem(1, False)
+        self.scope_choice.SetToolTip("Selected items: select footprints, pads, tracks or nets in the editor "
+                                     "before opening the dialog. Only connections touching them are routed.")
+        self.scope_choice.Bind(wx.EVT_RADIOBOX, lambda e: self.sheet_list.Enable(self.scope_choice.GetSelection() == 2))
+        self.sheet_list = wx.CheckListBox(page, choices=[f"{name}  ({n} footprints)" for name, n in self.sheets])
+        self.sheet_list.SetMinSize((-1, 90))
+        self.sheet_list.Disable()
+        scope.Add(self.scope_choice, 0, wx.ALL, 6)
+        scope.Add(self.sheet_list, 1, wx.EXPAND | wx.ALL, 6)
+        box.Add(scope, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+
         self.remove_existing = wx.CheckBox(page, label="Remove existing tracks and vias first")
         self.remove_existing.SetToolTip("Otherwise existing routing is kept and only the "
                                         "unrouted connections are routed.")
-        checks.Add(self.fanout, 0, wx.BOTTOM, 4)
-        checks.Add(self.remove_existing, 0)
-
-        box = wx.BoxSizer(wx.VERTICAL)
-        box.Add(grid, 0, wx.EXPAND | wx.ALL, 10)
-        box.Add(checks, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        box.Add(self.remove_existing, 0, wx.LEFT | wx.BOTTOM, 10)
         page.SetSizer(box)
         return page
 
@@ -168,56 +221,91 @@ class AutorouterDialog(wx.Dialog):
         page.SetSizer(box)
         return page
 
-    def _engine_page(self, parent):
+    def _freerouting_page(self, parent):
         page = wx.Panel(parent)
-        grid = wx.FlexGridSizer(cols=3, vgap=6, hgap=8)
+        box = wx.BoxSizer(wx.VERTICAL)
+        grid = wx.FlexGridSizer(cols=2, vgap=5, hgap=10)
         grid.AddGrowableCol(1)
 
-        grid.Add(wx.StaticText(page, label="Java runtime"), 0, wx.ALIGN_CENTER_VERTICAL)
+        def row(label, ctrl, tip=None):
+            text = wx.StaticText(page, label=label)
+            if tip:
+                text.SetToolTip(tip)
+                ctrl.SetToolTip(tip)
+            grid.Add(text, 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(ctrl, 0, wx.EXPAND)
+            return ctrl
+
+        self.passes = row("Max routing passes", wx.SpinCtrl(page, min=0, max=100000, initial=100),
+                          "Upper limit for autorouter passes. 0 = no limit.")
+        self.threads = row("Optimizer threads", wx.SpinCtrl(page, min=-1, max=256, initial=0),
+                           "0 = engine default (CPU cores - 1), -1 = skip the optimizer stage.")
+        self.threshold = row("Optimizer stop threshold (%)",
+                             wx.SpinCtrlDouble(page, min=0.0, max=100.0, initial=2.5, inc=0.5))
+        self.threshold.SetDigits(1)
+        self.via_costs = row("Via cost", wx.SpinCtrl(page, min=0, max=100000, initial=50))
+        self.plane_via_costs = row("Plane via cost", wx.SpinCtrl(page, min=0, max=100000, initial=5))
+        self.ripup_costs = row("Start rip-up cost", wx.SpinCtrl(page, min=0, max=100000, initial=100))
+        self.update_strategy = row("Optimizer update strategy", wx.Choice(page, choices=list(UPDATE_STRATEGIES)))
+        self.hybrid_ratio = row("Hybrid ratio (global:prioritized)", wx.TextCtrl(page, value="1:1"))
+        self.selection_strategy = row("Optimizer item selection", wx.Choice(page, choices=list(SELECTION_STRATEGIES)))
+        self.heap = row("JVM max heap (MB, 0 = default)", wx.SpinCtrl(page, min=0, max=262144, initial=0))
+        self.extra = row("Extra engine arguments", wx.TextCtrl(page),
+                         "Passed to Freerouting verbatim, e.g. --router.job_timeout=00:30:00")
+        self.fanout = wx.CheckBox(page, label="Fan out SMD pads before routing")
+        box.Add(grid, 0, wx.EXPAND | wx.ALL, 10)
+        box.Add(self.fanout, 0, wx.LEFT | wx.BOTTOM, 10)
+
+        setup = wx.StaticBoxSizer(wx.VERTICAL, page, "Engine setup")
+        sgrid = wx.FlexGridSizer(cols=3, vgap=5, hgap=8)
+        sgrid.AddGrowableCol(1)
+        sgrid.Add(wx.StaticText(page, label="Java runtime"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.java_path = wx.TextCtrl(page, value=self.settings.java_path)
         self.java_path.SetHint("auto-detect")
-        grid.Add(self.java_path, 1, wx.EXPAND)
+        sgrid.Add(self.java_path, 1, wx.EXPAND)
         b = wx.Button(page, label="Browse...")
         b.Bind(wx.EVT_BUTTON, lambda e: self._browse(self.java_path, "java executable"))
-        grid.Add(b)
-
-        grid.Add(wx.StaticText(page, label="Freerouting jar"), 0, wx.ALIGN_CENTER_VERTICAL)
+        sgrid.Add(b)
+        sgrid.Add(wx.StaticText(page, label="Freerouting jar"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.jar_path = wx.TextCtrl(page, value=self.settings.jar_path)
         self.jar_path.SetHint(f"managed download of {RELEASE.jar_name}")
-        grid.Add(self.jar_path, 1, wx.EXPAND)
+        sgrid.Add(self.jar_path, 1, wx.EXPAND)
         b = wx.Button(page, label="Browse...")
         b.Bind(wx.EVT_BUTTON, lambda e: self._browse(self.jar_path, "Freerouting jar", "*.jar"))
-        grid.Add(b)
-
+        sgrid.Add(b)
+        setup.Add(sgrid, 0, wx.EXPAND | wx.ALL, 6)
         self.engine_status = wx.StaticText(page, label="")
-        row = wx.BoxSizer(wx.HORIZONTAL)
+        setup.Add(self.engine_status, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+        srow = wx.BoxSizer(wx.HORIZONTAL)
         self.install_btn = wx.Button(page, label="Download missing components")
         self.install_btn.Bind(wx.EVT_BUTTON, lambda e: self._ensure_engine(then=None))
         recheck = wx.Button(page, label="Re-check")
         recheck.Bind(wx.EVT_BUTTON, lambda e: self._refresh_engine_status())
-        data = wx.Button(page, label="Open data folder")
-        data.Bind(wx.EVT_BUTTON, lambda e: self._open_folder(data_dir()))
-        row.Add(self.install_btn, 0, wx.RIGHT, 6)
-        row.Add(recheck, 0, wx.RIGHT, 6)
-        row.Add(data, 0)
-
-        note = wx.StaticText(page, label=(
-            f"The engine is Freerouting {RELEASE.version} (GPL-3.0, freerouting.org), run headless "
-            f"with Java {RELEASE.min_java} or newer. Missing pieces are downloaded into the plugin's "
-            f"data folder; nothing is installed system-wide.\n{data_dir()}"))
-        note.Wrap(560)
-
-        box = wx.BoxSizer(wx.VERTICAL)
-        box.Add(grid, 0, wx.EXPAND | wx.ALL, 10)
-        box.Add(self.engine_status, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
-        box.Add(row, 0, wx.ALL, 10)
-        box.Add(note, 0, wx.EXPAND | wx.ALL, 10)
+        srow.Add(self.install_btn, 0, wx.RIGHT, 6)
+        srow.Add(recheck, 0)
+        setup.Add(srow, 0, wx.ALL, 6)
+        box.Add(setup, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         page.SetSizer(box)
         return page
 
     # ---- options <-> widgets ------------------------------------------------
 
     def _load_options(self, o: RouteOptions):
+        self.engine_choice.SetSelection(1 if o.engine == ENGINE_FREEROUTING else 0)
+        self.pitch.SetValue(o.native_pitch_mm)
+        self.native_via_cost.SetValue(o.native_via_cost)
+        self.native_budget.SetValue(o.native_max_expansions_k)
+        self.skip_nets.SetValue(o.skip_nets)
+        self.native_vias.SetValue(o.native_allow_vias)
+        self.native_retry.SetValue(o.native_retry)
+        self.track_size.SetSelection(0)
+        for i, (mode, value, _) in enumerate(self.track_choices):
+            if mode == o.native_track_mode and (mode != SIZE_FIXED or value == o.native_track_width):
+                self.track_size.SetSelection(i)
+        self.via_size.SetSelection(0)
+        for i, (mode, value, _) in enumerate(self.via_choices):
+            if mode == o.native_via_mode and (mode != SIZE_FIXED or value == (o.native_via_diameter, o.native_via_drill)):
+                self.via_size.SetSelection(i)
         self.passes.SetValue(o.max_passes)
         self.threads.SetValue(o.optimizer_threads)
         self.threshold.SetValue(o.improvement_threshold)
@@ -235,7 +323,6 @@ class AutorouterDialog(wx.Dialog):
         self.remove_existing.SetValue(o.remove_existing_tracks)
         for i, name in enumerate(self.net_classes):
             self.skip_classes.Check(i, name in o.ignore_net_classes)
-        # Layer lists are per board; only reuse them when the layer count matches.
         if o.routable_layers and len(o.routable_layers) == len(self.layers):
             for i, v in enumerate(o.routable_layers):
                 self.routable.Check(i, bool(v))
@@ -248,6 +335,18 @@ class AutorouterDialog(wx.Dialog):
     def _collect_options(self) -> RouteOptions:
         n = len(self.layers)
         return RouteOptions(
+            engine=ENGINES[self.engine_choice.GetSelection()][0],
+            native_pitch_mm=self.pitch.GetValue(),
+            native_via_cost=self.native_via_cost.GetValue(),
+            native_allow_vias=self.native_vias.GetValue(),
+            native_retry=self.native_retry.GetValue(),
+            native_max_expansions_k=self.native_budget.GetValue(),
+            skip_nets=self.skip_nets.GetValue().strip(),
+            native_track_mode=self.track_choices[self.track_size.GetSelection()][0],
+            native_track_width=self.track_choices[self.track_size.GetSelection()][1],
+            native_via_mode=self.via_choices[self.via_size.GetSelection()][0],
+            native_via_diameter=self.via_choices[self.via_size.GetSelection()][1][0],
+            native_via_drill=self.via_choices[self.via_size.GetSelection()][1][1],
             max_passes=self.passes.GetValue(),
             optimizer_threads=self.threads.GetValue(),
             improvement_threshold=self.threshold.GetValue(),
@@ -267,6 +366,19 @@ class AutorouterDialog(wx.Dialog):
             extra_args=self.extra.GetValue().strip(),
         )
 
+    def native_options(self, o: RouteOptions) -> NativeOptions:
+        scope = (SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS)[self.scope_choice.GetSelection()]
+        return NativeOptions(
+            pitch_mm=o.native_pitch_mm, via_cost=o.native_via_cost, allow_vias=o.native_allow_vias,
+            max_expansions=o.native_max_expansions_k * 1000, retry_failed=o.native_retry,
+            skip_nets=[s.strip() for s in o.skip_nets.split(",") if s.strip()],
+            ignore_net_classes=list(o.ignore_net_classes),
+            routable_layers=o.routable_layers, horizontal_layers=o.horizontal_layers,
+            scope=scope, scope_refs=list(self.sel_refs), scope_nets=list(self.sel_nets),
+            scope_sheets=[self.sheets[i][0] for i in self.sheet_list.GetCheckedItems()],
+            track_mode=o.native_track_mode, track_width=o.native_track_width,
+            via_mode=o.native_via_mode, via_diameter=o.native_via_diameter, via_drill=o.native_via_drill)
+
     def _save_settings(self):
         self.settings.java_path = self.java_path.GetValue().strip()
         self.settings.jar_path = self.jar_path.GetValue().strip()
@@ -276,21 +388,25 @@ class AutorouterDialog(wx.Dialog):
         except OSError as e:
             logger.warning("Could not save settings: %s", e)
 
-    # ---- engine availability ------------------------------------------------
+    def _on_engine_choice(self, event):
+        builtin = self.engine_choice.GetSelection() == 0
+        for ctrl in (self.pitch, self.native_via_cost, self.native_budget, self.skip_nets,
+                     self.native_vias, self.native_retry, self.track_size, self.via_size, self.scope_choice):
+            ctrl.Enable(builtin)
+        self.sheet_list.Enable(builtin and self.scope_choice.GetSelection() == 2)
+
+    # ---- Freerouting availability -------------------------------------------
 
     def _refresh_engine_status(self):
         self._java = java.find_java(RELEASE.min_java, self.java_path.GetValue().strip() or None)
         self._jar = freerouting.find_jar(self.jar_path.GetValue().strip() or None)
-        parts = [f"Java: {self._java}" if self._java
-                 else f"Java: none found (need {RELEASE.min_java}+)",
+        parts = [f"Java: {self._java}" if self._java else f"Java: none found (need {RELEASE.min_java}+)",
                  f"Engine: {self._jar}" if self._jar else f"Engine: {RELEASE.jar_name} not downloaded yet"]
         self.engine_status.SetLabel("\n".join(parts))
         self.install_btn.Enable(not (self._java and self._jar))
         self.Layout()
 
     def _ensure_engine(self, then):
-        """Make sure a Java runtime and the jar exist, downloading in the
-        background if needed; call then() on the main thread when ready."""
         self._refresh_engine_status()
         if self._java and self._jar:
             if then:
@@ -302,11 +418,11 @@ class AutorouterDialog(wx.Dialog):
         if not self._java:
             missing.append(f"a Java {RELEASE.min_java} runtime from adoptium.net (about 55 MB)")
         answer = wx.MessageBox(
-            "The routing engine needs to be downloaded first:\n  - " + "\n  - ".join(missing)
+            "The Freerouting engine needs to be downloaded first:\n  - " + "\n  - ".join(missing)
             + f"\n\ninto {data_dir()}\n\nDownload now?", "Autorouter", wx.YES_NO | wx.ICON_QUESTION, self)
         if answer != wx.YES:
             return
-        self._cancel_download = False
+        self._cancel = False
         self._set_busy(True)
         self._append_log("[plugin] downloading engine components...")
 
@@ -318,10 +434,10 @@ class AutorouterDialog(wx.Dialog):
             error = None
             try:
                 if not self._jar:
-                    freerouting.install_jar(progress, lambda: self._cancel_download)
+                    freerouting.install_jar(progress, lambda: self._cancel)
                 if not self._java:
-                    java.install_jre(RELEASE.min_java, progress, lambda: self._cancel_download)
-            except Exception as e:           # reported in the dialog
+                    java.install_jre(RELEASE.min_java, progress, lambda: self._cancel)
+            except Exception as e:
                 error = e
             wx.CallAfter(finish, error)
 
@@ -331,36 +447,136 @@ class AutorouterDialog(wx.Dialog):
             if error is not None:
                 logger.exception("Engine download failed", exc_info=error)
                 self._show_progress(f"Download failed: {error}", 0.0)
-                self._append_log(f"[plugin] download failed: {error!r}")
                 return
             self._show_progress("Engine ready.", 0.0)
-            self._append_log("[plugin] engine ready")
             if then and self._java and self._jar:
                 then()
 
         threading.Thread(target=work, name="autorouter-download", daemon=True).start()
 
-    # ---- the run ------------------------------------------------------------
+    # ---- starting a run -----------------------------------------------------
 
     def _on_route(self, event):
         self._save_settings()
-        self._ensure_engine(then=self._start_run)
-
-    def _start_run(self):
         options = self._collect_options()
         if options.routable_layers and not any(options.routable_layers):
             wx.MessageBox("Enable at least one routable layer.", "Autorouter", wx.ICON_WARNING, self)
             return
+        if options.engine == ENGINE_FREEROUTING:
+            self._ensure_engine(then=self._start_freerouting)
+        else:
+            self._start_native()
+
+    def _prepare(self, options: RouteOptions) -> bool:
         self.log.Clear()
         self.applied = False
+        self._cancel = False
         try:
             name = Path(self.board.GetFileName()).stem if self.board.GetFileName() else "board"
             self.job = session.new_job(name)
             if options.remove_existing_tracks:
                 removed = session.remove_tracks(self.board)
                 self._append_log(f"[plugin] removed {removed} existing tracks and vias")
+                pcbnew.Refresh()
+            return True
+        except Exception as e:
+            logger.exception("Preparing the run failed")
+            wx.MessageBox(str(e), "Autorouter", wx.ICON_ERROR, self)
+            return False
+
+    # ---- the built-in router ------------------------------------------------
+
+    def _start_native(self):
+        options = self._collect_options()
+        if not self._prepare(options):
+            return
+        native = self.native_options(options)
+        if native.scope == SCOPE_SHEETS and not native.scope_sheets:
+            wx.MessageBox("Tick at least one schematic sheet, or route the whole board.",
+                          "Autorouter", wx.ICON_WARNING, self)
+            return
+        self._set_busy(True)
+        self._show_progress("Reading the board...", None)
+        wx.SafeYield(self, True)
+        try:
+            problem = native_extract.extract(self.board, native, status=self._status_now)
+        except Exception as e:
+            self._set_busy(False)
+            logger.exception("Reading the board failed")
+            self._show_progress(f"Could not read the board: {e}", 0.0)
+            return
+        self._native_layers = problem.layers
+        stats = problem.stats
+        self._append_log(f"[plugin] grid {problem.grid.w}x{problem.grid.h}x{problem.grid.layers} cells at "
+                         f"{native.pitch_mm:g} mm, {stats['nets']} nets, {stats['connections']} of "
+                         f"{stats['all_connections']} connections in scope, read in {stats['extract_seconds']:.1f}s")
+        if not problem.connections:
+            self._set_busy(False)
+            self._show_progress("Nothing to route in this scope: every connection is done or skipped.", 1.0)
+            return
+        self._show_progress(f"Routing {stats['connections']} connections...", 0.0)
+        started = time.time()
+
+        def progress(done, total, routed, failed, name):
+            wx.CallAfter(self._show_progress,
+                         f"Routing {done}/{total}: {routed} routed, {failed} failed  ({time.time() - started:.0f}s)  {name}",
+                         done / total if total else None)
+
+        def on_path(path):
+            wx.CallAfter(self._add_native_path, path)
+
+        def work():
+            try:
+                result = native_router.run(problem, progress=progress, on_path=on_path,
+                                           cancelled=lambda: self._cancel)
+            except Exception as e:
+                logger.exception("Routing failed")
+                wx.CallAfter(self._native_done, None, e)
+                return
+            wx.CallAfter(self._native_done, result, None)
+
+        threading.Thread(target=work, name="autorouter-native", daemon=True).start()
+
+    def _add_native_path(self, path):
+        try:
+            native_apply.add_path(self.board, self._native_layers, path)
+            self.applied = True
+        except Exception as e:
+            logger.exception("Adding a routed path failed")
+            self._append_log(f"[plugin] could not add a path: {e!r}")
+        now = time.time()
+        if now - self._last_refresh > 0.5:
+            self._last_refresh = now
+            pcbnew.Refresh()
+
+    def _native_done(self, result, error):
+        self._set_busy(False)
+        pcbnew.Refresh()
+        if error is not None:
+            self._show_progress(f"Routing failed: {error}", 0.0)
+            return
+        if result.cancelled:
+            text = f"Cancelled after {result.routed} connections; they stay on the board (Ctrl+Z removes them)."
+            self._show_progress(text, 0.0)
+            return
+        failed = sorted({self.board.FindNet(c.net).GetNetname() for c in result.failed})
+        text = f"Done: {result.routed} connections routed in {result.seconds:.0f}s"
+        if result.failed:
+            text += f", {len(result.failed)} not routed ({', '.join(failed[:6])}{'...' if len(failed) > 6 else ''})"
+            self._append_log("[plugin] unrouted: " + ", ".join(failed))
+        text += ".  Undo (Ctrl+Z) reverts it."
+        self._show_progress(text, 1.0)
+
+    # ---- Freerouting --------------------------------------------------------
+
+    def _start_freerouting(self):
+        options = self._collect_options()
+        if not self._prepare(options):
+            return
+        try:
             session.export_dsn(self.board, self.job.dsn)
             self._append_log(f"[plugin] exported {self.job.dsn}")
+            self.engine_log = open(self.job.directory / "engine.log", "w", encoding="utf-8")
         except Exception as e:
             logger.exception("Preparing the run failed")
             wx.MessageBox(str(e), "Autorouter", wx.ICON_ERROR, self)
@@ -383,12 +599,20 @@ class AutorouterDialog(wx.Dialog):
 
     def _on_engine_line(self, line):
         self._append_log(line)
+        if self.engine_log:
+            try:
+                self.engine_log.write(line + "\n")
+            except OSError:
+                pass
         if self.parser:
             status = self.parser.feed(line)
-            self._show_progress(status.summary(), status.fraction(self._collect_options().max_passes))
+            self._show_progress(status.summary(), status.fraction(self.passes.GetValue()))
 
     def _on_engine_done(self, returncode):
         self._set_busy(False)
+        if self.engine_log:
+            self.engine_log.close()
+            self.engine_log = None
         status = self.parser.status if self.parser else None
         if returncode is None:
             self._show_progress("Cancelled. The board was not changed.", 0.0)
@@ -397,44 +621,53 @@ class AutorouterDialog(wx.Dialog):
             try:
                 session.import_ses(self.board, self.job.ses)
                 self.applied = True
+                pcbnew.Refresh()
             except Exception as e:
                 logger.exception("Importing the session failed")
                 self._show_progress(f"Routing finished but the import failed: {e}", 0.0)
                 return
             text = status.summary().replace("Finished", "Done, routing applied to the board", 1)
-            text += ".  Undo (Ctrl+Z) reverts it."
-            self._show_progress(text, 1.0)
-            self._append_log(f"[plugin] imported {self.job.ses}")
+            self._show_progress(text + ".  Undo (Ctrl+Z) reverts it.", 1.0)
             return
         reason = status.errors[-1] if status and status.errors else f"exit code {returncode}"
         if status and status.job_state and status.job_state != "COMPLETED":
             reason = f"engine state {status.job_state}"
         self._show_progress(f"The engine did not produce a session ({reason}). See the log.", 0.0)
 
+    # ---- common -------------------------------------------------------------
+
     def _on_cancel(self, event):
-        self._cancel_download = True
+        self._cancel = True
         if self.run and self.run.running:
             self._append_log("[plugin] cancelling...")
             threading.Thread(target=self.run.cancel, daemon=True).start()
+        else:
+            self._show_progress("Cancelling after the current connection...", None)
 
     def _on_close(self, event):
-        if self.run and self.run.running:
-            if wx.MessageBox("The engine is still running. Stop it and close?", "Autorouter",
+        if self.busy:
+            if wx.MessageBox("Routing is still running. Stop it and close?", "Autorouter",
                              wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
                 return
-            self.run.cancel()
-        self._cancel_download = True
+            self._cancel = True
+            if self.run and self.run.running:
+                self.run.cancel()
         self._save_settings()
         self.EndModal(wx.ID_OK if self.applied else wx.ID_CANCEL)
 
-    # ---- small helpers ------------------------------------------------------
-
     def _set_busy(self, busy: bool):
+        self.busy = busy
         self.route_btn.Enable(not busy)
         self.cancel_btn.Enable(busy)
         self.notebook.Enable(not busy)
         if not busy:
-            self.gauge.SetValue(self.gauge.GetValue())      # stop pulsing
+            self.gauge.SetValue(self.gauge.GetValue())
+
+    def _status_now(self, text: str):
+        """Status updates from main-thread work (board reading): show them immediately."""
+        self._show_progress(text, None)
+        self._append_log("[plugin] " + text)
+        wx.SafeYield(self, True)
 
     def _show_progress(self, text: str, fraction: Optional[float]):
         self.status.SetLabel(text)

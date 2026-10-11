@@ -37,9 +37,28 @@ UPDATE_STRATEGIES = ("greedy", "global", "hybrid")
 SELECTION_STRATEGIES = ("prioritized", "sequential", "random")
 
 
+ENGINE_BUILTIN, ENGINE_FREEROUTING = "builtin", "freerouting"
+
+
 @dataclass
 class RouteOptions:
-    """Everything the user can set for a run; persisted between runs."""
+    """Everything the user can set for a run; persisted between runs.
+
+    The engine choice and the native_* fields drive the built-in router; the
+    rest configure Freerouting. Layer and net-class choices apply to both.
+    """
+    engine: str = ENGINE_BUILTIN
+    native_pitch_mm: float = 0.1          # routing grid
+    native_via_cost: int = 50             # in grid cells of straight track
+    native_allow_vias: bool = True
+    native_retry: bool = True             # second pass over failed connections
+    native_max_expansions_k: int = 400    # A* search budget per connection, thousands
+    skip_nets: str = ""                   # comma-separated names or patterns, e.g. GND,+3V3,*_PLANE
+    native_track_mode: str = "netclass"   # netclass | current | fixed
+    native_track_width: int = 0           # nm, for fixed
+    native_via_mode: str = "netclass"     # netclass | current | fixed
+    native_via_diameter: int = 0          # nm, for fixed
+    native_via_drill: int = 0
     max_passes: int = 100                 # 0 = unlimited (Freerouting's own default)
     optimizer_threads: int = 0            # 0 = Freerouting's default (cores - 1); -1 = no optimizer
     improvement_threshold: float = 2.5    # optimizer stop threshold, percent

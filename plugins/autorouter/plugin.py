@@ -19,6 +19,17 @@ def _pcb_frame():
     return None
 
 
+def _dev_reload():
+    """With a .devreload file next to this module, drop the plugin's submodules
+    so the next import picks up edited sources without restarting KiCad
+    (Tools > External Plugins > Refresh Plugins only reloads the package)."""
+    if not (Path(__file__).parent / ".devreload").exists():
+        return
+    import sys
+    for name in [m for m in sys.modules if m.startswith("autorouter.") and m != "autorouter.plugin"]:
+        del sys.modules[name]
+
+
 class AutorouterPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "Autorouter"
@@ -31,6 +42,7 @@ class AutorouterPlugin(pcbnew.ActionPlugin):
 
     def Run(self):
         try:
+            _dev_reload()
             board = pcbnew.GetBoard()
             if board is None:
                 wx.MessageBox("Open a board first.", "Autorouter", wx.ICON_ERROR)
