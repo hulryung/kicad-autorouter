@@ -57,8 +57,8 @@ def main(argv):
             options.scope, options.scope_refs = SCOPE_SELECTION, args.pop(0).split(",")
         elif a == "--track":
             v = args.pop(0)
-            options.track_mode = SIZE_CURRENT if v == "current" else SIZE_FIXED
-            options.track_width = 0 if v == "current" else int(v)
+            options.track_mode = SIZE_CURRENT if v == "current" else ("auto" if v == "auto" else SIZE_FIXED)
+            options.track_width = int(v) if v not in ("current", "auto") else 0
         elif a == "--turn":
             options.turn_cost = int(args.pop(0))
         elif a == "--via-cost":

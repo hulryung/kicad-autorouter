@@ -399,6 +399,71 @@ class Router:
         self._commit(conn, cells, on_path)
         return True
 
+    # ---- fanout vias ------------------------------------------------------
+
+    def _fanout_via(self, code: int, cell: int) -> Optional[RoutedPath]:
+        """A stub from the pad through its exit cell to a via that ties the
+        pad to the net's plane: straight out along the escape first, else the
+        nearest spot within 1.5 mm where the barrel and the run to it fit."""
+        p, grid = self.p, self.grid
+        net = p.nets[code]
+        own = p.owners[net.rules.key]
+        ex, ey, px, py, stub_w = net.endpoints[cell]
+        layer, ecx, ecy = grid.unpack(cell)
+        gx, gy = grid.nm_x(ecx), grid.nm_y(ecy)
+        reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / grid.pitch))) + 1
+        dx, dy = gx - px, gy - py
+        norm = math.hypot(dx, dy) or 1.0
+        step = (dx / norm, dy / norm)
+
+        def fits(vx: int, vy: int) -> bool:
+            if not grid.inside(vx, vy) or p.via_block[vy * grid.w + vx]:
+                return False
+            for ddx in range(-reach, reach + 1):
+                for ddy in range(-reach, reach + 1):
+                    if ddx * ddx + ddy * ddy > reach * reach:
+                        continue
+                    if not grid.inside(vx + ddx, vy + ddy):
+                        return False
+                    for li in range(grid.layers):
+                        if own[grid.index(li, vx + ddx, vy + ddy)] not in (0, code):
+                            return False
+            for i in grid.segment_cells(layer, gx, gy, grid.nm_x(vx), grid.nm_y(vy), grid.pitch // 2):
+                if own[i] not in (0, code):
+                    return False
+            return True
+
+        candidates = [(ecx + int(round(step[0] * k)), ecy + int(round(step[1] * k))) for k in range(0, 6)]
+        radius = max(2, int(1_500_000 / grid.pitch))
+        ring = sorted(((ddx * ddx + ddy * ddy, ecx + ddx, ecy + ddy)
+                       for ddx in range(-radius, radius + 1) for ddy in range(-radius, radius + 1)
+                       if 0 < ddx * ddx + ddy * ddy <= radius * radius))
+        candidates += [(x, y) for _, x, y in ring]
+        seen = set()
+        for vx, vy in candidates:
+            if (vx, vy) in seen:
+                continue
+            seen.add((vx, vy))
+            if fits(vx, vy):
+                break
+        else:
+            return None
+        vxn, vyn = grid.nm_x(vx), grid.nm_y(vy)
+        segments = []
+        if (ex, ey) != (px, py) and (ex, ey) != (gx, gy):
+            segments += [(layer, px, py, ex, ey, stub_w), (layer, ex, ey, gx, gy, stub_w)]
+        else:
+            segments.append((layer, px, py, gx, gy, stub_w))
+        if (vxn, vyn) != (gx, gy):
+            segments.append((layer, gx, gy, vxn, vyn, stub_w))
+        rp = RoutedPath(code, net.rules.width, _merge_collinear(segments), [(vxn, vyn)],
+                        net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid)
+        self.next_pid += 1
+        fake = Connection(code, 0, 0, 0)
+        path = _Path(rp.pid, fake, rp, [cell])
+        self._claim(path)                       # vias and stubs become obstacles for later fanouts
+        return rp
+
     # ---- the whole run --------------------------------------------------
 
     def run(self, progress: Optional[ProgressFn] = None, on_path: Optional[PathFn] = None,
@@ -418,13 +483,6 @@ class Router:
 
         def stop():
             return bool(cancelled and cancelled())
-
-        # 0. fanout vias planned while reading the board
-        for rp in self.p.prepaths:
-            rp.pid = self.next_pid
-            self.next_pid += 1
-            if on_path:
-                on_path(rp)
 
         # 1. plain pass
         for conn in queue:
@@ -479,11 +537,21 @@ class Router:
                 report(self.p.nets[conn.net].name)
             failed = still
 
+        # 4. fanout vias for pour nets, in whatever room is left
+        fanout_paths: List[RoutedPath] = []
+        if not stop():
+            for code, cell in self.p.fanout:
+                rp = self._fanout_via(code, cell)
+                if rp is not None:
+                    fanout_paths.append(rp)
+                    if on_path:
+                        on_path(rp)
+
         result.cancelled = stop()
         result.failed = [c for c in failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
-        result.paths = list(self.p.prepaths) + [self.paths[pid].path for pid in sorted(self.paths)]
+        result.paths = [self.paths[pid].path for pid in sorted(self.paths)] + fanout_paths
         result.routed = len(self.paths)
-        result.fanout = len(self.p.prepaths)
+        result.fanout = len(fanout_paths)
         result.seconds = time.time() - started
         return result
 

@@ -72,7 +72,9 @@ class RoutedPath:
 
 
 SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS = "board", "selection", "sheets"
-SIZE_NETCLASS, SIZE_CURRENT, SIZE_FIXED = "netclass", "current", "fixed"
+SIZE_AUTO, SIZE_NETCLASS, SIZE_CURRENT, SIZE_FIXED = "auto", "netclass", "current", "fixed"
+POWER_PATTERNS = ["+*", "V*", "*VCC*", "*VDD*", "*VBUS*", "*VIN*", "*VOUT*", "*3V3*", "*5V*", "*12V*", "*24V*",
+                  "*PWR*", "*POWER*", "*VBAT*", "GND*", "*GND"]
 
 
 @dataclass
@@ -89,7 +91,9 @@ class NativeOptions:
     # the editor's current track/via selection, or one fixed size (nm).
     neck_down: bool = True          # narrower escape stubs at fine-pitch pads
     fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
-    track_mode: str = SIZE_NETCLASS
+    fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
+    track_mode: str = SIZE_AUTO
+    power_patterns: List[str] = field(default_factory=lambda: list(POWER_PATTERNS))
     track_width: int = 0
     via_mode: str = SIZE_NETCLASS
     via_diameter: int = 0
@@ -118,7 +122,7 @@ class RoutingProblem:
     connections: List[Connection]
     options: NativeOptions
     stats: Dict[str, float] = field(default_factory=dict)
-    prepaths: List[RoutedPath] = field(default_factory=list)   # fanout vias, placed before routing
+    fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum
     max_via_drill: int = 0                        # nm, the largest via drill any net uses
     safety: int = 0                               # nm added to every obstacle radius

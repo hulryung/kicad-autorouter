@@ -19,7 +19,7 @@ from .engine.freerouting import (ENGINE_BUILTIN, ENGINE_FREEROUTING, RELEASE, Ro
                                  SELECTION_STRATEGIES, UPDATE_STRATEGIES)
 from .engine.native import apply as native_apply, extract as native_extract, router as native_router
 from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
-                                    SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
+                                    SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
 from .engine.paths import data_dir
 from .engine.progress import ProgressParser
 from .engine.runner import EngineRun
@@ -149,7 +149,8 @@ class AutorouterDialog(wx.Dialog):
         mm = lambda nm: f"{nm / 1e6:g} mm"
         cur_w = self.sizes["current_track_width"]
         cur_v = self.sizes["current_via"]
-        self.track_choices = [(SIZE_NETCLASS, 0, "Net class width (per net)"),
+        self.track_choices = [(SIZE_AUTO, 0, "Automatic: net class, existing tracks, pad width for power nets"),
+                              (SIZE_NETCLASS, 0, "Net class width (per net)"),
                               (SIZE_CURRENT, 0, f"Editor's current track width ({mm(cur_w)})")]
         self.track_choices += [(SIZE_FIXED, w, f"Pre-defined {mm(w)}") for w in self.sizes["track_widths"]]
         self.track_size = row("Track width", wx.Choice(page, choices=[c[2] for c in self.track_choices]),
@@ -527,7 +528,7 @@ class AutorouterDialog(wx.Dialog):
                          f"{native.pitch_mm:g} mm, {stats['nets']} nets, {stats['connections']} of "
                          f"{stats['all_connections']} connections in scope, {stats.get('fanout_vias', 0)} fanout vias, "
                          f"read in {stats['extract_seconds']:.1f}s")
-        if not problem.connections and not problem.prepaths:
+        if not problem.connections and not problem.fanout:
             self._set_busy(False)
             self._show_progress("Nothing to route in this scope: every connection is done or skipped.", 1.0)
             return

@@ -55,7 +55,7 @@ class RouteOptions:
     native_fanout_vias: bool = True       # vias from pads of pour nets (GND, power) to their planes
     native_max_expansions_k: int = 400    # A* search budget per connection, thousands
     skip_nets: str = ""                   # comma-separated names or patterns, e.g. GND,+3V3,*_PLANE
-    native_track_mode: str = "netclass"   # netclass | current | fixed
+    native_track_mode: str = "auto"       # auto | netclass | current | fixed
     native_track_width: int = 0           # nm, for fixed
     native_via_mode: str = "netclass"     # netclass | current | fixed
     native_via_diameter: int = 0          # nm, for fixed
