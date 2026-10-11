@@ -17,7 +17,8 @@ from . import __version__
 from .engine import freerouting, java, session
 from .engine.freerouting import (ENGINE_BUILTIN, ENGINE_FREEROUTING, RELEASE, RouteOptions,
                                  SELECTION_STRATEGIES, UPDATE_STRATEGIES)
-from .engine.native import apply as native_apply, extract as native_extract, router as native_router
+from .engine.native import (apply as native_apply, extract as native_extract, pipeline as native_pipeline,
+                            router as native_router)
 from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless
 from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                                     SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
@@ -419,6 +420,23 @@ class AutorouterDialog(wx.Dialog):
             result = native_router.run(problem, progress=progress, on_path=on_path,
                                        cancelled=lambda: self._cancel,
                                        on_remove=lambda pid: self._remove_native_path(pid))
+            escalated = 0
+            if result.failed and not self._cancel and spec.get("options", {}).get("escalate", True):
+                failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
+                fine = native_pipeline.fine_options(o, failed_nets, self.board)
+                try:
+                    problem2 = native_extract.extract(self.board, fine, status=self._status_now)
+                except Exception:
+                    problem2 = None
+                if problem2 is not None and problem2.connections:
+                    self._native_layers = problem2.layers
+                    result2 = native_router.run(problem2, progress=progress, on_path=on_path,
+                                                cancelled=lambda: self._cancel,
+                                                on_remove=lambda pid: self._remove_native_path(pid))
+                    escalated = result2.routed
+                    result.routed += result2.routed
+                    result.failed = result2.failed
+                    problem = problem2
             self._refill_if_wanted()
             pcbnew.Refresh()
             try:
@@ -430,10 +448,11 @@ class AutorouterDialog(wx.Dialog):
                        "connections_in_scope": problem.stats["connections"], "routed": result.routed,
                        "failed": failed, "ripped_up": result.ripped, "fanout_vias": result.fanout,
                        "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
-                       "failed_detail": getattr(result, "failed_detail", []),
+                       "failed_detail": getattr(result, "failed_detail", []), "escalated": escalated,
                        "unconnected_after": self.board.GetConnectivity().GetUnconnectedCount(True)}
-            outcome["summary"] = (f"{result.routed} routed, {len(failed)} failed, {result.fanout} fanout vias, "
-                                  f"{result.stitched} stitching vias; {outcome['unconnected_after']} unconnected left")
+            outcome["summary"] = (f"{result.routed} routed ({escalated} on the finer second pass), {len(failed)} failed, "
+                                  f"{result.fanout} fanout vias, {result.stitched} stitching vias; "
+                                  f"{outcome['unconnected_after']} unconnected left")
             return outcome
 
         def poll():
@@ -733,6 +752,21 @@ class AutorouterDialog(wx.Dialog):
             try:
                 result = native_router.run(problem, progress=progress, on_path=on_path,
                                            cancelled=lambda: self._cancel, on_remove=on_remove)
+                # a finer second pass on what is still open, as a designer would
+                # do by hand for the last stubborn connections
+                if result.failed and not result.cancelled and not self._cancel:
+                    failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
+                    fine = native_pipeline.fine_options(native, failed_nets, self.board)
+                    problem2 = self._on_main(lambda: native_extract.extract(self.board, fine, status=self._status_now))
+                    if problem2 is not None and problem2.connections:
+                        self._native_layers = problem2.layers
+                        result2 = native_router.run(problem2, progress=progress, on_path=on_path,
+                                                    cancelled=lambda: self._cancel, on_remove=on_remove)
+                        result.escalated = result2.routed
+                        result.routed += result2.routed
+                        result.failed = result2.failed
+                        result.failed_nets = sorted({problem2.nets[c.net].name for c in result2.failed})
+                        result.seconds += result2.seconds
             except Exception as e:
                 logger.exception("Routing failed")
                 wx.CallAfter(self._native_done, None, e)
@@ -740,6 +774,23 @@ class AutorouterDialog(wx.Dialog):
             wx.CallAfter(self._native_done, result, None)
 
         threading.Thread(target=work, name="autorouter-native", daemon=True).start()
+
+    def _on_main(self, fn):
+        """Run fn on the UI thread (pcbnew calls) and wait for its result."""
+        done = threading.Event()
+        box = {}
+
+        def call():
+            try:
+                box["value"] = fn()
+            except Exception as e:
+                logger.exception("Main-thread call failed")
+                box["error"] = e
+            done.set()
+
+        wx.CallAfter(call)
+        done.wait()
+        return box.get("value")
 
     def _remove_native_path(self, pid):
         """Rip-up: take a path's tracks and vias off the board again."""
@@ -773,8 +824,10 @@ class AutorouterDialog(wx.Dialog):
             text = f"Cancelled after {result.routed} connections; they stay on the board (Ctrl+Z removes them)."
             self._show_progress(text, 0.0)
             return
-        failed = sorted({self.board.FindNet(c.net).GetNetname() for c in result.failed})
+        failed = getattr(result, "failed_nets", None) or sorted({self.board.FindNet(c.net).GetNetname() for c in result.failed})
         text = f"Done: {result.routed} connections routed in {result.seconds:.0f}s"
+        if getattr(result, "escalated", 0):
+            text += f" ({result.escalated} on the finer second pass)"
         if getattr(result, "fanout", 0):
             text += f", {result.fanout} fanout vias"
         if getattr(result, "pairs", 0):

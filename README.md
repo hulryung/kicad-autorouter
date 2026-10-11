@@ -104,7 +104,7 @@ Benchmark figures for that board (GND nets excluded), from
 
 | | Original | Built-in router |
 |---|---|---|
-| Open signal connections | 0 | 3 of 104 |
+| Open signal connections | 0 | 1 of 104 (after the finer second pass) |
 | DRC violations | 0 | 0 |
 | Track segments | 353 | 469 |
 | Track length | 764 mm | 901 mm |
@@ -175,6 +175,10 @@ obstacle.
    at a penalty, those paths are removed, the connection is routed, and the
    removed ones are rerouted. Zig-zag runs are straightened into one straight
    and one diagonal piece. Differential pairs go first, as one coupled route.
+   Connections still open after that get a **second pass** on their own: half
+   the grid pitch, the board's narrowest pre-defined width, cheaper vias, in a
+   run scoped to just those nets, the way a designer finishes the last
+   stubborn connections by hand.
 3. **Finish**: pads of unrouted pour nets get **fanout vias** to their planes,
    pours spanning two or more layers get **stitching vias** on a grid, both
    only where a via still fits; copper zones are refilled.

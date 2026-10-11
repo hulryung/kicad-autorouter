@@ -112,6 +112,18 @@ def main(argv):
     for conn in result.failed[:20]:
         print("   failed:", problem.nets[conn.net].name)
     items = apply.add_paths(board, problem.layers, result.paths)
+    # the second pass of the pipeline on what is still open (finer grid, neck width)
+    if result.failed and "--no-escalate" not in sys.argv:
+        from autorouter.engine.native import pipeline
+        failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
+        fine = pipeline.copy.deepcopy(options)
+        fine.scope, fine.scope_nets = "selection", failed_nets
+        job = pipeline.run_job(board, fine, escalate=True, apply_paths=True,
+                               status=lambda s: print("  ", s))
+        # run_job routes the open nets at the normal pitch again first; what
+        # matters here is the escalation result
+        print(f"escalation: {job.escalated} saved on pass 2, still open: {job.failed}")
+        items += job.routed
     from autorouter.engine import session
     print(f"refilled {session.refill_zones(board)} zones")
     target = out / board_file.name

@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "Autorouter",
   "description": "Autoroute the open board with Freerouting without leaving the PCB editor",
-  "description_full": "One toolbar button runs the Freerouting autorouter on the open board: the board is exported to Specctra DSN, Freerouting 2.5 runs headless in the background with live pass-by-pass progress, and the routed session is imported back as a single undoable step. Choose passes, via costs, optimizer strategy, routable layers, preferred directions and net classes to skip. The engine and a Java runtime are downloaded into the plugin's data folder on first use; nothing is installed system-wide. For KiCad 9 and 10.",
+  "description_full": "One toolbar button routes the open board inside KiCad. The built-in router works on KiCad's own board model through the PCB API: pad-axis escapes, neck-down at fine pitch, rip-up and reroute, coupled differential pairs, automatic track widths, fanout and stitching vias for ground and power pours, a finer second pass for stubborn connections, zone refill, routing by selection or schematic sheet, live display and one undo step. Freerouting 2.5 is available as an external engine. An AI assistant hands the board to the OpenAI Codex CLI and carries out its routing and editing actions with DRC feedback and rollback. For KiCad 9 and 10.",
   "identifier": "com.github.hulryung.kicad-autorouter",
   "type": "plugin",
   "author": {
@@ -16,10 +16,15 @@
     "homepage": "https://github.com/hulryung/kicad-autorouter",
     "repository": "https://github.com/hulryung/kicad-autorouter"
   },
-  "tags": ["autorouter", "freerouting", "routing", "specctra"],
+  "tags": [
+    "autorouter",
+    "freerouting",
+    "routing",
+    "specctra"
+  ],
   "versions": [
     {
-      "version": "0.1.0",
+      "version": "0.2.0",
       "status": "testing",
       "kicad_version": "9.0",
       "kicad_version_max": "10.99"

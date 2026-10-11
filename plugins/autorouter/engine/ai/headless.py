@@ -63,33 +63,32 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
         if spec.get("options", {}).get("remove_existing"):
             from .. import session
             session.remove_tracks(board)
+        from ..native import pipeline
         try:
-            problem = native_extract.extract(board, o)
+            job = pipeline.run_job(board, o, on_path=on_path, apply_paths=on_path is None,
+                                   escalate=spec.get("options", {}).get("escalate", True))
         except Exception as e:
             return {"error": f"could not read the board: {e}"}
-        result = native_router.run(problem, on_path=on_path)
-        if on_path is None:
-            native_apply.add_paths(board, problem.layers, result.paths)
         from .. import session
         try:
             session.refill_zones(board)
         except Exception:
             pass
-        failed = sorted({problem.nets[c.net].name for c in result.failed})
         try:
             board.BuildConnectivity()             # the count below is stale otherwise
         except Exception:
             pass
         outcome = {"error": None, "scope": spec.get("scope", "board"),
-                   "connections_in_scope": problem.stats["connections"],
-                   "routed": result.routed, "failed": failed, "ripped_up": result.ripped,
-                   "fanout_vias": result.fanout, "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
-                   "seconds": round(result.seconds, 1),
-                   "pair_log": [list(x) for x in getattr(result, "pair_log", [])],
-                   "failed_detail": getattr(result, "failed_detail", []),
+                   "connections_in_scope": job.stats.get("connections"),
+                   "routed": job.routed, "failed": job.failed, "ripped_up": job.ripped,
+                   "fanout_vias": job.fanout, "coupled_pairs": job.pairs, "stitching_vias": job.stitched,
+                   "escalated": job.escalated, "passes": job.passes, "seconds": round(job.seconds, 1),
+                   "pair_log": [list(x) for x in job.pair_log],
+                   "failed_detail": job.failed_detail,
                    "unconnected_after": board.GetConnectivity().GetUnconnectedCount(True)}
-        outcome["summary"] = (f"{result.routed} routed, {len(failed)} failed, {result.fanout} fanout vias, "
-                              f"{result.stitched} stitching vias; {outcome['unconnected_after']} unconnected left")
+        outcome["summary"] = (f"{job.routed} routed ({job.escalated} on the finer second pass), "
+                              f"{len(job.failed)} failed, {job.fanout} fanout vias, "
+                              f"{job.stitched} stitching vias; {outcome['unconnected_after']} unconnected left")
         if log:
             log("[ai] " + outcome["summary"])
         return outcome
