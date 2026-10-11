@@ -113,9 +113,15 @@ obstacle, and existing tracks of other nets are respected.
    larger budget and cheaper vias.
    - **Pad escapes**: SMD pads are left along the pad's long axis, from the
      pad centre to an exit point just past the pad end, the way a hand-routed
-     escape does; the grid search starts and ends at that exit. At fine-pitch
-     pads (neighbours closer than width + 2 x clearance) the escape is necked
-     down to the board's narrowest pre-defined track width, as designers do.
+     escape does; the grid search starts and ends at that exit. Each escape
+     lane is checked with KiCad's own shape collision tests against the
+     copper around it, and lanes are kept clear of each other.
+   - **Fine pitch**: connections that end on fine-pitch pins (neighbours
+     closer than width + 2 x clearance) are routed first, while there is
+     room, and at the board's narrowest pre-defined track width for their
+     whole length, as designers do; everything else keeps its net-class width.
+   - **Straightening**: zig-zag runs the grid search leaves behind become one
+     straight and one diagonal piece when the cells are free.
    - Obstacles carry a 10 µm safety margin so diagonal cell steps never land
      inside the clearance.
 3. **Apply** (PCB API, main thread): each path becomes `PCB_TRACK` segments and
@@ -129,9 +135,13 @@ around the new tracks, so pour nets are best left to the pour: list them under
 *Nets to leave unrouted*), and the grid is uniform, so very fine-pitch parts
 want a smaller pitch (slower).
 
-Measured on a finished 4-layer board (71 footprints, 75 nets, DRC clean) with
-all tracks removed and the pour nets skipped: 76 of 78 connections rerouted,
-0 DRC violations, total track length within 5% of the original artwork.
+Benchmark: a finished 4-layer board (71 footprints, 75 nets, DRC clean) with
+all tracks removed and only the GND pours left to the zones. The built-in
+router reconnects 102 of 104 connections with 0 DRC violations. Against the
+original artwork it uses fewer vias (31 vs 46) but about 28% more track length
+and many more short segments, so the result is correct rather than pretty;
+`tests/test_native_e2e.py` prints these figures (`artwork:` line) for any
+board, which is how the router is tuned.
 
 ### Data folder
 
