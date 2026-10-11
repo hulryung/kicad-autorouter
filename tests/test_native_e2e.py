@@ -97,7 +97,10 @@ def main(argv):
 
     result = router.run(problem, progress=progress)
     print(f"route: {result.routed} routed, {len(result.failed)} failed, {result.ripped} ripped up, "
-          f"{result.fanout} fanout vias in {result.seconds:.1f}s")
+          f"{result.fanout} fanout vias, {result.pairs} coupled pairs in {result.seconds:.1f}s")
+    pairs = {n.name: problem.nets[n.partner].name for n in problem.nets.values() if n.partner}
+    print("pairs:", pairs, "paired connections:", sum(1 for c in problem.connections if c.pair),
+          "pair log:", getattr(result, "pair_log", []))
     import math
     from collections import Counter
     segs = [s for p in result.paths for s in p.segments]

@@ -110,3 +110,45 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def pair_case():
+    """Two nets side by side, 0.5 mm apart, from x=5 to x=50 on one layer:
+    routed as a coupled pair they must end up as two parallel tracks a
+    pair-gap apart, each starting and ending at its own exit."""
+    from autorouter.engine.native.problem import NetInfo as NI
+    p = make_problem(layers=1, w=60, h=40, via_cost=20)
+    grid = p.grid
+    gap = 250_000
+    width = 200_000
+    rules = NetRules(width=width, clearance=200_000, via_diameter=600_000, via_drill=300_000)
+    p.owners[(2 * width + gap, rules.clearance)] = grid.new_owner_map()
+    p.owners[rules.key] = p.owners.pop(RULES.key)
+    for code, y in ((1, 18), (2, 23)):
+        net = NI(code, f"N{code}", rules, partner=3 - code, pair_gap=gap)
+        for cx in (5, 50):
+            idx = grid.index(0, cx, y)
+            cl = Cluster(cells={idx}, anchors=[(cx, y)], refs={f"J{cx}"})
+            net.clusters.append(cl)
+            # exits point outward along +x / -x from a pad two cells further out
+            px = grid.nm_x(cx - 2) if cx == 5 else grid.nm_x(cx + 2)
+            net.endpoints[idx] = (grid.nm_x(cx), grid.nm_y(y), px, grid.nm_y(y), width)
+            for own in p.owners.values():
+                grid.mark(own, [idx], code)
+        p.nets[code] = net
+        p.connections.append(Connection(code, 0, 1, 45, 0, width, pair=1))
+    r = router.run(p)
+    assert r.pairs == 1, (r.pairs, getattr(r, "pair_log", None))
+    assert r.routed == 2 and not r.failed
+    # the coupled run: horizontal segments of both nets exactly a pair-gap apart
+    runs = {path.net: [s for s in path.segments if s[2] == s[4] and abs(s[3] - s[1]) >= 10 * PITCH]
+            for path in r.paths}
+    coupled = [(a, b) for a in runs[1] for b in runs[2] if abs(a[2] - b[2]) == width + gap]
+    assert coupled, runs
+    a, b = coupled[0]
+    assert abs(a[3] - a[1]) >= 25 * PITCH, ("coupling should start close to the pins", a)
+    print("test_native_grid: pair ok")
+
+
+if __name__ == "__main__":
+    pair_case()

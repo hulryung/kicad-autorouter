@@ -27,7 +27,8 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           sources: Iterable[int], goals: Set[int], anchors: Sequence[Tuple[int, int]],
           horizontal: Sequence[bool], via_cost: int, allow_vias: bool, via_reach: int,
           max_expansions: int, turn_cost: int = 2,
-          cancelled=None, routed=None, rippable=None, rip_penalty: int = 0) -> Optional[List[int]]:
+          cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
+          also_ok: int = 0, source_costs=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -53,7 +54,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
 
     def passable(idx: int) -> bool:
         o = owners[idx]
-        if o == 0 or o == net or idx in goals:
+        if o == 0 or o == net or o == also_ok or idx in goals:
             return True
         if soft:
             pid = routed[idx]
@@ -83,7 +84,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
             off = py * w + px
             for layer in range(nlayers):
                 o = owners[layer * plane + off]
-                if o != 0 and o != net:
+                if o != 0 and o != net and o != also_ok:
                     if soft and routed[layer * plane + off] != 0 and rippable(routed[layer * plane + off]):
                         continue
                     return False
@@ -93,9 +94,10 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
     came: Dict[int, Tuple[int, int]] = {}      # idx -> (prev idx, move id)
     heap = []
     for s in sources:
-        g[s] = 0
+        g0 = source_costs.get(s, 0) if source_costs else 0
+        g[s] = g0
         came[s] = (-1, -1)
-        heapq.heappush(heap, (h(s), 0, s, -1))
+        heapq.heappush(heap, (g0 + h(s), g0, s, -1))
     closed: Set[int] = set()
     expansions = 0
 

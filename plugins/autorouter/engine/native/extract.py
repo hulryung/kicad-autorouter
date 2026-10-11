@@ -180,6 +180,24 @@ def pad_escape(pad, fp, rules: NetRules, pitch: int,
     return [(ex, ey) for _, ex, ey in options]
 
 
+PAIR_SUFFIXES = (("+", "-"), ("_P", "_N"), ("_p", "_n"), ("DP", "DN"), ("D+", "D-"), ("P", "N"))
+
+
+def pair_partner(name: str, names: Set[str]) -> Optional[str]:
+    """The other net of a differential pair, found by the usual name
+    conventions (USB_DP/USB_DN, TX+/TX-, RX_P/RX_N, D+/D-); None if none."""
+    for a, b in PAIR_SUFFIXES:
+        for first, second in ((a, b), (b, a)):
+            if name.endswith(first) and len(name) > len(first):
+                base = name[:-len(first)]
+                if first in ("P", "N") and (not base or base[-1].isalpha() and base[-1] not in "DXR"):
+                    continue                     # STOP/STON are not a pair
+                other = base + second
+                if other in names and other != name:
+                    return other
+    return None
+
+
 def footprint_of(pad):
     parent = pad.GetParentFootprint()
     if parent is None:
@@ -303,11 +321,34 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if skipped and not (options.fanout_vias and code in zone_layers):
             continue
         nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options, hints), route=not skipped)
+    # Differential pairs: both nets take the net class's pair width and gap
+    # (the designer's impedance choice in Board Setup) and are routed together.
+    ds = board.GetDesignSettings()
+    if options.diff_pairs:
+        by_name = {n.name: n for n in nets.values() if n.route}
+        for n in list(by_name.values()):
+            if n.partner:
+                continue
+            other = pair_partner(n.name, set(by_name))
+            if other is None or by_name[other].partner:
+                continue
+            m = by_name[other]
+            nc = ds.m_NetSettings.GetEffectiveNetClass(n.name)
+            width = nc.GetDiffPairWidth() if nc.GetDiffPairWidth() > 0 else n.rules.width
+            gap = max(nc.GetDiffPairGap(), n.rules.clearance)
+            for a, b in ((n, m), (m, n)):
+                a.partner = b.code
+                a.pair_gap = gap
+                a.rules = NetRules(max(width, ds.m_TrackMinWidth), a.rules.clearance,
+                                   a.rules.via_diameter, a.rules.via_drill)
     # Connections that end on fine-pitch pins are routed at the board's
     # narrowest pre-defined width (the neck width), as a designer would, so
     # the escapes and the tracks between the pins have room. Those widths
     # need owner maps of their own.
     keys = {n.rules.key for n in nets.values()}
+    for n in nets.values():
+        if n.partner:
+            keys.add((2 * n.rules.width + n.pair_gap, n.rules.clearance))
     if options.neck_down:
         for n in nets.values():
             narrow = neck_width(board, n.rules)
@@ -694,13 +735,35 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             j = min(best_edge, key=lambda x: best_edge[x][0])
             d, i = best_edge.pop(j)
             tight = net.clusters[i].tight or net.clusters[j].tight
-            width = neck_width(board, net.rules) if (tight and options.neck_down) else net.rules.width
+            width = neck_width(board, net.rules) if (tight and options.neck_down and not net.partner) else net.rules.width
             connections.append(Connection(code, i, j, d, 0 if tight else 1, width))
             in_tree.add(j)
             for m in list(best_edge):
                 dm = dist(net.clusters[j], net.clusters[m])
                 if dm < best_edge[m][0]:
                     best_edge[m] = (dm, j)
+
+    # Pair up the two connections of a differential pair that join the same
+    # two footprints; the router treats such a pair as one coupled route.
+    pair_id = 0
+    for conn_a in connections:
+        net_a = nets[conn_a.net]
+        if not net_a.partner or conn_a.pair:
+            continue
+        refs_a1 = net_a.clusters[conn_a.a].refs
+        refs_a2 = net_a.clusters[conn_a.b].refs
+        for conn_b in connections:
+            if conn_b.net != net_a.partner or conn_b.pair:
+                continue
+            net_b = nets[conn_b.net]
+            refs_b1 = net_b.clusters[conn_b.a].refs
+            refs_b2 = net_b.clusters[conn_b.b].refs
+            if (refs_a1 & refs_b1 and refs_a2 & refs_b2) or (refs_a1 & refs_b2 and refs_a2 & refs_b1):
+                pair_id += 1
+                conn_a.pair = conn_b.pair = pair_id
+                conn_a.width = conn_b.width = net_a.rules.width
+                conn_a.priority = conn_b.priority = 0          # pairs first, they need the room
+                break
 
     all_connections = len(connections)
     connections = in_scope(board, nets, connections, options)

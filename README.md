@@ -69,10 +69,22 @@ do:
   hole clearance, hole-to-hole) are enforced on top.
 - **Per-item clearances**: pads and tracks with local clearance overrides are
   kept at that distance.
+- **Automatic track width** (the default): an explicit net class wins; else
+  the width the net's existing tracks already use; else, for power nets
+  (names like `+3V3`, `VBUS`, `VCC*`, `*_PWR`), the widest pre-defined width
+  that still fits the net's narrowest pad; else the net class width.
 - **Pre-defined sizes and the editor's selection**: the *Track width* and
-  *Via size* choices in the dialog list the board's pre-defined sizes and the
-  editor's current toolbar choice, so a run can use "0.2 mm everywhere" or
-  "what I have selected right now" instead of the net classes.
+  *Via size* choices in the dialog also list the board's pre-defined sizes and
+  the editor's current toolbar choice, so a run can use "0.2 mm everywhere" or
+  "what I have selected right now" instead.
+- **Differential pairs**: nets paired by name (`D+/D-`, `TX_P/TX_N`,
+  `USB_DP/USB_DN`) take the pair width and gap of their net class, which is
+  where KiCad keeps the impedance choice (Board Setup > Net Classes), and are
+  routed coupled: one search for the pair's centreline, then the two tracks a
+  gap apart, each joined to its own pad with a straight run and a 45-degree
+  step. Pairs whose ends are closer than 3 mm, whose pins would force a
+  crossing, or whose halves would pinch are routed separately and the log
+  says why.
 
 Not read yet: custom DRC rules (`.kicad_dru`) that set track width or via size
 per condition (their clearances are honoured through the per-item clearance),

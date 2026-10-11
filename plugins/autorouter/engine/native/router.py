@@ -38,16 +38,73 @@ class RouteResult:
         self.paths: List[RoutedPath] = []
         self.ripped = 0
         self.fanout = 0
+        self.pairs = 0
         self.seconds = 0.0
         self.cancelled = False
 
 
 class _Path:
     """A routed connection and everything needed to undo it."""
-    def __init__(self, pid: int, conn: Connection, path: RoutedPath, cells: List[int]):
+    def __init__(self, pid: int, conn: Connection, path: RoutedPath, cells: List[int], paired: bool = False):
         self.pid, self.conn, self.path, self.cells = pid, conn, path, cells
         self.claims: Dict[Tuple[int, int], List[int]] = {}      # owner-map key -> claimed cells
         self.via_cells: List[int] = []
+        self.paired = paired                                   # half of a coupled pair: never ripped up
+
+
+def _segment_distance(a, b) -> float:
+    """Shortest distance between two segments (x1, y1, x2, y2)."""
+    def seg_point(x1, y1, x2, y2, px, py):
+        dx, dy = x2 - x1, y2 - y1
+        l2 = dx * dx + dy * dy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+        return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+    def cross(ox, oy, ax, ay, bx, by):
+        return (ax - ox) * (by - oy) - (ay - oy) * (bx - ox)
+
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    d1 = cross(ax1, ay1, ax2, ay2, bx1, by1)
+    d2 = cross(ax1, ay1, ax2, ay2, bx2, by2)
+    d3 = cross(bx1, by1, bx2, by2, ax1, ay1)
+    d4 = cross(bx1, by1, bx2, by2, ax2, ay2)
+    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 and d2 and d3 and d4:
+        return 0.0
+    return min(seg_point(ax1, ay1, ax2, ay2, bx1, by1), seg_point(ax1, ay1, ax2, ay2, bx2, by2),
+               seg_point(bx1, by1, bx2, by2, ax1, ay1), seg_point(bx1, by1, bx2, by2, ax2, ay2))
+
+
+def _offset_polyline(points: List[Tuple[int, int]], d: float, side: int) -> List[Tuple[int, int]]:
+    """A polyline shifted sideways by d (mitred corners), to one side."""
+    n = len(points)
+    if n < 2:
+        return list(points)
+    normals = []
+    for i in range(n - 1):
+        ux, uy = points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]
+        length = math.hypot(ux, uy) or 1.0
+        normals.append((-uy / length * side, ux / length * side))
+    out = []
+    for i in range(n):
+        if i == 0:
+            nx, ny = normals[0]
+            scale = d
+        elif i == n - 1:
+            nx, ny = normals[-1]
+            scale = d
+        else:
+            ax, ay = normals[i - 1]
+            bx, by = normals[i]
+            mx, my = ax + bx, ay + by
+            m = math.hypot(mx, my)
+            if m < 1e-9:                                  # a U-turn: fall back to the next normal
+                nx, ny, scale = bx, by, d
+            else:
+                nx, ny = mx / m, my / m
+                scale = d / max(0.3, nx * bx + ny * by)   # mitre, capped for very sharp corners
+        out.append((int(round(points[i][0] + nx * scale)), int(round(points[i][1] + ny * scale))))
+    return out
 
 
 def _two_piece(grid: Grid, a: int, b: int, passable) -> Optional[List[int]]:
@@ -349,7 +406,7 @@ class Router:
 
     def _rippable(self, pid: int, for_conn: Connection) -> bool:
         path = self.paths.get(pid)
-        if path is None:
+        if path is None or path.paired:
             return False
         if path.conn.net == for_conn.net:
             return True                       # own net's copper is never in the way
@@ -389,6 +446,184 @@ class Router:
             self._rebuild_union(code)
         self._rebuild_maps()
         return conns
+
+    # ---- differential pairs ----------------------------------------------
+
+    def _exit_of(self, code: int, cluster: int) -> Optional[int]:
+        """A pad exit cell of a cluster (the cell a route starts from)."""
+        net = self.p.nets[code]
+        cells = net.clusters[cluster].cells
+        for c in cells:
+            if c in net.endpoints:
+                return c
+        return next(iter(cells), None)
+
+    def _try_pair(self, ca: Connection, cb: Connection, via_cost: int, cap: int, on_path, cancelled) -> bool:
+        """Route two connections of a differential pair as one coupled track:
+        a centreline as wide as both tracks and their gap is searched, then
+        split into the two tracks offset to either side, each joined to its
+        own pad exits. Falls back to separate routing when the pair cannot
+        start or end side by side."""
+        p, grid = self.p, self.grid
+        na, nb = p.nets[ca.net], p.nets[cb.net]
+        self.pair_log = getattr(self, 'pair_log', [])
+        if self._find(ca.net, ca.a) == self._find(ca.net, ca.b) or self._find(cb.net, cb.a) == self._find(cb.net, cb.b):
+            self.pair_log.append((na.name, 'already joined'))
+            return False
+        # match the ends: B's clusters that share footprints with A's
+        a1, a2 = na.clusters[ca.a], na.clusters[ca.b]
+        b1, b2 = nb.clusters[cb.a], nb.clusters[cb.b]
+        if not (a1.refs & b1.refs) and (a1.refs & b2.refs):
+            b1, b2 = b2, b1
+            cb_a, cb_b = cb.b, cb.a
+        else:
+            cb_a, cb_b = cb.a, cb.b
+        ea1, ea2 = self._exit_of(ca.net, ca.a), self._exit_of(ca.net, ca.b)
+        eb1, eb2 = self._exit_of(cb.net, cb_a), self._exit_of(cb.net, cb_b)
+        if None in (ea1, ea2, eb1, eb2):
+            self.pair_log.append((na.name, 'no exits'))
+            return False
+        la, xa1, ya1 = grid.unpack(ea1)
+        lb, xb1, yb1 = grid.unpack(eb1)
+        la2, xa2, ya2 = grid.unpack(ea2)
+        lb2, xb2, yb2 = grid.unpack(eb2)
+        if la != lb or la2 != lb2:
+            self.pair_log.append((na.name, 'exits on different layers'))
+            return False
+        w, gap = na.rules.width, na.pair_gap
+        W = 2 * w + gap
+        key = (W, na.rules.clearance)
+        owners = p.owners.get(key)
+        if owners is None:
+            self.pair_log.append((na.name, 'no owner map for pair width'))
+            return False
+        d = (w + gap) / 2.0
+
+        span = math.hypot(xa2 - xa1, ya2 - ya1)          # cells between the two ends
+        if span * grid.pitch < 3_000_000:
+            self.pair_log.append((na.name, 'ends closer than 3 mm: routed separately'))
+            return False
+        walk = max(1, min(int(4_000_000 / grid.pitch), int(span * 0.45)))
+
+        def starts(xa, ya, xb, yb, layer, code, cell):
+            """Midpoint cells between the two exits, walked outward along the
+            escape direction, so the pair can converge after leaving the pins."""
+            ex, ey, px, py, _ = p.nets[code].endpoints.get(cell, (grid.nm_x(xa), grid.nm_y(ya), grid.nm_x(xa), grid.nm_y(ya), 0))
+            dx, dy = grid.nm_x(xa) - px, grid.nm_y(ya) - py
+            norm = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / norm, dy / norm
+            out = []
+            # walk out of the pin field (up to 4 mm, never past the middle);
+            # one or two cells either side too, since the midpoint of two
+            # exits need not be a cell centre. Each cell comes with its k.
+            for k in range(0, walk):
+                for lateral in (0, 1, -1, 2, -2):
+                    mx = int(round((xa + xb) / 2 + ux * k - uy * lateral))
+                    my = int(round((ya + yb) / 2 + uy * k + ux * lateral))
+                    if grid.inside(mx, my):
+                        out.append((k, grid.index(layer, mx, my)))
+            return out
+
+        def usable(cands):
+            return [(k, c) for k, c in cands if owners[c] in (0, ca.net, cb.net)]
+
+        s_list = usable(starts(xa1, ya1, xb1, yb1, la, ca.net, ea1))
+        g_list = usable(starts(xa2, ya2, xb2, yb2, la2, ca.net, ea2))
+        if not s_list or not g_list:
+            self.pair_log.append((na.name, f'no coupled start/goal (starts {len(s_list)}, goals {len(g_list)})'))
+            return False
+        # couple as early as possible: starting further out costs extra, and
+        # only the nearest usable goal rows are offered
+        s_costs = {c: k * astar.STRAIGHT * 3 for k, c in s_list}
+        kmin = min(k for k, _ in g_list)
+        g_cells = {c for k, c in g_list if k <= kmin + 2}
+        s_cells = set(s_costs)
+        anchors = [grid.unpack(c)[1:] for c in list(g_cells)[:1]]
+        cells = astar.route(grid, owners, p.via_block, ca.net, s_cells, g_cells, anchors,
+                            self.horizontal, via_cost, False, 0, cap, self.opts.turn_cost, cancelled,
+                            also_ok=cb.net, source_costs=s_costs)
+        if not cells or len(cells) < 2:
+            self.pair_log.append((na.name, 'no coupled path'))
+            return False
+        own_cells = set(cells)
+        cells = _smooth(grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, ca.net, cb.net))
+        segments, _ = _simplify(grid, cells)
+        if not segments:
+            return False
+        points = [(segments[0][1], segments[0][2])] + [(sg[3], sg[4]) for sg in segments]
+        layer = segments[0][0]
+        # which side of the centreline each net runs on, decided at the start
+        # and checked at the end (a twist would need a crossing)
+        def side_of(px, py, i):
+            ux, uy = points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1]
+            vx, vy = px - points[i][0], py - points[i][1]
+            return 1 if ux * vy - uy * vx > 0 else -1
+        sa = side_of(grid.nm_x(xa1), grid.nm_y(ya1), 0)
+        sa_end = side_of(grid.nm_x(xa2), grid.nm_y(ya2), len(points) - 2)
+        if sa != sa_end:
+            self.pair_log.append((na.name, 'pair would cross'))
+            return False
+        paths = []
+        for net, conn, side, e1, e2, cl_a, cl_b in ((na, ca, sa, ea1, ea2, ca.a, ca.b),
+                                                   (nb, cb, -sa, eb1, eb2, cb_a, cb_b)):
+            poly = _offset_polyline(points, d, side)
+            segs = []
+            for end_cell, at_start in ((e1, True), (e2, False)):
+                ex, ey, px, py, sw = net.endpoints.get(end_cell, (None,) * 5)
+                l_, cx, cy = grid.unpack(end_cell)
+                gx, gy = grid.nm_x(cx), grid.nm_y(cy)
+                entry = []
+                if ex is not None:
+                    if (ex, ey) != (px, py) and (ex, ey) != (gx, gy):
+                        entry += [(layer, px, py, ex, ey, sw), (layer, ex, ey, gx, gy, sw)]
+                    elif (px, py) != (gx, gy):
+                        entry.append((layer, px, py, gx, gy, sw))
+                join_to = poly[0] if at_start else poly[-1]
+                if (gx, gy) != join_to:
+                    # straight on along the escape, then a 45-degree step onto
+                    # the coupled run (a designer's dog-leg, not a long slant)
+                    if ex is not None and (gx, gy) != (px, py):
+                        ux, uy = gx - px, gy - py
+                    else:
+                        ux, uy = join_to[0] - gx, join_to[1] - gy
+                    norm = math.hypot(ux, uy) or 1.0
+                    ux, uy = ux / norm, uy / norm
+                    along = (join_to[0] - gx) * ux + (join_to[1] - gy) * uy
+                    perp = math.hypot((join_to[0] - gx) - along * ux, (join_to[1] - gy) - along * uy)
+                    straight = along - perp
+                    if straight > grid.pitch:
+                        qx, qy = int(round(gx + ux * straight)), int(round(gy + uy * straight))
+                        entry.append((layer, gx, gy, qx, qy, w))
+                        entry.append((layer, qx, qy, join_to[0], join_to[1], w))
+                    else:
+                        entry.append((layer, gx, gy, join_to[0], join_to[1], w))
+                if at_start:
+                    segs = entry + segs
+                else:
+                    segs = segs + [(l, x2, y2, x1, y1, ww) for l, x1, y1, x2, y2, ww in reversed(entry)]
+                if at_start:
+                    segs += [(layer, poly[i][0], poly[i][1], poly[i + 1][0], poly[i + 1][1], w) for i in range(len(poly) - 1)]
+            rp = RoutedPath(net.code, w, _merge_collinear(segs), [], net.rules.via_diameter, net.rules.via_drill,
+                            pid=self.next_pid)
+            self.next_pid += 1
+            paths.append((rp, conn, cl_a, cl_b))
+        # the two halves must keep their clearance from each other everywhere
+        # (joins and mitred corners can pinch); otherwise route them apart
+        need = na.rules.clearance + w
+        for sa_ in paths[0][0].segments:
+            for sb_ in paths[1][0].segments:
+                if _segment_distance(sa_[1:5], sb_[1:5]) < need:
+                    self.pair_log.append((na.name, 'halves would pinch: routed separately'))
+                    self.next_pid -= 2
+                    return False
+        for rp, conn, cl_a, cl_b in paths:
+            path = _Path(rp.pid, conn, rp, cells, paired=True)
+            self.paths[rp.pid] = path
+            self._claim(path)
+            self.parent[conn.net][self._find(conn.net, cl_a)] = self._find(conn.net, cl_b)
+            if on_path:
+                on_path(rp)
+        return True
 
     def _try(self, conn: Connection, via_cost: int, cap: int, on_path, cancelled) -> bool:
         if self._find(conn.net, conn.a) == self._find(conn.net, conn.b):
@@ -484,10 +719,33 @@ class Router:
         def stop():
             return bool(cancelled and cancelled())
 
-        # 1. plain pass
+        # 1. plain pass; a differential pair's two connections go together
+        partners = {}
+        for conn in queue:
+            if conn.pair:
+                partners.setdefault(conn.pair, []).append(conn)
+        handled = set()
+        self.pairs_routed = 0
         for conn in queue:
             if stop():
                 break
+            if id(conn) in handled:
+                continue
+            mates = partners.get(conn.pair, []) if conn.pair else []
+            if len(mates) == 2:
+                ca, cb = mates
+                handled.add(id(ca)); handled.add(id(cb))
+                if self._try_pair(ca, cb, opts.via_cost, opts.max_expansions, on_path, cancelled):
+                    self.pairs_routed += 1
+                    done += 2
+                    report(self.p.nets[ca.net].name)
+                    continue
+                for c in (ca, cb):                 # fall back to separate routes
+                    if not self._try(c, opts.via_cost, opts.max_expansions, on_path, cancelled):
+                        failed.append(c)
+                    done += 1
+                report(self.p.nets[ca.net].name)
+                continue
             if not self._try(conn, opts.via_cost, opts.max_expansions, on_path, cancelled):
                 failed.append(conn)
             done += 1
@@ -552,6 +810,8 @@ class Router:
         result.paths = [self.paths[pid].path for pid in sorted(self.paths)] + fanout_paths
         result.routed = len(self.paths)
         result.fanout = len(fanout_paths)
+        result.pairs = getattr(self, "pairs_routed", 0)
+        result.pair_log = getattr(self, "pair_log", [])
         result.seconds = time.time() - started
         return result
 

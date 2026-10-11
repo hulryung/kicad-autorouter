@@ -46,6 +46,8 @@ class NetInfo:
     # the pad's axis into the pad centre, the way a hand-routed escape does.
     endpoints: Dict[int, Tuple[int, int, int, int, int]] = field(default_factory=dict)   # + stub width
     route: bool = True              # False: pour net, only fanned out to its plane with vias
+    partner: int = 0                # the other net of a differential pair, 0 if none
+    pair_gap: int = 0               # nm, gap between the pair's tracks
 
 
 @dataclass
@@ -56,6 +58,7 @@ class Connection:
     estimate: int           # cells, for ordering
     priority: int = 1       # 0 = touches a fine-pitch escape: routed first, like a designer would
     width: int = 0          # nm; 0 = the net's width. Fine-pitch connections use the neck width.
+    pair: int = 0           # >0: id shared by the two connections of a differential pair
 
 
 @dataclass
@@ -91,6 +94,7 @@ class NativeOptions:
     # the editor's current track/via selection, or one fixed size (nm).
     neck_down: bool = True          # narrower escape stubs at fine-pitch pads
     fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
+    diff_pairs: bool = True         # route +/- pairs coupled, at the net class pair width and gap
     fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
     track_mode: str = SIZE_AUTO
     power_patterns: List[str] = field(default_factory=lambda: list(POWER_PATTERNS))
