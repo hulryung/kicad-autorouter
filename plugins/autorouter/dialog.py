@@ -162,8 +162,13 @@ class AutorouterDialog(wx.Dialog):
         native.Add(grid, 0, wx.EXPAND | wx.ALL, 6)
         self.native_vias = wx.CheckBox(page, label="Allow vias")
         self.native_retry = wx.CheckBox(page, label="Retry failed connections with a bigger budget and cheaper vias")
+        self.native_fanout = wx.CheckBox(page, label="Fan out GND/power pads to their copper planes with vias")
+        self.native_fanout.SetToolTip("Nets with a copper zone (pours) get a short stub and a via at each SMD pad "
+                                      "on a layer the pour does not reach, so the refilled pour connects them. "
+                                      "Works for nets listed under 'Nets to leave unrouted' too.")
         native.Add(self.native_vias, 0, wx.LEFT | wx.BOTTOM, 6)
         native.Add(self.native_retry, 0, wx.LEFT | wx.BOTTOM, 6)
+        native.Add(self.native_fanout, 0, wx.LEFT | wx.BOTTOM, 6)
         box.Add(native, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         scope = wx.StaticBoxSizer(wx.HORIZONTAL, page, "What to route (built-in router)")
@@ -303,6 +308,7 @@ class AutorouterDialog(wx.Dialog):
         self.skip_nets.SetValue(o.skip_nets)
         self.native_vias.SetValue(o.native_allow_vias)
         self.native_retry.SetValue(o.native_retry)
+        self.native_fanout.SetValue(o.native_fanout_vias)
         self.track_size.SetSelection(0)
         for i, (mode, value, _) in enumerate(self.track_choices):
             if mode == o.native_track_mode and (mode != SIZE_FIXED or value == o.native_track_width):
@@ -346,6 +352,7 @@ class AutorouterDialog(wx.Dialog):
             native_via_cost=self.native_via_cost.GetValue(),
             native_allow_vias=self.native_vias.GetValue(),
             native_retry=self.native_retry.GetValue(),
+            native_fanout_vias=self.native_fanout.GetValue(),
             native_max_expansions_k=self.native_budget.GetValue(),
             skip_nets=self.skip_nets.GetValue().strip(),
             native_track_mode=self.track_choices[self.track_size.GetSelection()][0],
@@ -378,6 +385,7 @@ class AutorouterDialog(wx.Dialog):
         return NativeOptions(
             pitch_mm=o.native_pitch_mm, via_cost=o.native_via_cost, allow_vias=o.native_allow_vias,
             max_expansions=o.native_max_expansions_k * 1000, retry_failed=o.native_retry,
+            fanout_vias=o.native_fanout_vias,
             skip_nets=[s.strip() for s in o.skip_nets.split(",") if s.strip()],
             ignore_net_classes=list(o.ignore_net_classes),
             routable_layers=o.routable_layers, horizontal_layers=o.horizontal_layers,
@@ -398,7 +406,8 @@ class AutorouterDialog(wx.Dialog):
     def _on_engine_choice(self, event):
         builtin = self.engine_choice.GetSelection() == 0
         for ctrl in (self.pitch, self.native_via_cost, self.native_budget, self.skip_nets,
-                     self.native_vias, self.native_retry, self.track_size, self.via_size, self.scope_choice):
+                     self.native_vias, self.native_retry, self.native_fanout, self.track_size, self.via_size,
+                     self.scope_choice):
             ctrl.Enable(builtin)
         self.sheet_list.Enable(builtin and self.scope_choice.GetSelection() == 2)
 
@@ -516,8 +525,9 @@ class AutorouterDialog(wx.Dialog):
         stats = problem.stats
         self._append_log(f"[plugin] grid {problem.grid.w}x{problem.grid.h}x{problem.grid.layers} cells at "
                          f"{native.pitch_mm:g} mm, {stats['nets']} nets, {stats['connections']} of "
-                         f"{stats['all_connections']} connections in scope, read in {stats['extract_seconds']:.1f}s")
-        if not problem.connections:
+                         f"{stats['all_connections']} connections in scope, {stats.get('fanout_vias', 0)} fanout vias, "
+                         f"read in {stats['extract_seconds']:.1f}s")
+        if not problem.connections and not problem.prepaths:
             self._set_busy(False)
             self._show_progress("Nothing to route in this scope: every connection is done or skipped.", 1.0)
             return
@@ -583,6 +593,8 @@ class AutorouterDialog(wx.Dialog):
             return
         failed = sorted({self.board.FindNet(c.net).GetNetname() for c in result.failed})
         text = f"Done: {result.routed} connections routed in {result.seconds:.0f}s"
+        if getattr(result, "fanout", 0):
+            text += f", {result.fanout} fanout vias"
         if getattr(result, "ripped", 0):
             text += f" ({result.ripped} rerouted)"
         if result.failed:

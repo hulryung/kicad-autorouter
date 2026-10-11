@@ -8,8 +8,8 @@ import pcbnew
 
 from .grid import BLOCKED, Grid
 from .problem import (Cluster, Connection, LayerInfo, NativeOptions, NetInfo, NetRules,
-                      RoutingProblem, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS, SIZE_CURRENT,
-                      SIZE_FIXED)
+                      RoutedPath, RoutingProblem, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
+                      SIZE_CURRENT, SIZE_FIXED)
 
 MARGIN_NM = 500_000
 
@@ -229,13 +229,28 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     h = int(math.ceil((bb.GetHeight() + 2 * MARGIN_NM) / pitch)) + 1
     grid = Grid(ox, oy, pitch, w, h, len(layers))
 
-    # Nets, their rules and the owner maps those rules need.
+    # Copper zones: a net with a pour on some layer is a plane net; its pads
+    # on other layers can be tied to the plane with a via instead of a track.
+    zone_layers: Dict[int, Set[int]] = {}
+    for zone in board.Zones():
+        if zone.GetIsRuleArea() or zone.GetNetCode() <= 0:
+            continue
+        for lid in zone.GetLayerSet().CuStack():
+            if lid in layer_of:
+                zone_layers.setdefault(zone.GetNetCode(), set()).add(layer_of[lid])
+
+    # Nets, their rules and the owner maps those rules need. Skipped nets that
+    # have a pour stay in the model (so their pads get escapes and vias) but
+    # are not routed with tracks.
     say("Reading nets and design rules...")
     nets: Dict[int, NetInfo] = {}
     for code, net in board.GetNetsByNetcode().items():
-        if code <= 0 or _skip_net(net, options):
+        if code <= 0:
             continue
-        nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options))
+        skipped = _skip_net(net, options)
+        if skipped and not (options.fanout_vias and code in zone_layers):
+            continue
+        nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options), route=not skipped)
     # Connections that end on fine-pitch pins are routed at the board's
     # narrowest pre-defined width (the neck width), as a designer would, so
     # the escapes and the tracks between the pins have room. Those widths
@@ -535,6 +550,84 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         pad_cells.setdefault(code, []).append((pad, target_cells, centre, fp.GetReference() if fp else "",
                                                chosen is not None and stub_w < net.rules.width))
 
+    # Fanout vias: a pad of a plane net on a layer without that net's pour gets
+    # a via at its escape exit (or a little further out), so the pour connects
+    # it after the refill. Pads that got a via count as joined to the plane.
+    prepaths: List[RoutedPath] = []
+    planed: Dict[int, Set[int]] = {}             # net -> ids of pads tied to the plane
+    if options.fanout_vias and zone_layers:
+        say("Placing fanout vias for plane nets...")
+        for pad, code, pl, pos, own_cells, centre in pending:
+            if code not in zone_layers or code not in nets:
+                continue
+            net = nets[code]
+            if pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+                continue                          # through every layer already
+            if not (zone_layers[code] - set(pl)):
+                continue                          # no plane on another layer to tie to
+            # the exit cell and stub chosen for this pad, if any
+            exits = [(i, e) for i, e in net.endpoints.items() if e[2] == pos.x and e[3] == pos.y and (e[0], e[1]) != (e[2], e[3])]
+            if not exits:
+                continue
+            cell, (ex, ey, px, py, stub_w) = exits[0]
+            layer, ecx, ecy = grid.unpack(cell)
+            own = owners[net.rules.key]
+            reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / pitch))) + 1
+            # direction to walk further out if the exit itself is too tight
+            dx = (grid.nm_x(ecx) - pos.x); dy = (grid.nm_y(ecy) - pos.y)
+            norm = math.hypot(dx, dy) or 1.0
+            step = (dx / norm, dy / norm)
+            placed = None
+            for k in range(0, 6):
+                vx = ecx + int(round(step[0] * k)); vy = ecy + int(round(step[1] * k))
+                if not grid.inside(vx, vy):
+                    break
+                ok = not via_block[vy * grid.w + vx]
+                for ddx in range(-reach, reach + 1):
+                    if not ok:
+                        break
+                    for ddy in range(-reach, reach + 1):
+                        if ddx * ddx + ddy * ddy > reach * reach:
+                            continue
+                        if not grid.inside(vx + ddx, vy + ddy):
+                            ok = False
+                            break
+                        for li in range(grid.layers):
+                            o = own[grid.index(li, vx + ddx, vy + ddy)]
+                            if o not in (0, code):
+                                ok = False
+                                break
+                        if not ok:
+                            break
+                if ok:
+                    placed = (vx, vy)
+                    break
+            if placed is None:
+                continue
+            vx, vy = placed
+            gx, gy = grid.nm_x(ecx), grid.nm_y(ecy)
+            vxn, vyn = grid.nm_x(vx), grid.nm_y(vy)
+            segments = []
+            if (ex, ey) != (px, py) and (ex, ey) != (gx, gy):
+                segments.append((layer, px, py, ex, ey, stub_w))
+                segments.append((layer, ex, ey, gx, gy, stub_w))
+            else:
+                segments.append((layer, px, py, gx, gy, stub_w))
+            if (vxn, vyn) != (gx, gy):
+                segments.append((layer, gx, gy, vxn, vyn, stub_w))
+            rp = RoutedPath(code, net.rules.width, segments, [(vxn, vyn)], net.rules.via_diameter, net.rules.via_drill)
+            prepaths.append(rp)
+            # claim the via and the extension on every map, and block other holes
+            for (width, clearance), own_map in owners.items():
+                r_via = net.rules.via_diameter // 2 + max(clearance, net.rules.clearance) + width // 2 + safety
+                for li in range(grid.layers):
+                    grid.mark(own_map, grid.disc_cells(li, vxn, vyn, r_via), code)
+                if (vxn, vyn) != (gx, gy):
+                    r_seg = stub_w // 2 + max(clearance, net.rules.clearance) + width // 2 + safety
+                    grid.mark(own_map, grid.segment_cells(layer, gx, gy, vxn, vyn, r_seg), code)
+            block_vias_near_hole(vxn, vyn, net.rules.via_drill // 2)
+            planed.setdefault(code, set()).add(id(pad))
+
     # Clusters (pads already joined by copper) and the connections between them.
     say("Building the connection list...")
     conn = board.GetConnectivity()
@@ -565,6 +658,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                             break
                 if j is not None:
                     parent[find(i)] = find(j)
+        tied = [i for i, (pad, _, _, _, _) in enumerate(entries) if id(pad) in planed.get(code, ())]
+        for i in tied[1:]:
+            parent[find(i)] = find(tied[0])
         groups: Dict[int, Cluster] = {}
         for i, (pad, cells, centre, ref, tight) in enumerate(entries):
             cl = groups.setdefault(find(i), Cluster())
@@ -575,7 +671,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if tight:
                 cl.tight = True
         net.clusters = list(groups.values())
-        if len(net.clusters) < 2:
+        if len(net.clusters) < 2 or not net.route:
             continue
         # Minimum spanning tree over clusters by nearest anchor distance (Prim).
         k = len(net.clusters)
@@ -607,10 +703,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     connections = in_scope(board, nets, connections, options)
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
-                             hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety)
+                             hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
+                             prepaths=prepaths)
     problem.stats = {"extract_seconds": time.time() - t0, "cells": grid.size,
                      "nets": len(nets), "connections": len(connections),
-                     "all_connections": all_connections, "owner_maps": len(owners)}
+                     "all_connections": all_connections, "owner_maps": len(owners),
+                     "fanout_vias": len(prepaths)}
     return problem
 
 

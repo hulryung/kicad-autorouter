@@ -96,7 +96,8 @@ def main(argv):
             print(f"  {done}/{total} routed={routed} failed={failed} ({time.time() - t1:.0f}s) {name}")
 
     result = router.run(problem, progress=progress)
-    print(f"route: {result.routed} routed, {len(result.failed)} failed, {result.ripped} ripped up in {result.seconds:.1f}s")
+    print(f"route: {result.routed} routed, {len(result.failed)} failed, {result.ripped} ripped up, "
+          f"{result.fanout} fanout vias in {result.seconds:.1f}s")
     import math
     from collections import Counter
     segs = [s for p in result.paths for s in p.segments]
@@ -138,7 +139,7 @@ def main(argv):
             print(f"drc: {summary['drc_violations']} violations {kinds}, "
                   f"{summary['drc_unconnected']} unconnected items")
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
-    assert result.routed > 0, "nothing was routed"
+    assert result.routed + result.fanout > 0, "nothing was routed"
     assert after < before, "the board is not better connected than before"
     print("test_native_e2e: ok")
 

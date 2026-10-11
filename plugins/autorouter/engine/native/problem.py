@@ -45,6 +45,7 @@ class NetInfo:
     # ends on this cell continues off-grid to the exit point and then along
     # the pad's axis into the pad centre, the way a hand-routed escape does.
     endpoints: Dict[int, Tuple[int, int, int, int, int]] = field(default_factory=dict)   # + stub width
+    route: bool = True              # False: pour net, only fanned out to its plane with vias
 
 
 @dataclass
@@ -87,6 +88,7 @@ class NativeOptions:
     # Track width and via size: per net from the net class (KiCad's default),
     # the editor's current track/via selection, or one fixed size (nm).
     neck_down: bool = True          # narrower escape stubs at fine-pitch pads
+    fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
     track_mode: str = SIZE_NETCLASS
     track_width: int = 0
     via_mode: str = SIZE_NETCLASS
@@ -116,6 +118,7 @@ class RoutingProblem:
     connections: List[Connection]
     options: NativeOptions
     stats: Dict[str, float] = field(default_factory=dict)
+    prepaths: List[RoutedPath] = field(default_factory=list)   # fanout vias, placed before routing
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum
     max_via_drill: int = 0                        # nm, the largest via drill any net uses
     safety: int = 0                               # nm added to every obstacle radius

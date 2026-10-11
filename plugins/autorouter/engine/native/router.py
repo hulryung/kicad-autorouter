@@ -37,6 +37,7 @@ class RouteResult:
         self.failed: List[Connection] = []
         self.paths: List[RoutedPath] = []
         self.ripped = 0
+        self.fanout = 0
         self.seconds = 0.0
         self.cancelled = False
 
@@ -418,6 +419,13 @@ class Router:
         def stop():
             return bool(cancelled and cancelled())
 
+        # 0. fanout vias planned while reading the board
+        for rp in self.p.prepaths:
+            rp.pid = self.next_pid
+            self.next_pid += 1
+            if on_path:
+                on_path(rp)
+
         # 1. plain pass
         for conn in queue:
             if stop():
@@ -473,8 +481,9 @@ class Router:
 
         result.cancelled = stop()
         result.failed = [c for c in failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
-        result.paths = [self.paths[pid].path for pid in sorted(self.paths)]
-        result.routed = len(result.paths)
+        result.paths = list(self.p.prepaths) + [self.paths[pid].path for pid in sorted(self.paths)]
+        result.routed = len(self.paths)
+        result.fanout = len(self.p.prepaths)
         result.seconds = time.time() - started
         return result
 

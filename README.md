@@ -120,8 +120,15 @@ obstacle, and existing tracks of other nets are respected.
      closer than width + 2 x clearance) are routed first, while there is
      room, and at the board's narrowest pre-defined track width for their
      whole length, as designers do; everything else keeps its net-class width.
-   - **Straightening**: zig-zag runs the grid search leaves behind become one
-     straight and one diagonal piece when the cells are free.
+   - **Straightening**: any single-layer run of a path is rewritten as the
+     farthest-reaching straight-plus-diagonal pair through free cells, and
+     escapes run straight into their routes.
+   - **Fanout vias for planes**: nets that have a copper zone (GND, power)
+     get a short stub and a via at each SMD pad on a layer the pour does not
+     cover, placed where the via clears everything else, so the refilled pour
+     ties the pad to the plane. This applies to nets listed under *Nets to
+     leave unrouted* as well, which is the usual way to handle GND: skip the
+     tracks, keep the vias.
    - Obstacles carry a 10 µm safety margin so diagonal cell steps never land
      inside the clearance.
 3. **Apply** (PCB API, main thread): each path becomes `PCB_TRACK` segments and
@@ -136,10 +143,10 @@ around the new tracks, so pour nets are best left to the pour: list them under
 want a smaller pitch (slower).
 
 Benchmark: a finished 4-layer board (71 footprints, 75 nets, DRC clean) with
-all tracks removed and only the GND pours left to the zones. The built-in
-router reconnects 102 of 104 connections with 0 DRC violations. Against the
-original artwork it uses fewer vias (31 vs 46) but about 28% more track length
-and many more short segments, so the result is correct rather than pretty;
+all tracks removed and the GND nets left to their pours plus fanout vias.
+The built-in router leaves 3 of 104 signal connections open, places 47
+fanout vias and 0 DRC violations; against the original artwork (excluding
+GND): 444 segments vs 353, 812 mm of track vs 764, 69 vias vs 46.
 `tests/test_native_e2e.py` prints these figures (`artwork:` line) for any
 board, which is how the router is tuned.
 
