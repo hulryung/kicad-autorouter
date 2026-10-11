@@ -97,7 +97,8 @@ def main(argv):
 
     result = router.run(problem, progress=progress)
     print(f"route: {result.routed} routed, {len(result.failed)} failed, {result.ripped} ripped up, "
-          f"{result.fanout} fanout vias, {result.pairs} coupled pairs in {result.seconds:.1f}s")
+          f"{result.fanout} fanout vias, {result.pairs} coupled pairs, {result.stitched} stitching vias "
+          f"in {result.seconds:.1f}s")
     pairs = {n.name: problem.nets[n.partner].name for n in problem.nets.values() if n.partner}
     print("pairs:", pairs, "paired connections:", sum(1 for c in problem.connections if c.pair),
           "pair log:", getattr(result, "pair_log", []))
@@ -142,7 +143,7 @@ def main(argv):
             print(f"drc: {summary['drc_violations']} violations {kinds}, "
                   f"{summary['drc_unconnected']} unconnected items")
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
-    assert result.routed + result.fanout > 0, "nothing was routed"
+    assert result.routed + result.fanout + result.stitched > 0, "nothing was routed"
     assert after < before, "the board is not better connected than before"
     print("test_native_e2e: ok")
 

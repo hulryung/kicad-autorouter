@@ -175,6 +175,22 @@ class AutorouterDialog(wx.Dialog):
         native.Add(self.native_retry, 0, wx.LEFT | wx.BOTTOM, 6)
         native.Add(self.native_fanout, 0, wx.LEFT | wx.BOTTOM, 6)
         native.Add(self.native_pairs, 0, wx.LEFT | wx.BOTTOM, 6)
+        stitch_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.native_stitch = wx.CheckBox(page, label="Stitch GND pours with vias every")
+        self.native_stitch.SetToolTip("Pour nets left unrouted that have zones on two or more layers get a grid "
+                                      "of vias through their zones, wherever a via still fits, to shorten return "
+                                      "current loops. Placed after all routing.")
+        self.stitch_pitch = wx.SpinCtrlDouble(page, min=1.0, max=50.0, initial=4.0, inc=0.5)
+        self.stitch_pitch.SetDigits(1)
+        stitch_row.Add(self.native_stitch, 0, wx.ALIGN_CENTER_VERTICAL)
+        stitch_row.Add(self.stitch_pitch, 0, wx.LEFT | wx.RIGHT, 6)
+        stitch_row.Add(wx.StaticText(page, label="mm"), 0, wx.ALIGN_CENTER_VERTICAL)
+        native.Add(stitch_row, 0, wx.LEFT | wx.BOTTOM, 6)
+        self.native_power = wx.CheckBox(page, label="Power pours: tie pads to the plane with vias, stitch at twice the pitch")
+        self.native_power.SetToolTip("Routed power nets that also have a copper pour (e.g. +3V3 on an inner layer) "
+                                     "get a via at each pad on a layer the pour does not cover, and a coarser via "
+                                     "grid through the pour when it spans two or more layers.")
+        native.Add(self.native_power, 0, wx.LEFT | wx.BOTTOM, 6)
         box.Add(native, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         scope = wx.StaticBoxSizer(wx.HORIZONTAL, page, "What to route (built-in router)")
@@ -316,6 +332,9 @@ class AutorouterDialog(wx.Dialog):
         self.native_retry.SetValue(o.native_retry)
         self.native_fanout.SetValue(o.native_fanout_vias)
         self.native_pairs.SetValue(o.native_diff_pairs)
+        self.native_stitch.SetValue(o.native_stitch_vias)
+        self.stitch_pitch.SetValue(o.native_stitch_pitch_mm)
+        self.native_power.SetValue(o.native_power_pours)
         self.track_size.SetSelection(0)
         for i, (mode, value, _) in enumerate(self.track_choices):
             if mode == o.native_track_mode and (mode != SIZE_FIXED or value == o.native_track_width):
@@ -361,6 +380,9 @@ class AutorouterDialog(wx.Dialog):
             native_retry=self.native_retry.GetValue(),
             native_fanout_vias=self.native_fanout.GetValue(),
             native_diff_pairs=self.native_pairs.GetValue(),
+            native_stitch_vias=self.native_stitch.GetValue(),
+            native_stitch_pitch_mm=self.stitch_pitch.GetValue(),
+            native_power_pours=self.native_power.GetValue(),
             native_max_expansions_k=self.native_budget.GetValue(),
             skip_nets=self.skip_nets.GetValue().strip(),
             native_track_mode=self.track_choices[self.track_size.GetSelection()][0],
@@ -394,6 +416,8 @@ class AutorouterDialog(wx.Dialog):
             pitch_mm=o.native_pitch_mm, via_cost=o.native_via_cost, allow_vias=o.native_allow_vias,
             max_expansions=o.native_max_expansions_k * 1000, retry_failed=o.native_retry,
             fanout_vias=o.native_fanout_vias, diff_pairs=o.native_diff_pairs,
+            stitch_vias=o.native_stitch_vias, stitch_pitch_mm=o.native_stitch_pitch_mm,
+            power_pours=o.native_power_pours,
             skip_nets=[s.strip() for s in o.skip_nets.split(",") if s.strip()],
             ignore_net_classes=list(o.ignore_net_classes),
             routable_layers=o.routable_layers, horizontal_layers=o.horizontal_layers,
@@ -415,7 +439,7 @@ class AutorouterDialog(wx.Dialog):
         builtin = self.engine_choice.GetSelection() == 0
         for ctrl in (self.pitch, self.native_via_cost, self.native_budget, self.skip_nets,
                      self.native_vias, self.native_retry, self.native_fanout, self.native_pairs,
-                     self.track_size, self.via_size,
+                     self.native_stitch, self.stitch_pitch, self.native_power, self.track_size, self.via_size,
                      self.scope_choice):
             ctrl.Enable(builtin)
         self.sheet_list.Enable(builtin and self.scope_choice.GetSelection() == 2)
@@ -536,7 +560,7 @@ class AutorouterDialog(wx.Dialog):
                          f"{native.pitch_mm:g} mm, {stats['nets']} nets, {stats['connections']} of "
                          f"{stats['all_connections']} connections in scope, {stats.get('fanout_vias', 0)} fanout vias, "
                          f"read in {stats['extract_seconds']:.1f}s")
-        if not problem.connections and not problem.fanout:
+        if not problem.connections and not problem.fanout and not problem.stitch:
             self._set_busy(False)
             self._show_progress("Nothing to route in this scope: every connection is done or skipped.", 1.0)
             return
@@ -606,6 +630,8 @@ class AutorouterDialog(wx.Dialog):
             text += f", {result.fanout} fanout vias"
         if getattr(result, "pairs", 0):
             text += f", {result.pairs} coupled pairs"
+        if getattr(result, "stitched", 0):
+            text += f", {result.stitched} stitching vias"
         for name, why in getattr(result, "pair_log", []):
             self._append_log(f"[plugin] pair {name} routed separately: {why}")
         if getattr(result, "ripped", 0):

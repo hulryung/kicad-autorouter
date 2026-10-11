@@ -95,6 +95,9 @@ class NativeOptions:
     neck_down: bool = True          # narrower escape stubs at fine-pitch pads
     fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
     diff_pairs: bool = True         # route +/- pairs coupled, at the net class pair width and gap
+    stitch_vias: bool = True        # via stitching across pour nets that span several layers
+    stitch_pitch_mm: float = 4.0    # grid pitch of the stitching vias
+    power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
     track_mode: str = SIZE_AUTO
     power_patterns: List[str] = field(default_factory=lambda: list(POWER_PATTERNS))
@@ -127,6 +130,7 @@ class RoutingProblem:
     options: NativeOptions
     stats: Dict[str, float] = field(default_factory=dict)
     fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
+    stitch: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> candidate (cx, cy) via spots
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum
     max_via_drill: int = 0                        # nm, the largest via drill any net uses
     safety: int = 0                               # nm added to every obstacle radius

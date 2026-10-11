@@ -54,6 +54,9 @@ class RouteOptions:
     native_retry: bool = True             # second pass over failed connections
     native_fanout_vias: bool = True       # vias from pads of pour nets (GND, power) to their planes
     native_diff_pairs: bool = True        # coupled routing for +/- pairs at the net class pair width/gap
+    native_stitch_vias: bool = True       # via stitching across multi-layer pour nets (GND)
+    native_stitch_pitch_mm: float = 4.0
+    native_power_pours: bool = True       # power nets with pours: pad vias to the plane and coarse stitching
     native_max_expansions_k: int = 400    # A* search budget per connection, thousands
     skip_nets: str = ""                   # comma-separated names or patterns, e.g. GND,+3V3,*_PLANE
     native_track_mode: str = "auto"       # auto | netclass | current | fixed

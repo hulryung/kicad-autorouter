@@ -663,8 +663,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     fanout: List[Tuple[int, int]] = []           # (net code, exit cell)
     if options.fanout_vias and zone_layers:
         for pad, code, pl, pos, own_cells, centre in pending:
-            if code not in zone_layers or code not in nets or nets[code].route:
+            if code not in zone_layers or code not in nets:
                 continue
+            if nets[code].route and not (options.power_pours and len(zone_layers[code]) >= 1):
+                continue                          # a routed net without a usable pour
             if pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
                 continue                          # through every layer already
             if not (zone_layers[code] - set(pl)):
@@ -675,6 +677,37 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             exits = [i for i, e in net.endpoints.items() if e[2] == pos.x and e[3] == pos.y and (e[0], e[1]) != (e[2], e[3])]
             if exits:
                 fanout.append((code, exits[0]))
+
+    # Via stitching candidates: for unrouted pour nets whose zones span two or
+    # more layers (ground), a grid of points inside the zone outlines on at
+    # least two of those layers. The router drops vias there after everything
+    # else, where they still fit, to shorten return paths.
+    stitch: Dict[int, List[Tuple[int, int]]] = {}
+    if options.stitch_vias:
+        step = max(grid.pitch, int(options.stitch_pitch_mm * 1_000_000))
+        step_cells = max(1, step // grid.pitch)
+        for code, lset in zone_layers.items():
+            if code not in nets or len(lset) < 2:
+                continue
+            if nets[code].route and not options.power_pours:
+                continue
+            # power pours get a coarser grid than ground
+            cells_here = step_cells if not nets[code].route else step_cells * 2
+            cover: Dict[int, int] = {}                 # 2-D cell -> number of layers with this net's zone
+            for zone in board.Zones():
+                if zone.GetIsRuleArea() or zone.GetNetCode() != code:
+                    continue
+                zl = {layer_of[l] for l in zone.GetLayerSet().CuStack() if l in layer_of}
+                for pts, zholes in _poly_rings(zone.Outline()):
+                    for idx in grid.polygon_cells(0, pts, zholes, 0):
+                        cover[idx] = cover.get(idx, 0) + len(zl)
+            spots = []
+            for cy in range(cells_here // 2, grid.h, cells_here):
+                for cx in range(cells_here // 2, grid.w, cells_here):
+                    if cover.get(cy * grid.w + cx, 0) >= 2:
+                        spots.append((cx, cy))
+            if spots:
+                stitch[code] = spots
 
     # Clusters (pads already joined by copper) and the connections between them.
     say("Building the connection list...")
@@ -770,11 +803,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
-                             fanout=fanout)
+                             fanout=fanout, stitch=stitch)
     problem.stats = {"extract_seconds": time.time() - t0, "cells": grid.size,
                      "nets": len(nets), "connections": len(connections),
                      "all_connections": all_connections, "owner_maps": len(owners),
-                     "fanout_vias": len(fanout)}
+                     "fanout_vias": len(fanout), "stitch_spots": sum(len(v) for v in stitch.values())}
     return problem
 
 

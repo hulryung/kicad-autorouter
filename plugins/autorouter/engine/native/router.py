@@ -39,6 +39,7 @@ class RouteResult:
         self.ripped = 0
         self.fanout = 0
         self.pairs = 0
+        self.stitched = 0
         self.seconds = 0.0
         self.cancelled = False
 
@@ -699,6 +700,32 @@ class Router:
         self._claim(path)                       # vias and stubs become obstacles for later fanouts
         return rp
 
+    def _stitch_via(self, code: int, cx: int, cy: int) -> Optional[RoutedPath]:
+        """A lone via of a pour net at a grid spot, if the barrel and hole fit
+        on every layer; the refilled pours connect it on both sides."""
+        p, grid = self.p, self.grid
+        net = p.nets[code]
+        own = p.owners[net.rules.key]
+        reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / grid.pitch))) + 1
+        if not grid.inside(cx, cy) or p.via_block[cy * grid.w + cx]:
+            return None
+        for ddx in range(-reach, reach + 1):
+            for ddy in range(-reach, reach + 1):
+                if ddx * ddx + ddy * ddy > reach * reach:
+                    continue
+                if not grid.inside(cx + ddx, cy + ddy):
+                    return None
+                for li in range(grid.layers):
+                    if own[grid.index(li, cx + ddx, cy + ddy)] not in (0, code):
+                        return None
+        x, y = grid.nm_x(cx), grid.nm_y(cy)
+        rp = RoutedPath(code, net.rules.width, [], [(x, y)], net.rules.via_diameter, net.rules.via_drill,
+                        pid=self.next_pid)
+        self.next_pid += 1
+        path = _Path(rp.pid, Connection(code, 0, 0, 0), rp, [grid.index(0, cx, cy)])
+        self._claim(path)
+        return rp
+
     # ---- the whole run --------------------------------------------------
 
     def run(self, progress: Optional[ProgressFn] = None, on_path: Optional[PathFn] = None,
@@ -805,9 +832,21 @@ class Router:
                     if on_path:
                         on_path(rp)
 
+        # 5. stitching vias on the pour nets, wherever they still fit
+        stitch_paths: List[RoutedPath] = []
+        if not stop():
+            for code, spots in self.p.stitch.items():
+                for cx, cy in spots:
+                    rp = self._stitch_via(code, cx, cy)
+                    if rp is not None:
+                        stitch_paths.append(rp)
+                        if on_path:
+                            on_path(rp)
+
         result.cancelled = stop()
         result.failed = [c for c in failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
-        result.paths = [self.paths[pid].path for pid in sorted(self.paths)] + fanout_paths
+        result.paths = [self.paths[pid].path for pid in sorted(self.paths)] + fanout_paths + stitch_paths
+        result.stitched = len(stitch_paths)
         result.routed = len(self.paths)
         result.fanout = len(fanout_paths)
         result.pairs = getattr(self, "pairs_routed", 0)
