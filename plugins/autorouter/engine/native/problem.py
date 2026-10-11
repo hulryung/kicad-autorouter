@@ -98,6 +98,7 @@ class NativeOptions:
     stitch_vias: bool = True        # via stitching across pour nets that span several layers
     stitch_pitch_mm: float = 4.0    # grid pitch of the stitching vias
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
+    keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
     track_mode: str = SIZE_AUTO
     power_patterns: List[str] = field(default_factory=lambda: list(POWER_PATTERNS))

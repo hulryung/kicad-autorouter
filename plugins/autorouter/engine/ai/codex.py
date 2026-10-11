@@ -63,7 +63,8 @@ def extract_json(text: str) -> dict:
 
 def run(binary: str, prompt: str, workdir: Path, schema: Optional[dict] = None, model: str = "",
         timeout: float = 600.0, on_output: Optional[Callable[[str], None]] = None,
-        cancelled: Optional[Callable[[], bool]] = None, poll: Optional[Callable[[], None]] = None) -> dict:
+        cancelled: Optional[Callable[[], bool]] = None, poll: Optional[Callable[[], None]] = None,
+        images: Optional[List[Path]] = None) -> dict:
     """Run `codex exec` with the prompt on stdin, read-only sandbox, cwd at
     workdir (where context files live), and return the parsed JSON reply.
     on_output gets the CLI's progress lines; poll() is called while waiting
@@ -79,6 +80,9 @@ def run(binary: str, prompt: str, workdir: Path, schema: Optional[dict] = None, 
         cmd += ["--output-schema", str(schema_file)]
     if model:
         cmd += ["-m", model]
+    for image in images or []:
+        if Path(image).is_file():
+            cmd += ["-i", str(image)]
     cmd.append("-")
     (workdir / "codex-prompt.md").write_text(prompt, encoding="utf-8")
     kwargs = {}

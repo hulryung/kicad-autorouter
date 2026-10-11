@@ -192,16 +192,33 @@ run's outcome, and KiCad's DRC on a refilled copy) and runs
 codex exec --skip-git-repo-check -s read-only --ephemeral --output-schema <schema> -o <reply> -
 ```
 
-with the request and the context on stdin. The model must answer with a JSON
-object (schema enforced by Codex): a `summary`, `done`, and `actions` of these
-types: `set_options`, `route` (board / nets / sheets / selection),
-`remove_tracks`, `add_track`, `add_via`, `refill_zones`, `note`, `ask`. The
-plugin applies them on the open board through the built-in router with live
-display, feeds the results and a fresh DRC back, and repeats up to the round
-limit or until `done`. The sandbox is read-only and the working directory is
-the plugin's job folder, so the model can read the context files but nothing
-else is touched. `docs/ai-routing-approach.md` explains the design and the
-plan for it.
+with the request, the context and a rendered image of the board on stdin.
+The model must answer with a JSON object (schema enforced by Codex): a
+`summary`, `done`, and `actions`:
+
+| Action | What it does |
+|---|---|
+| `set_options` | change routing options for the next route (grid, via cost, skip nets, widths, layers, fanout, stitching, pairs, ...) |
+| `route` | run the built-in router on the board, a list of nets, schematic sheets or the selection, with hints: allowed `layers`, a fixed `width_mm`, `via_cost`, `avoid_mm` rectangles |
+| `remove_tracks`, `remove_items_near` | delete a net's copper, or the tracks/vias around a point |
+| `add_track`, `add_via` | draw copper by hand (polyline in mm, via at a point) |
+| `move_footprint` | move, rotate or flip a part |
+| `move_items_near`, `set_track_width`, `set_layer_near`, `set_via_near` | shift existing tracks/vias, change widths, move segments to another layer, resize vias |
+| `inspect_near` | list the tracks, vias, pads and footprints around a point (returned to the model) |
+| `refill_zones`, `note`, `ask` | refill pours, leave a remark, ask the user (the loop stops) |
+
+The plugin applies them on the open board through the built-in router with
+live display. **Every edit is measured**: KiCad's DRC and the unconnected
+count are taken before and after, hand edits that add violations are rolled
+back automatically (unless the model sets `force` because a later action will
+fix it), and each round's results, the `failed_detail` of connections that
+could not be routed (how much room there is around each end and which nets
+block it), a fresh DRC and a new board image go back to the model, up to the
+round limit or until `done`. The whole session stays one undo step. The
+sandbox is read-only and the working directory is the plugin's job folder
+(context, prompts, replies, images and `rounds.json` stay there), so the
+model can read the context files but nothing else is touched.
+`docs/ai-routing-approach.md` explains the design and the plan for it.
 
 ## How it is built
 

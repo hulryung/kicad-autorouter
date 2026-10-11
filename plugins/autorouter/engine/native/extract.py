@@ -419,6 +419,16 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if owners[keys[0]][idx] == BLOCKED:
             via_block[idx] = 1
 
+    # Temporary keepouts for this run (the assistant's "avoid" areas).
+    for x0, y0, x1, y1 in options.keepouts:
+        for layer in layers:
+            cells = grid.cells_where(layer.index, (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
+                                     lambda x, y: True)
+            for own in owners.values():
+                grid.mark(own, cells, BLOCKED)
+            for idx in cells:
+                via_block[idx % grid.plane] = 1
+
     # Rule areas (keepouts).
     for zone in board.Zones():
         if not zone.GetIsRuleArea():

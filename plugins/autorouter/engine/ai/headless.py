@@ -25,6 +25,22 @@ def native_options_from(spec_options: dict, base: Optional[NativeOptions] = None
     return o
 
 
+def apply_hints(o: NativeOptions, spec: dict, layer_names: Optional[list] = None) -> NativeOptions:
+    """Per-route hints from the assistant: allowed layers, a fixed width, a
+    via cost, and rectangles to keep clear (mm)."""
+    hints = spec.get("hints") or {}
+    if hints.get("layers") and layer_names:
+        wanted = {n.lower() for n in hints["layers"]}
+        o.routable_layers = [name.lower() in wanted for name in layer_names]
+    if hints.get("width_mm"):
+        o.track_mode, o.track_width = "fixed", int(round(float(hints["width_mm"]) * 1e6))
+    if hints.get("via_cost") is not None:
+        o.via_cost = int(hints["via_cost"])
+    if hints.get("avoid_mm"):
+        o.keepouts = [tuple(int(round(float(v) * 1e6)) for v in rect[:4]) for rect in hints["avoid_mm"] if len(rect) >= 4]
+    return o
+
+
 def apply_scope(o: NativeOptions, spec: dict, selection: Optional[dict] = None) -> NativeOptions:
     scope = spec.get("scope", "board")
     if scope == "nets":
@@ -43,6 +59,7 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
     """route_fn(spec) -> outcome dict, routing straight onto the given board."""
     def route_fn(spec: dict) -> dict:
         o = apply_scope(native_options_from(spec.get("options", {}), base), spec, selection)
+        o = apply_hints(o, spec, [board.GetLayerName(l) for l in board.GetEnabledLayers().CuStack()])
         if spec.get("options", {}).get("remove_existing"):
             from .. import session
             session.remove_tracks(board)
@@ -69,6 +86,7 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
                    "fanout_vias": result.fanout, "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
                    "seconds": round(result.seconds, 1),
                    "pair_log": [list(x) for x in getattr(result, "pair_log", [])],
+                   "failed_detail": getattr(result, "failed_detail", []),
                    "unconnected_after": board.GetConnectivity().GetUnconnectedCount(True)}
         outcome["summary"] = (f"{result.routed} routed, {len(failed)} failed, {result.fanout} fanout vias, "
                               f"{result.stitched} stitching vias; {outcome['unconnected_after']} unconnected left")

@@ -40,6 +40,7 @@ class RouteResult:
         self.fanout = 0
         self.pairs = 0
         self.stitched = 0
+        self.failed_detail: List[dict] = []
         self.seconds = 0.0
         self.cancelled = False
 
@@ -635,6 +636,38 @@ class Router:
         self._commit(conn, cells, on_path)
         return True
 
+    def _why_failed(self, conn: Connection) -> dict:
+        """What surrounds a failed connection's ends: how much room there is
+        and which nets (or fixed copper) own the cells around each exit."""
+        p, grid = self.p, self.grid
+        net = p.nets[conn.net]
+        own = p.owners[self._key(conn)]
+        ends = []
+        for cluster in (conn.a, conn.b):
+            cell = self._exit_of(conn.net, cluster)
+            if cell is None:
+                continue
+            layer, cx, cy = grid.unpack(cell)
+            around: Dict[str, int] = {}
+            free = total = 0
+            for dx in range(-5, 6):
+                for dy in range(-5, 6):
+                    if not grid.inside(cx + dx, cy + dy):
+                        continue
+                    total += 1
+                    o = own[grid.index(layer, cx + dx, cy + dy)]
+                    if o in (0, net.code):
+                        free += 1
+                    else:
+                        name = "fixed copper / keepout" if o == BLOCKED else p.nets[o].name if o in p.nets else f"net {o}"
+                        around[name] = around.get(name, 0) + 1
+            ends.append({"refs": sorted(net.clusters[cluster].refs),
+                         "at_mm": [round(grid.nm_x(cx) / 1e6, 3), round(grid.nm_y(cy) / 1e6, 3)],
+                         "layer": p.layers[layer].name,
+                         "free_cells_around": f"{free}/{total}",
+                         "blocked_by": dict(sorted(around.items(), key=lambda kv: -kv[1])[:5])})
+        return {"net": net.name, "width_mm": round((conn.width or net.rules.width) / 1e6, 3), "ends": ends}
+
     # ---- fanout vias ------------------------------------------------------
 
     def _fanout_via(self, code: int, cell: int) -> Optional[RoutedPath]:
@@ -845,6 +878,7 @@ class Router:
 
         result.cancelled = stop()
         result.failed = [c for c in failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
+        result.failed_detail = [self._why_failed(c) for c in result.failed]
         result.paths = [self.paths[pid].path for pid in sorted(self.paths)] + fanout_paths + stitch_paths
         result.stitched = len(stitch_paths)
         result.routed = len(self.paths)

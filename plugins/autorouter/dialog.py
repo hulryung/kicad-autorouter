@@ -401,6 +401,7 @@ class AutorouterDialog(wx.Dialog):
         def route_fn(spec):
             # the router needs the layers for live display; read them per run
             o = ai_headless.apply_scope(ai_headless.native_options_from(spec.get("options", {}), base), spec, selection)
+            o = ai_headless.apply_hints(o, spec, [name for _, name in self.layers])
             if spec.get("options", {}).get("remove_existing"):
                 session.remove_tracks(self.board)
             try:
@@ -429,6 +430,7 @@ class AutorouterDialog(wx.Dialog):
                        "connections_in_scope": problem.stats["connections"], "routed": result.routed,
                        "failed": failed, "ripped_up": result.ripped, "fanout_vias": result.fanout,
                        "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
+                       "failed_detail": getattr(result, "failed_detail", []),
                        "unconnected_after": self.board.GetConnectivity().GetUnconnectedCount(True)}
             outcome["summary"] = (f"{result.routed} routed, {len(failed)} failed, {result.fanout} fanout vias, "
                                   f"{result.stitched} stitching vias; {outcome['unconnected_after']} unconnected left")
