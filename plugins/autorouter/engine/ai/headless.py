@@ -59,6 +59,10 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
         except Exception:
             pass
         failed = sorted({problem.nets[c.net].name for c in result.failed})
+        try:
+            board.BuildConnectivity()             # the count below is stale otherwise
+        except Exception:
+            pass
         outcome = {"error": None, "scope": spec.get("scope", "board"),
                    "connections_in_scope": problem.stats["connections"],
                    "routed": result.routed, "failed": failed, "ripped_up": result.ripped,

@@ -18,6 +18,49 @@ OPTION_KEYS = {
     "remove_existing": bool, "power_pours": bool, "rip_up": bool, "max_expansions": int,
 }
 
+def _nullable(t, **extra):
+    d = {"type": [t, "null"]}
+    d.update(extra)
+    return d
+
+
+# OpenAI's strict JSON schema mode (what `codex exec --output-schema` uses)
+# needs every property listed in "required" and no free-form objects, so
+# optional fields are nullable and the option bag spells out every key.
+_OPTION_PROPS = {
+    "pitch_mm": _nullable("number"), "via_cost": _nullable("integer"),
+    "skip_nets": _nullable("array", items={"type": "string"}),
+    "track_mode": _nullable("string", enum=["auto", "netclass", "current", "fixed"]),
+    "track_width_mm": _nullable("number"), "neck_down": _nullable("boolean"),
+    "fanout_vias": _nullable("boolean"), "stitch_vias": _nullable("boolean"),
+    "stitch_pitch_mm": _nullable("number"), "diff_pairs": _nullable("boolean"),
+    "allow_vias": _nullable("boolean"),
+    "routable_layers": _nullable("array", items={"type": "boolean"}),
+    "horizontal_layers": _nullable("array", items={"type": "boolean"}),
+    "remove_existing": _nullable("boolean"), "power_pours": _nullable("boolean"),
+    "rip_up": _nullable("boolean"), "max_expansions": _nullable("integer"),
+}
+
+_ACTION_PROPS = {
+    "type": {"type": "string", "enum": list(ACTION_TYPES)},
+    "options": {"type": ["object", "null"], "additionalProperties": False,
+                "required": list(_OPTION_PROPS), "properties": _OPTION_PROPS,
+                "description": "set_options only; unused keys null."},
+    "scope": _nullable("string", enum=["board", "nets", "sheets", "selection"]),
+    "nets": _nullable("array", items={"type": "string"}),
+    "sheets": _nullable("array", items={"type": "string"}),
+    "net": _nullable("string"),
+    "layer": _nullable("string"),
+    "width_mm": _nullable("number"),
+    "points_mm": _nullable("array", items={"type": "array", "items": {"type": "number"}}),
+    "x_mm": _nullable("number"),
+    "y_mm": _nullable("number"),
+    "diameter_mm": _nullable("number"),
+    "drill_mm": _nullable("number"),
+    "question": _nullable("string"),
+    "text": _nullable("string"),
+}
+
 REPLY_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -27,33 +70,28 @@ REPLY_SCHEMA = {
         "done": {"type": "boolean", "description": "true when no further round is needed after these actions."},
         "actions": {
             "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["type"],
-                "properties": {
-                    "type": {"type": "string", "enum": list(ACTION_TYPES)},
-                    "options": {"type": "object", "additionalProperties": True,
-                                "description": "set_options: keys from the option list in the prompt."},
-                    "scope": {"type": "string", "enum": ["board", "nets", "sheets", "selection"]},
-                    "nets": {"type": "array", "items": {"type": "string"}},
-                    "sheets": {"type": "array", "items": {"type": "string"}},
-                    "net": {"type": "string"},
-                    "layer": {"type": "string"},
-                    "width_mm": {"type": "number"},
-                    "points_mm": {"type": "array", "items": {"type": "array", "items": {"type": "number"},
-                                                             "minItems": 2, "maxItems": 2}},
-                    "x_mm": {"type": "number"},
-                    "y_mm": {"type": "number"},
-                    "diameter_mm": {"type": "number"},
-                    "drill_mm": {"type": "number"},
-                    "question": {"type": "string"},
-                    "text": {"type": "string"},
-                },
-            },
+            "items": {"type": "object", "additionalProperties": False,
+                      "required": list(_ACTION_PROPS), "properties": _ACTION_PROPS},
         },
     },
 }
+
+
+def normalize(reply: dict) -> dict:
+    """Drop the nulls strict mode forces the model to write."""
+    if not isinstance(reply, dict):
+        return reply
+    acts = []
+    for act in reply.get("actions") or []:
+        if not isinstance(act, dict):
+            continue
+        clean = {k: v for k, v in act.items() if v is not None}
+        if isinstance(clean.get("options"), dict):
+            clean["options"] = {k: v for k, v in clean["options"].items() if v is not None}
+        acts.append(clean)
+    out = dict(reply)
+    out["actions"] = acts
+    return out
 
 
 def validate(reply: dict) -> List[str]:

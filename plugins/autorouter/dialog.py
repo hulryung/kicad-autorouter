@@ -420,6 +420,10 @@ class AutorouterDialog(wx.Dialog):
                                        on_remove=lambda pid: self._remove_native_path(pid))
             self._refill_if_wanted()
             pcbnew.Refresh()
+            try:
+                self.board.BuildConnectivity()
+            except Exception:
+                pass
             failed = sorted({problem.nets[c.net].name for c in result.failed})
             outcome = {"error": None, "scope": spec.get("scope", "board"),
                        "connections_in_scope": problem.stats["connections"], "routed": result.routed,

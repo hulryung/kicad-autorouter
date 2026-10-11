@@ -73,6 +73,7 @@ class Assistant:
             self.log(f"[ai] round {round_no}: asking Codex ({self.model or 'default model'})...")
             reply = codex.run(self.binary, prompt, self.workdir, schema=act_mod.REPLY_SCHEMA, model=self.model,
                               on_output=lambda line: None, cancelled=self.cancelled, poll=self.poll)
+            reply = act_mod.normalize(reply)
             problems = act_mod.validate(reply)
             self.transcript.append({"round": round_no, "reply": reply, "problems": problems})
             self.log(f"[ai] {reply.get('summary', '').strip()}")
