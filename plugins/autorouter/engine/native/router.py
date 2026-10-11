@@ -28,7 +28,7 @@ ProgressFn = Callable[[int, int, int, int, str], None]    # done, total, routed,
 PathFn = Callable[[RoutedPath], None]
 RemoveFn = Callable[[int], None]                            # path id
 RIP_PENALTY = 400                                           # per cell, in cost units (40 straight cells)
-MAX_BLOCKERS = 4
+MAX_BLOCKERS = 6
 
 
 class RouteResult:
@@ -248,9 +248,13 @@ class Router:
 
     # ---- routing one connection ------------------------------------------
 
+    def _key(self, conn: Connection) -> Tuple[int, int]:
+        net = self.p.nets[conn.net]
+        return (conn.width or net.rules.width, net.rules.clearance)
+
     def _search(self, conn: Connection, via_cost: int, cap: int, soft: bool, cancelled):
         net = self.p.nets[conn.net]
-        owners = self.p.owners[net.rules.key]
+        owners = self.p.owners[self._key(conn)]
         a_cells, a_anchors = self._component(conn.net, conn.a)
         b_cells, b_anchors = self._component(conn.net, conn.b)
         if not a_cells or not b_cells:
@@ -261,10 +265,13 @@ class Router:
         # too close to that net; only use them when nothing else is left
         goals = {c for c in b_cells if owners[c] in (0, net.code)} or b_cells
         sources = {c for c in a_cells if owners[c] in (0, net.code)} or a_cells
-        via_reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / self.grid.pitch)))
+        width = conn.width or net.rules.width
+        # cells to check around a via centre: the barrel beyond the track half
+        # width, plus one cell because the check samples cell centres
+        via_reach = max(0, int(math.ceil((net.rules.via_diameter - width) / 2 / self.grid.pitch))) + 1
         kwargs = {}
         if soft:
-            kwargs = {"routed": self.routed[net.rules.key],
+            kwargs = {"routed": self.routed[self._key(conn)],
                       "rippable": lambda pid: self._rippable(pid, conn),
                       "rip_penalty": RIP_PENALTY}
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
@@ -282,12 +289,12 @@ class Router:
 
     def _commit(self, conn: Connection, cells: List[int], on_path) -> _Path:
         net = self.p.nets[conn.net]
-        owners = self.p.owners[net.rules.key]
+        owners = self.p.owners[self._key(conn)]
         own_cells = set(cells)
         cells = _smooth(self.grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, net.code))
         segments, vias = _simplify(self.grid, cells)
         segments = _with_pad_entries(self.grid, net, cells, segments)
-        rp = RoutedPath(net.code, net.rules.width, segments, vias, net.rules.via_diameter,
+        rp = RoutedPath(net.code, conn.width or net.rules.width, segments, vias, net.rules.via_diameter,
                         net.rules.via_drill, pid=self.next_pid)
         self.next_pid += 1
         path = _Path(rp.pid, conn, rp, cells)
@@ -330,7 +337,8 @@ class Router:
         opts = self.opts
         result = RouteResult()
         started = time.time()
-        queue = sorted(self.p.connections, key=lambda c: c.estimate)
+        # fine-pitch escapes first (they have the least room), then shortest first
+        queue = sorted(self.p.connections, key=lambda c: (c.priority, c.estimate))
         total = len(queue)
         failed: List[Connection] = []
         done = 0
@@ -368,7 +376,7 @@ class Router:
                 if not cells:
                     still.append(conn)
                     continue
-                routed = self.routed[self.p.nets[conn.net].rules.key]
+                routed = self.routed[self._key(conn)]
                 blockers = sorted({routed[c] for c in cells
                                    if routed[c] and self.paths.get(routed[c]) and
                                    self.paths[routed[c]].conn.net != conn.net})

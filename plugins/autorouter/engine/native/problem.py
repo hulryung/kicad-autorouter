@@ -32,6 +32,7 @@ class Cluster:
     cells: Set[int] = field(default_factory=set)          # grid indices (all layers)
     anchors: List[Tuple[int, int]] = field(default_factory=list)   # (cx, cy) pad centres, for the heuristic
     refs: Set[str] = field(default_factory=set)           # footprints whose pads are in here
+    tight: bool = False                                   # holds a necked-down (fine-pitch) escape
 
 
 @dataclass
@@ -52,6 +53,8 @@ class Connection:
     a: int                  # cluster indices in NetInfo.clusters
     b: int
     estimate: int           # cells, for ordering
+    priority: int = 1       # 0 = touches a fine-pitch escape: routed first, like a designer would
+    width: int = 0          # nm; 0 = the net's width. Fine-pitch connections use the neck width.
 
 
 @dataclass

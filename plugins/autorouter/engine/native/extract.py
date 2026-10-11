@@ -231,8 +231,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if code <= 0 or _skip_net(net, options):
             continue
         nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options))
-    keys = sorted({n.rules.key for n in nets.values()}) or [(board.GetDesignSettings().m_TrackMinWidth,
-                                                              board.GetDesignSettings().m_MinClearance)]
+    # Connections that end on fine-pitch pins are routed at the board's
+    # narrowest pre-defined width (the neck width), as a designer would, so
+    # the escapes and the tracks between the pins have room. Those widths
+    # need owner maps of their own.
+    keys = {n.rules.key for n in nets.values()}
+    if options.neck_down:
+        for n in nets.values():
+            narrow = neck_width(board, n.rules)
+            if narrow < n.rules.width:
+                keys.add((narrow, n.rules.clearance))
+    keys = sorted(keys) or [(board.GetDesignSettings().m_TrackMinWidth, board.GetDesignSettings().m_MinClearance)]
     owners = {key: grid.new_owner_map() for key in keys}
     via_block = bytearray(grid.plane)
     ds = board.GetDesignSettings()
@@ -506,7 +515,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             for li in pl:
                 if grid.inside(*centre):
                     net.endpoints[grid.index(li, *centre)] = (pos.x, pos.y, pos.x, pos.y, net.rules.width)
-        pad_cells.setdefault(code, []).append((pad, target_cells, centre, fp.GetReference() if fp else ""))
+        pad_cells.setdefault(code, []).append((pad, target_cells, centre, fp.GetReference() if fp else "",
+                                               chosen is not None and stub_w < net.rules.width))
 
     # Clusters (pads already joined by copper) and the connections between them.
     say("Building the connection list...")
@@ -514,7 +524,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     connections: List[Connection] = []
     for code, entries in pad_cells.items():
         net = nets[code]
-        index_of = {id(pad): i for i, (pad, _, _, _) in enumerate(entries)}
+        index_of = {id(pad): i for i, (pad, _, _, _, _) in enumerate(entries)}
         parent = list(range(len(entries)))
 
         def find(i):
@@ -523,7 +533,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 i = parent[i]
             return i
 
-        for i, (pad, _, _, _) in enumerate(entries):
+        for i, (pad, _, _, _, _) in enumerate(entries):
             try:
                 linked = conn.GetConnectedItems(pad)
             except Exception:
@@ -532,19 +542,21 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 j = index_of.get(id(other))
                 if j is None and other.GetClass() == "PAD":
                     # a different wrapper object for the same pad: match by position/footprint
-                    for k, (cand, _, _, _) in enumerate(entries):
+                    for k, (cand, _, _, _, _) in enumerate(entries):
                         if cand.GetPosition() == other.GetPosition() and cand.GetNumber() == other.GetNumber():
                             j = k
                             break
                 if j is not None:
                     parent[find(i)] = find(j)
         groups: Dict[int, Cluster] = {}
-        for i, (pad, cells, centre, ref) in enumerate(entries):
+        for i, (pad, cells, centre, ref, tight) in enumerate(entries):
             cl = groups.setdefault(find(i), Cluster())
             cl.cells.update(cells)
             cl.anchors.append(centre)
             if ref:
                 cl.refs.add(ref)
+            if tight:
+                cl.tight = True
         net.clusters = list(groups.values())
         if len(net.clusters) < 2:
             continue
@@ -565,7 +577,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         while len(in_tree) < k:
             j = min(best_edge, key=lambda x: best_edge[x][0])
             d, i = best_edge.pop(j)
-            connections.append(Connection(code, i, j, d))
+            tight = net.clusters[i].tight or net.clusters[j].tight
+            width = neck_width(board, net.rules) if (tight and options.neck_down) else net.rules.width
+            connections.append(Connection(code, i, j, d, 0 if tight else 1, width))
             in_tree.add(j)
             for m in list(best_edge):
                 dm = dist(net.clusters[j], net.clusters[m])
