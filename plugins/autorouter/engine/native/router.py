@@ -28,7 +28,7 @@ ProgressFn = Callable[[int, int, int, int, str], None]    # done, total, routed,
 PathFn = Callable[[RoutedPath], None]
 RemoveFn = Callable[[int], None]                            # path id
 RIP_PENALTY = 400                                           # per cell, in cost units (40 straight cells)
-MAX_BLOCKERS = 6
+MAX_BLOCKERS = 10
 
 
 class RouteResult:

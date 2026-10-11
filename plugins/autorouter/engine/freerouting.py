@@ -49,7 +49,7 @@ class RouteOptions:
     """
     engine: str = ENGINE_BUILTIN
     native_pitch_mm: float = 0.1          # routing grid
-    native_via_cost: int = 50             # in grid cells of straight track
+    native_via_cost: int = 25             # in grid cells of straight track
     native_allow_vias: bool = True
     native_retry: bool = True             # second pass over failed connections
     native_max_expansions_k: int = 400    # A* search budget per connection, thousands

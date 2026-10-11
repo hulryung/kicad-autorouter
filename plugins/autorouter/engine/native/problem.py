@@ -92,13 +92,13 @@ class NativeOptions:
     via_mode: str = SIZE_NETCLASS
     via_diameter: int = 0
     via_drill: int = 0
-    via_cost: int = 50                 # in straight cells
+    via_cost: int = 25                 # in straight cells
     allow_vias: bool = True
     max_expansions: int = 400_000
     retry_failed: bool = True
     rip_up: bool = True                # rip up and reroute paths that block a failed connection
-    rip_rounds: int = 4                # how many rip-up rounds over the failed connections
-    rip_limit: int = 3                 # how often one connection may be ripped up
+    rip_rounds: int = 8                # how many rip-up rounds over the failed connections
+    rip_limit: int = 5                 # how often one connection may be ripped up
     skip_nets: List[str] = field(default_factory=list)       # names or fnmatch patterns
     ignore_net_classes: List[str] = field(default_factory=list)
     routable_layers: Optional[List[bool]] = None             # over the board's copper stack

@@ -136,7 +136,7 @@ class AutorouterDialog(wx.Dialog):
                          "Track centrelines snap to this grid. Smaller is more precise and slower; "
                          "about half the smallest pad pitch works well.")
         self.pitch.SetDigits(3)
-        self.native_via_cost = row("Via cost (grid cells)", wx.SpinCtrl(page, min=0, max=100000, initial=50),
+        self.native_via_cost = row("Via cost (grid cells)", wx.SpinCtrl(page, min=0, max=100000, initial=25),
                                    "A via costs as much as this many cells of straight track.")
         self.native_budget = row("Search budget per connection (k cells)",
                                  wx.SpinCtrl(page, min=10, max=100000, initial=400),
