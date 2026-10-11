@@ -33,14 +33,26 @@ button opens a dialog with two routing engines and an AI assistant:
 
 ## Installation
 
-### From a zip, with the Plugin and Content Manager
+### With the Plugin and Content Manager (recommended)
 
-1. Build or download `kicad-autorouter-<version>.zip` (`python3 scripts/build-package.py`
-   writes it to `release/`).
-2. In KiCad: **Plugin and Content Manager → Install from File…**, pick the zip,
-   **Apply Pending Changes**.
+1. In KiCad: **Plugin and Content Manager → Manage… → Add Repository**, paste
+   ```
+   https://raw.githubusercontent.com/hulryung/kicad-autorouter-pcm/main/repository.json
+   ```
+2. Switch the repository dropdown to **KiCad Autorouter Repository**, select
+   **Autorouter**, **Install**, then **Apply Pending Changes**.
 3. The *Autorouter* button appears in the PCB editor's toolbar
-   (**Tools → External Plugins** lists it too).
+   (**Tools → External Plugins** lists it too). The PCM also tells you when a
+   newer version is published.
+
+The source repository is private; the PCM repository above holds only the
+installable packages and their metadata. Maintainers publish a new version with
+`python3 scripts/publish-pcm.py` after bumping `__version__` and `metadata.json`.
+
+### From a zip
+
+`python3 scripts/build-package.py` writes `release/kicad-autorouter-<version>.zip`;
+**Plugin and Content Manager → Install from File…** installs it.
 
 ### For development
 
