@@ -40,6 +40,10 @@ class NetInfo:
     name: str
     rules: NetRules
     clusters: List[Cluster] = field(default_factory=list)
+    # grid cell -> (exit x, exit y, pad x, pad y) in nm: a route that starts or
+    # ends on this cell continues off-grid to the exit point and then along
+    # the pad's axis into the pad centre, the way a hand-routed escape does.
+    endpoints: Dict[int, Tuple[int, int, int, int, int]] = field(default_factory=dict)   # + stub width
 
 
 @dataclass
@@ -54,10 +58,13 @@ class Connection:
 class RoutedPath:
     net: int
     width: int
-    segments: List[Tuple[int, int, int, int, int]]   # (layer index, x1, y1, x2, y2) in nm
+    # (layer index, x1, y1, x2, y2) in nm, or with a sixth item: a width that
+    # differs from the path's width (necked-down pad escapes)
+    segments: List[Tuple]
     vias: List[Tuple[int, int]]                      # (x, y) in nm
     via_diameter: int
     via_drill: int
+    pid: int = 0                     # set by the router; rip-up removes paths by id
 
 
 SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS = "board", "selection", "sheets"
@@ -76,6 +83,7 @@ class NativeOptions:
     scope_sheets: List[str] = field(default_factory=list)
     # Track width and via size: per net from the net class (KiCad's default),
     # the editor's current track/via selection, or one fixed size (nm).
+    neck_down: bool = True          # narrower escape stubs at fine-pitch pads
     track_mode: str = SIZE_NETCLASS
     track_width: int = 0
     via_mode: str = SIZE_NETCLASS
@@ -85,6 +93,9 @@ class NativeOptions:
     allow_vias: bool = True
     max_expansions: int = 400_000
     retry_failed: bool = True
+    rip_up: bool = True                # rip up and reroute paths that block a failed connection
+    rip_rounds: int = 4                # how many rip-up rounds over the failed connections
+    rip_limit: int = 3                 # how often one connection may be ripped up
     skip_nets: List[str] = field(default_factory=list)       # names or fnmatch patterns
     ignore_net_classes: List[str] = field(default_factory=list)
     routable_layers: Optional[List[bool]] = None             # over the board's copper stack
@@ -104,3 +115,4 @@ class RoutingProblem:
     stats: Dict[str, float] = field(default_factory=dict)
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum
     max_via_drill: int = 0                        # nm, the largest via drill any net uses
+    safety: int = 0                               # nm added to every obstacle radius

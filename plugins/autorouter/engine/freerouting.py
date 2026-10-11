@@ -73,6 +73,7 @@ class RouteOptions:
     routable_layers: Optional[List[bool]] = None        # top to bottom; None = all
     horizontal_layers: Optional[List[bool]] = None      # top to bottom; None = engine default
     remove_existing_tracks: bool = False
+    refill_zones: bool = True             # refill pours after routing
     max_heap_mb: int = 0                  # JVM -Xmx; 0 = JVM default (1/4 of RAM)
     extra_args: str = ""                  # anything else, verbatim
 

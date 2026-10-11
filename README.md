@@ -105,17 +105,33 @@ obstacle, and existing tracks of other nets are respected.
 2. **Route** (worker thread): connections are routed shortest first with a
    multi-source, multi-layer A* (8 directions, no corner cutting, preferred
    direction per layer, via cost, turn penalty). A routed connection becomes
-   an obstacle for the ones after it. Failed connections get a second try with
-   a larger budget and cheaper vias.
+   an obstacle for the ones after it. A connection that cannot be routed gets
+   a **rip-up and reroute** pass: a second search may cross paths this run
+   created (never pads, existing copper or keepouts) at a penalty; the paths
+   it crosses are removed from the board, the connection is routed, and the
+   removed ones are rerouted. Whatever is still open gets a last try with a
+   larger budget and cheaper vias.
+   - **Pad escapes**: SMD pads are left along the pad's long axis, from the
+     pad centre to an exit point just past the pad end, the way a hand-routed
+     escape does; the grid search starts and ends at that exit. At fine-pitch
+     pads (neighbours closer than width + 2 x clearance) the escape is necked
+     down to the board's narrowest pre-defined track width, as designers do.
+   - Obstacles carry a 10 µm safety margin so diagonal cell steps never land
+     inside the clearance.
 3. **Apply** (PCB API, main thread): each path becomes `PCB_TRACK` segments and
    through `PCB_VIA`s with the net class's sizes, added to the open board at
-   once. KiCad records the whole run as one undo step.
+   once; ripped-up paths are removed again. Copper zones are refilled at the
+   end (optional) so pours clear the new copper. KiCad records the whole run as
+   one undo step.
 
-Limits of this first version: no rip-up and reroute (a connection that cannot
-be routed is reported, not forced through), through vias only, zones are not
-obstacles (KiCad refills them around the new tracks), and the grid is uniform,
-so very fine-pitch parts want a smaller pitch (slower) or a hand-routed escape.
-The Freerouting engine remains the stronger choice for dense boards.
+Limits: through vias only, filled zones are not obstacles (they are refilled
+around the new tracks, so pour nets are best left to the pour: list them under
+*Nets to leave unrouted*), and the grid is uniform, so very fine-pitch parts
+want a smaller pitch (slower).
+
+Measured on a finished 4-layer board (71 footprints, 75 nets, DRC clean) with
+all tracks removed and the pour nets skipped: 76 of 78 connections rerouted,
+0 DRC violations, total track length within 5% of the original artwork.
 
 ### Data folder
 

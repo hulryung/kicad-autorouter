@@ -9,13 +9,14 @@ from .problem import LayerInfo, RoutedPath
 def add_path(board, layers: List[LayerInfo], path: RoutedPath) -> List[object]:
     """Create the items for one path and add them to the board; returns them."""
     added = []
-    for layer, x1, y1, x2, y2 in path.segments:
+    for seg in path.segments:
+        layer, x1, y1, x2, y2 = seg[:5]
         if (x1, y1) == (x2, y2):
             continue
         track = pcbnew.PCB_TRACK(board)
         track.SetStart(pcbnew.VECTOR2I(x1, y1))
         track.SetEnd(pcbnew.VECTOR2I(x2, y2))
-        track.SetWidth(path.width)
+        track.SetWidth(seg[5] if len(seg) > 5 else path.width)
         track.SetLayer(layers[layer].kicad_id)
         track.SetNetCode(path.net)
         board.Add(track)

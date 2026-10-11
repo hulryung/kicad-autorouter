@@ -21,10 +21,16 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           sources: Iterable[int], goals: Set[int], anchors: Sequence[Tuple[int, int]],
           horizontal: Sequence[bool], via_cost: int, allow_vias: bool, via_reach: int,
           max_expansions: int, turn_cost: int = 2,
-          cancelled=None) -> Optional[List[int]]:
-    """The cell path (grid indices, source to goal) or None."""
+          cancelled=None, routed=None, rippable=None, rip_penalty: int = 0) -> Optional[List[int]]:
+    """The cell path (grid indices, source to goal) or None.
+
+    With `routed` (cell -> path id of routed copper, 0 for none) and
+    `rippable(pid)`, cells of other paths that may be ripped up are passable
+    at rip_penalty per cell: the result then says which paths are in the way.
+    """
     w, plane, nlayers = grid.w, grid.plane, grid.layers
     via_step = via_cost * STRAIGHT
+    soft = routed is not None and rippable is not None
     anchors = list(anchors) or [grid.unpack(next(iter(goals)))[1:]]
 
     def h(idx: int) -> int:
@@ -41,7 +47,18 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
 
     def passable(idx: int) -> bool:
         o = owners[idx]
-        return o == 0 or o == net or idx in goals
+        if o == 0 or o == net or idx in goals:
+            return True
+        if soft:
+            pid = routed[idx]
+            return pid != 0 and rippable(pid)
+        return False
+
+    def extra(idx: int) -> int:
+        """Rip-up penalty for stepping onto another path's cell."""
+        if soft and owners[idx] not in (0, net) and routed[idx] != 0:
+            return rip_penalty
+        return 0
 
     # The via barrel reaches via_reach cells beyond the track half-width the
     # owner maps already account for: every cell of that disc must be free of
@@ -61,6 +78,8 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
             for layer in range(nlayers):
                 o = owners[layer * plane + off]
                 if o != 0 and o != net:
+                    if soft and routed[layer * plane + off] != 0 and rippable(routed[layer * plane + off]):
+                        continue
                     return False
         return True
 
@@ -114,7 +133,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 step = STRAIGHT if along else AGAINST_STRAIGHT
             if move != -1 and move != m:
                 step += turn_cost
-            ng = gc + step
+            ng = gc + step + extra(nidx)
             if ng < g.get(nidx, 1 << 60):
                 g[nidx] = ng
                 came[nidx] = (idx, m)
@@ -126,7 +145,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 nidx = other * plane + rest
                 if nidx in closed or not passable(nidx):
                     continue
-                ng = gc + via_step
+                ng = gc + via_step + extra(nidx)
                 if ng < g.get(nidx, 1 << 60):
                     g[nidx] = ng
                     came[nidx] = (idx, 8)

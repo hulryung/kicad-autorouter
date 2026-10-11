@@ -92,10 +92,12 @@ def main(argv):
             print(f"  {done}/{total} routed={routed} failed={failed} ({time.time() - t1:.0f}s) {name}")
 
     result = router.run(problem, progress=progress)
-    print(f"route: {result.routed} routed, {len(result.failed)} failed in {result.seconds:.1f}s")
+    print(f"route: {result.routed} routed, {len(result.failed)} failed, {result.ripped} ripped up in {result.seconds:.1f}s")
     for conn in result.failed[:20]:
         print("   failed:", problem.nets[conn.net].name)
     items = apply.add_paths(board, problem.layers, result.paths)
+    from autorouter.engine import session
+    print(f"refilled {session.refill_zones(board)} zones")
     target = out / board_file.name
     for sidecar in (".kicad_pro", ".kicad_prl"):
         src = board_file.with_suffix(sidecar)

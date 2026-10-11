@@ -71,6 +71,59 @@ def net_rules(board, net, options: Optional[NativeOptions] = None) -> NetRules:
                     via_drill=max(int(via_drill), 1))
 
 
+def neck_width(board, rules: NetRules) -> int:
+    """The narrowest pre-defined track width the board offers (not below the
+    board minimum); the net's own width if there is nothing narrower."""
+    sizes = board_sizes(board)
+    candidates = [w for w in sizes["track_widths"] if sizes["min_track_width"] <= w < rules.width]
+    return min(candidates) if candidates else rules.width
+
+
+def tight_pads(fp, limit: int) -> Set[str]:
+    """Pad numbers of a footprint that have another pad closer than limit
+    (centre to centre): fine-pitch pins whose escapes need care."""
+    pads = [(p.GetNumber(), p.GetPosition().x, p.GetPosition().y) for p in fp.Pads()]
+    tight: Set[str] = set()
+    limit2 = limit * limit
+    for i, (ni, xi, yi) in enumerate(pads):
+        for nj, xj, yj in pads[i + 1:]:
+            if (xi - xj) ** 2 + (yi - yj) ** 2 < limit2:
+                tight.add(ni)
+                tight.add(nj)
+    return tight
+
+
+def pad_escape(pad, fp, rules: NetRules, pitch: int) -> Optional[List[Tuple[int, int]]]:
+    """Where a track may leave an SMD pad: points on the pad's long axis, just
+    far enough past either pad end that the track is clear of the neighbouring
+    pads (clearance + half width + one cell), the side pointing away from the
+    footprint centre first. None for through-hole pads, which can be entered
+    from any side."""
+    if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN):
+        return None
+    size = pad.GetSize()
+    sx, sy = int(size.x), int(size.y)
+    if sx <= 0 or sy <= 0:
+        return None
+    angle = math.radians(pad.GetOrientationDegrees())
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    if sx >= sy:
+        axis, half = (cos_a, sin_a), sx / 2
+    else:
+        axis, half = (-sin_a, cos_a), sy / 2
+    reach = half + rules.clearance + rules.width / 2 + pitch
+    pos = pad.GetPosition()
+    centre = fp.GetPosition() if fp is not None else pos
+    options = []
+    for sign in (1, -1):
+        ex = pos.x + sign * axis[0] * reach
+        ey = pos.y + sign * axis[1] * reach
+        away = (ex - centre.x) ** 2 + (ey - centre.y) ** 2
+        options.append((away, int(round(ex)), int(round(ey))))
+    options.sort(reverse=True)                       # away from the footprint centre first
+    return [(ex, ey) for _, ex, ey in options]
+
+
 def footprint_of(pad):
     parent = pad.GetParentFootprint()
     if parent is None:
@@ -207,12 +260,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             own = 0
         return max(own, clearance_of(code))
 
+    # Paths run between cell centres, and a diagonal step passes up to a few
+    # micrometres closer to an obstacle than either of its end cells. A small
+    # safety margin on every obstacle keeps the DRC exact.
+    safety = max(pitch // 10, 5_000)
+
     def claim(layer: int, code: int, cells_for, own_clr: Optional[int] = None) -> None:
         """cells_for(r) -> cells; one radius per owner map."""
         if own_clr is None:
             own_clr = clearance_of(code)
         for (width, clearance), own in owners.items():
-            r = max(clearance, own_clr) + width // 2
+            r = max(clearance, own_clr) + width // 2 + safety
             grid.mark(own, cells_for(r), code if code > 0 and code in nets else BLOCKED)
 
     # Board edge: everything outside, plus the edge clearance band.
@@ -250,6 +308,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Pads: obstacles for other nets, targets for their own.
     say("Rasterizing pads...")
     pad_cells: Dict[int, List[Tuple[object, Set[int], Tuple[int, int], str]]] = {}
+    tight_by_fp: Dict[int, Set[str]] = {}
+    pending = []
     for pad in board.GetPads():
         code = pad.GetNetCode()
         pl = [layer_of[l] for l in pad.GetLayerSet().CuStack() if l in layer_of]
@@ -284,8 +344,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if hole_radius:
             block_vias_near_hole(pos.x, pos.y, hole_radius)
         if code in nets:
-            fp = footprint_of(pad)
-            pad_cells.setdefault(code, []).append((pad, own_cells, centre, fp.GetReference() if fp else ""))
+            pending.append((pad, code, pl, pos, own_cells, centre))
 
     # Existing tracks and vias.
     say("Rasterizing existing tracks...")
@@ -338,6 +397,75 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             claim(layer.index, 0, lambda r, shape=shape, box=box, li=layer.index:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)))
+
+    # Pad escapes, now that every other piece of copper is on the maps: a stub
+    # from the pad centre along the pad axis to an exit point, used only when
+    # that lane is free of other nets' copper.
+    say("Planning pad escapes...")
+    exit_owner: Dict[int, int] = {}            # exit cell -> net, to keep lanes apart
+    max_r = max(max(clearance, ds.m_MinClearance) + width // 2 + safety for (width, clearance) in keys)
+    for pad, code, pl, pos, own_cells, centre in pending:
+        fp = footprint_of(pad)
+        net = nets[code]
+        own = owners[net.rules.key]
+        stub_w = net.rules.width
+        escapes = pad_escape(pad, fp, net.rules, pitch)
+        if escapes and fp is not None and options.neck_down:
+            key = fp.GetReference()
+            if key not in tight_by_fp:
+                # neighbours closer than width + 2 * clearance + a cell of slack
+                tight_by_fp[key] = tight_pads(fp, net.rules.width + 2 * net.rules.clearance + pitch + 60_000)
+            if pad.GetNumber() in tight_by_fp[key]:
+                stub_w = neck_width(board, net.rules)
+        exit_cells: Set[int] = set()
+        chosen = None
+        for ex, ey in (escapes or []):
+            # Snap the exit to the grid by flooring on both axes, so the pins
+            # of one row all shift the same way and keep their pitch.
+            ecx = int(math.floor((ex - grid.ox) / pitch))
+            ecy = int(math.floor((ey - grid.oy) / pitch))
+            if not grid.inside(ecx, ecy):
+                continue
+            gx, gy = grid.nm_x(ecx), grid.nm_y(ecy)
+            lane = []
+            for li in pl:
+                lane += grid.segment_cells(li, pos.x, pos.y, ex, ey, 0)
+                lane += grid.segment_cells(li, ex, ey, gx, gy, 0)
+                lane.append(grid.index(li, ecx, ecy))
+            if not all(own[idx] in (0, code) for idx in lane):
+                continue
+            # and this lane's clearance zone must not cover another net's exit
+            zone_r = max_r + stub_w // 2
+            zone = []
+            for li in pl:
+                zone += grid.segment_cells(li, pos.x, pos.y, ex, ey, zone_r)
+                zone += grid.segment_cells(li, ex, ey, gx, gy, zone_r)
+            if any(exit_owner.get(idx, code) != code for idx in zone):
+                continue
+            chosen = (ex, ey, ecx, ecy, gx, gy)
+            break
+        if chosen is not None:
+            ex, ey, ecx, ecy, gx, gy = chosen
+            half = stub_w // 2
+            for li in pl:
+                idx = grid.index(li, ecx, ecy)
+                exit_cells.add(idx)
+                exit_owner[idx] = code
+                net.endpoints[idx] = (ex, ey, pos.x, pos.y, stub_w)
+                # The stub (pad centre -> exit point -> grid cell) is this net's
+                # copper, with the track's own half width: nobody else may come
+                # within clearance of the escape lane.
+                claim(li, code, lambda r, li=li, ex=ex, ey=ey, gx=gx, gy=gy, half=half:
+                      grid.segment_cells(li, pos.x, pos.y, ex, ey, r + half)
+                      + grid.segment_cells(li, ex, ey, gx, gy, r + half))
+            target_cells = exit_cells
+            centre = (ecx, ecy)
+        else:
+            target_cells = own_cells
+            for li in pl:
+                if grid.inside(*centre):
+                    net.endpoints[grid.index(li, *centre)] = (pos.x, pos.y, pos.x, pos.y, net.rules.width)
+        pad_cells.setdefault(code, []).append((pad, target_cells, centre, fp.GetReference() if fp else ""))
 
     # Clusters (pads already joined by copper) and the connections between them.
     say("Building the connection list...")
@@ -407,7 +535,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     connections = in_scope(board, nets, connections, options)
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
-                             hole_to_hole=hole_to_hole, max_via_drill=max_via_drill)
+                             hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety)
     problem.stats = {"extract_seconds": time.time() - t0, "cells": grid.size,
                      "nets": len(nets), "connections": len(connections),
                      "all_connections": all_connections, "owner_maps": len(owners)}

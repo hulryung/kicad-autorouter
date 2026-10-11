@@ -186,7 +186,12 @@ class AutorouterDialog(wx.Dialog):
         self.remove_existing = wx.CheckBox(page, label="Remove existing tracks and vias first")
         self.remove_existing.SetToolTip("Otherwise existing routing is kept and only the "
                                         "unrouted connections are routed.")
-        box.Add(self.remove_existing, 0, wx.LEFT | wx.BOTTOM, 10)
+        box.Add(self.remove_existing, 0, wx.LEFT | wx.BOTTOM, 6)
+        self.refill = wx.CheckBox(page, label="Refill copper zones when done")
+        self.refill.SetToolTip("Pours are refilled around the new tracks and vias, as Edit > Fill All "
+                               "Zones would; otherwise the DRC reports the stale fills.")
+        self.refill.SetValue(True)
+        box.Add(self.refill, 0, wx.LEFT | wx.BOTTOM, 10)
         page.SetSizer(box)
         return page
 
@@ -321,6 +326,7 @@ class AutorouterDialog(wx.Dialog):
         self.extra.SetValue(o.extra_args)
         self.fanout.SetValue(o.fanout)
         self.remove_existing.SetValue(o.remove_existing_tracks)
+        self.refill.SetValue(o.refill_zones)
         for i, name in enumerate(self.net_classes):
             self.skip_classes.Check(i, name in o.ignore_net_classes)
         if o.routable_layers and len(o.routable_layers) == len(self.layers):
@@ -362,6 +368,7 @@ class AutorouterDialog(wx.Dialog):
             horizontal_layers=[self.horizontal.IsChecked(i) for i in range(n)]
             if self.override_dirs.GetValue() else None,
             remove_existing_tracks=self.remove_existing.GetValue(),
+            refill_zones=self.refill.GetValue(),
             max_heap_mb=self.heap.GetValue(),
             extra_args=self.extra.GetValue().strip(),
         )
@@ -525,10 +532,15 @@ class AutorouterDialog(wx.Dialog):
         def on_path(path):
             wx.CallAfter(self._add_native_path, path)
 
+        def on_remove(pid):
+            wx.CallAfter(self._remove_native_path, pid)
+
+        self._path_items = {}
+
         def work():
             try:
                 result = native_router.run(problem, progress=progress, on_path=on_path,
-                                           cancelled=lambda: self._cancel)
+                                           cancelled=lambda: self._cancel, on_remove=on_remove)
             except Exception as e:
                 logger.exception("Routing failed")
                 wx.CallAfter(self._native_done, None, e)
@@ -537,9 +549,17 @@ class AutorouterDialog(wx.Dialog):
 
         threading.Thread(target=work, name="autorouter-native", daemon=True).start()
 
+    def _remove_native_path(self, pid):
+        """Rip-up: take a path's tracks and vias off the board again."""
+        for item in self._path_items.pop(pid, []):
+            try:
+                self.board.Remove(item)
+            except Exception as e:
+                logger.warning("Could not remove a ripped-up item: %s", e)
+
     def _add_native_path(self, path):
         try:
-            native_apply.add_path(self.board, self._native_layers, path)
+            self._path_items[path.pid] = native_apply.add_path(self.board, self._native_layers, path)
             self.applied = True
         except Exception as e:
             logger.exception("Adding a routed path failed")
@@ -551,21 +571,38 @@ class AutorouterDialog(wx.Dialog):
 
     def _native_done(self, result, error):
         self._set_busy(False)
-        pcbnew.Refresh()
         if error is not None:
+            pcbnew.Refresh()
             self._show_progress(f"Routing failed: {error}", 0.0)
             return
+        self._refill_if_wanted()
+        pcbnew.Refresh()
         if result.cancelled:
             text = f"Cancelled after {result.routed} connections; they stay on the board (Ctrl+Z removes them)."
             self._show_progress(text, 0.0)
             return
         failed = sorted({self.board.FindNet(c.net).GetNetname() for c in result.failed})
         text = f"Done: {result.routed} connections routed in {result.seconds:.0f}s"
+        if getattr(result, "ripped", 0):
+            text += f" ({result.ripped} rerouted)"
         if result.failed:
             text += f", {len(result.failed)} not routed ({', '.join(failed[:6])}{'...' if len(failed) > 6 else ''})"
             self._append_log("[plugin] unrouted: " + ", ".join(failed))
         text += ".  Undo (Ctrl+Z) reverts it."
         self._show_progress(text, 1.0)
+
+    def _refill_if_wanted(self):
+        if not self.refill.GetValue():
+            return
+        try:
+            self._show_progress("Refilling copper zones...", None)
+            wx.SafeYield(self, True)
+            n = session.refill_zones(self.board)
+            if n:
+                self._append_log(f"[plugin] refilled {n} copper zones")
+        except Exception as e:
+            logger.exception("Zone refill failed")
+            self._append_log(f"[plugin] zone refill failed: {e!r}")
 
     # ---- Freerouting --------------------------------------------------------
 
@@ -621,6 +658,7 @@ class AutorouterDialog(wx.Dialog):
             try:
                 session.import_ses(self.board, self.job.ses)
                 self.applied = True
+                self._refill_if_wanted()
                 pcbnew.Refresh()
             except Exception as e:
                 logger.exception("Importing the session failed")

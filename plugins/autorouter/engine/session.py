@@ -84,3 +84,14 @@ def remove_tracks(board) -> int:
     for item in items:
         board.Remove(item)
     return len(items)
+
+
+def refill_zones(board) -> int:
+    """Refill every copper zone so pours clear the new tracks and vias, as
+    Edit > Fill All Zones does. Returns the number of zones filled."""
+    import pcbnew
+    zones = [z for z in board.Zones() if not z.GetIsRuleArea()]
+    if zones:
+        filler = pcbnew.ZONE_FILLER(board)
+        filler.Fill(board.Zones())
+    return len(zones)
