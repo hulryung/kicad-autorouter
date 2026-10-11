@@ -58,7 +58,8 @@ class Connection:
     b: int
     estimate: int           # cells, for ordering
     priority: int = 1       # 0 = touches a fine-pitch escape: routed first, like a designer would
-    width: int = 0          # nm; 0 = the net's width. Fine-pitch connections use the neck width.
+    width: int = 0          # nm; 0 = the net's width
+    neck: int = 0           # nm; >0: near fine-pitch ends the track is this narrow, then widens
     pair: int = 0           # >0: id shared by the two connections of a differential pair
 
 
@@ -94,6 +95,7 @@ class NativeOptions:
     # Track width and via size: per net from the net class (KiCad's default),
     # the editor's current track/via selection, or one fixed size (nm).
     neck_down: bool = True          # narrower escape stubs at fine-pitch pads
+    neck_length_mm: float = 1.5     # how far from a fine-pitch pin the track stays at the neck width
     fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
     diff_pairs: bool = True         # route +/- pairs coupled, at the net class pair width and gap
     stitch_vias: bool = True        # via stitching across pour nets that span several layers

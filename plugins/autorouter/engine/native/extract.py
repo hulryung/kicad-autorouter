@@ -74,20 +74,18 @@ class BoardHints:
 
 def auto_width(board, net, nc, hints: BoardHints, options: NativeOptions) -> int:
     """The width a designer would pick:
-    1. a net class other than Default is an explicit choice: its width;
-    2. tracks already on the board for this net: their usual width;
-    3. a power net (by name): the widest pre-defined width that still fits the
+    1. tracks already on the board for this net: their usual width;
+    2. a power net (by name): the widest pre-defined width that still fits the
        narrowest pad it lands on, never below the net class;
-    4. otherwise the net class width."""
+    3. otherwise the net class width (explicit classes included)."""
     code = net.GetNetCode()
-    if net.GetNetClassName() != "Default":
-        return nc.GetTrackWidth()
+    name = net.GetNetname()
     existing = hints.existing_width(code)
     if existing:
         return existing
-    name = net.GetNetname()
     if any(fnmatch.fnmatchcase(name, pat) or fnmatch.fnmatchcase(name.upper(), pat.upper())
            for pat in options.power_patterns):
+        # power: as wide as the narrowest pad allows, never below the class
         sizes = board_sizes(board)
         pad = hints.pad_min.get(code, 0)
         fitting = [w for w in sizes["track_widths"] if w <= pad]
@@ -400,7 +398,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Paths run between cell centres, and a diagonal step passes up to a few
     # micrometres closer to an obstacle than either of its end cells. A small
     # safety margin on every obstacle keeps the DRC exact.
-    safety = max(pitch // 10, 5_000)
+    safety = max(pitch // 5, 10_000)
 
     def claim(layer: int, code: int, cells_for, own_clr: Optional[int] = None) -> None:
         """cells_for(r) -> cells; one radius per owner map."""
@@ -793,8 +791,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             j = min(best_edge, key=lambda x: best_edge[x][0])
             d, i = best_edge.pop(j)
             tight = net.clusters[i].tight or net.clusters[j].tight
-            width = neck_width(board, net.rules) if (tight and options.neck_down and not net.partner) else net.rules.width
-            connections.append(Connection(code, i, j, d, 0 if tight else 1, width))
+            neck = neck_width(board, net.rules) if (tight and options.neck_down and not net.partner) else 0
+            connections.append(Connection(code, i, j, d, 0 if tight else 1, net.rules.width,
+                                          neck=neck if neck < net.rules.width else 0))
             in_tree.add(j)
             for m in list(best_edge):
                 dm = dist(net.clusters[j], net.clusters[m])

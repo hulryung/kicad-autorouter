@@ -25,12 +25,24 @@ def main():
     if not binary:
         print("test_ai_live: skipped (no codex CLI)")
         return
-    board_file = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "fixtures" / "obd2-adapter.kicad_pcb"
-    request = sys.argv[2] if len(sys.argv) > 2 else "Route this board completely. Leave GND to the pours."
+    args = [a for a in sys.argv[1:] if a != "--review"]
+    board_file = Path(args[0]) if args else HERE / "fixtures" / "obd2-adapter.kicad_pcb"
+    request = args[1] if len(args) > 1 else "Route this board completely. Leave GND to the pours."
     board = pcbnew.LoadBoard(str(board_file))
     work = Path(tempfile.mkdtemp(prefix="ai-live-"))
     print("workdir", work, "codex", codex.codex_version(binary))
     route_fn = headless.make_route_fn(board, log=print)
+    if "--review" in sys.argv:
+        from autorouter.engine.ai import review
+        rv = review.Reviewer(board, {}, route_fn, lambda: 0, work, log=print, max_rounds=2)
+        rounds = rv.run(request if request != "--review" else "")
+        print("scores:", [r["score"] for r in rounds])
+        out = work / board_file.name
+        pcbnew.SaveBoard(str(out), board)
+        print("saved", out)
+        assert rounds, "no review rounds"
+        print("test_ai_live: review ok")
+        return
     a = assistant.Assistant(board, {}, route_fn, lambda: 0, work, log=print, max_rounds=3, with_drc=True)
     history = a.run(request)
     for h in history:

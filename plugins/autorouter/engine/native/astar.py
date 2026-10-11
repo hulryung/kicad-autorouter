@@ -28,7 +28,8 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           horizontal: Sequence[bool], via_cost: int, allow_vias: bool, via_reach: int,
           max_expansions: int, turn_cost: int = 2,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
-          also_ok: int = 0, source_costs=None, routable=None) -> Optional[List[int]]:
+          also_ok: int = 0, source_costs=None, routable=None,
+          neck_owners=None, neck_region=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -53,8 +54,12 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 best = d
         return best
 
+    necked = neck_owners is not None and neck_region
+
     def passable(idx: int) -> bool:
-        o = owners[idx]
+        # near a fine-pitch pin the track is narrower: judge those cells by
+        # the neck-width owner map
+        o = neck_owners[idx] if (necked and idx in neck_region) else owners[idx]
         if o == 0 or o == net or o == also_ok or idx in goals:
             return True
         if soft:

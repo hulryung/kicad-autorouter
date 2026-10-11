@@ -43,6 +43,9 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.scope, fine.scope_nets, fine.scope_refs = SCOPE_SELECTION, list(failed_nets), []
     fine.fanout_vias = False
     fine.stitch_vias = False
+    fine.rip_rounds = max(fine.rip_rounds, 12)
+    fine.rip_limit = max(fine.rip_limit, 8)
+    # the stubborn ones go at the neck width for their whole length
     sizes = native_extract.board_sizes(board)
     narrow = [w for w in sizes["track_widths"] if w >= sizes["min_track_width"]]
     if narrow:

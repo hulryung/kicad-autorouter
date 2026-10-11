@@ -19,7 +19,7 @@ from .engine.freerouting import (ENGINE_BUILTIN, ENGINE_FREEROUTING, RELEASE, Ro
                                  SELECTION_STRATEGIES, UPDATE_STRATEGIES)
 from .engine.native import (apply as native_apply, extract as native_extract, pipeline as native_pipeline,
                             router as native_router)
-from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless
+from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless, review as ai_review
 from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                                     SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
 from .engine.paths import data_dir
@@ -355,8 +355,14 @@ class AutorouterDialog(wx.Dialog):
         self.ai_ask.Bind(wx.EVT_BUTTON, self._on_ai_ask)
         self.ai_review = wx.Button(page, label="Review current routing")
         self.ai_review.Bind(wx.EVT_BUTTON, lambda e: self._on_ai_ask(None, review=True))
+        self.ai_score = wx.Button(page, label="Score and improve")
+        self.ai_score.SetToolTip("The model scores the routing (0-100, per criterion) from the context, metrics, "
+                                 "a board image and close-ups of what it flags, applies improvements, and re-scores, "
+                                 "for up to 'Rounds' rounds or until the score stops rising.")
+        self.ai_score.Bind(wx.EVT_BUTTON, self._on_ai_score)
         row2.Add(self.ai_ask, 0, wx.RIGHT, 6)
-        row2.Add(self.ai_review, 0, wx.RIGHT, 12)
+        row2.Add(self.ai_review, 0, wx.RIGHT, 6)
+        row2.Add(self.ai_score, 0, wx.RIGHT, 12)
         binary = ai_codex.find_codex(self.settings.codex_path)
         self.ai_status = wx.StaticText(page, label=(f"codex: {binary}  ({ai_codex.codex_version(binary)})" if binary
                                                     else "codex CLI not found: install with  npm i -g @openai/codex"))
@@ -367,21 +373,15 @@ class AutorouterDialog(wx.Dialog):
 
     # ---- the assistant ------------------------------------------------------
 
-    def _on_ai_ask(self, event, review: bool = False):
-        request = self.ai_request.GetValue().strip()
-        if review:
-            request = ("Review the current routing of this board as a senior layout engineer: point out "
-                       "problems (unrouted nets, DRC items, questionable widths, pairs not coupled, missing "
-                       "return vias) and what you would change. Use only 'note' actions and set done to true."
-                       + (f"\nUser notes: {request}" if request else ""))
-        if not request:
-            wx.MessageBox("Write what the assistant should do first.", "Autorouter", wx.ICON_INFORMATION, self)
-            return
+    def _ai_begin(self, suffix: str):
+        """Common start of an assistant session: codex present, settings saved,
+        a job folder, the live-display route function. Returns
+        (binary, route_fn, selection) or None when it cannot start."""
         binary = ai_codex.find_codex(self.settings.codex_path)
         if not binary:
             wx.MessageBox("The codex CLI was not found. Install it with  npm i -g @openai/codex  and log in once.",
                           "Autorouter", wx.ICON_ERROR, self)
-            return
+            return None
         self._save_settings()
         options = self._collect_options()
         self.log.Clear()
@@ -389,12 +389,45 @@ class AutorouterDialog(wx.Dialog):
         self.applied = False
         self._set_busy(True)
         name = Path(self.board.GetFileName()).stem if self.board.GetFileName() else "board"
-        self.job = session.new_job(name + "-ai")
+        self.job = session.new_job(name + suffix)
         base = self.native_options(options)
         selection = {"refs": list(self.sel_refs), "nets": list(self.sel_nets)}
         self._path_items = {}
         self._native_layers = None
+        return binary, self._ai_route_fn(base, selection), selection
 
+    def _on_ai_score(self, event):
+        """Score the current routing, let the model improve it, re-score."""
+        started = self._ai_begin("-review")
+        if started is None:
+            return
+        binary, route_fn, selection = started
+        reviewer = ai_review.Reviewer(self.board, {}, route_fn, lambda: session.refill_zones(self.board),
+                                      self.job.directory, log=self._append_log, binary=binary,
+                                      model=self.ai_model.GetValue().strip(), max_rounds=self.ai_rounds.GetValue(),
+                                      poll=lambda: wx.SafeYield(self, True), cancelled=lambda: self._cancel)
+        self._show_progress("Reviewer: measuring, rendering and scoring the board...", None)
+        try:
+            rounds = reviewer.run(self.ai_request.GetValue().strip(), apply=True)
+        except ai_codex.CodexError as e:
+            self._set_busy(False)
+            self._show_progress(f"Reviewer stopped: {e}", 0.0)
+            return
+        except Exception as e:
+            logger.exception("Reviewer failed")
+            self._set_busy(False)
+            self._show_progress(f"Reviewer failed: {e}", 0.0)
+            return
+        self._set_busy(False)
+        pcbnew.Refresh()
+        scores = [r["score"] for r in rounds]
+        self._show_progress(f"Reviewer: score {' -> '.join(str(x) for x in scores)} over {len(rounds)} round(s). "
+                            f"{rounds[-1]['summary'] if rounds else ''}"[:300], 1.0)
+        self.applied = self.applied or any(r.get("type") in ("route", "add_track", "add_via", "remove_tracks",
+                                                              "remove_items_near", "move_footprint", "move_items_near")
+                                           and r.get("ok") for rd in rounds for r in rd["results"])
+
+    def _ai_route_fn(self, base, selection):
         def on_path(path):
             if self._native_layers is not None:
                 self._add_native_path(path)
@@ -454,6 +487,23 @@ class AutorouterDialog(wx.Dialog):
                                   f"{result.fanout} fanout vias, {result.stitched} stitching vias; "
                                   f"{outcome['unconnected_after']} unconnected left")
             return outcome
+
+        return route_fn
+
+    def _on_ai_ask(self, event, review: bool = False):
+        request = self.ai_request.GetValue().strip()
+        if review:
+            request = ("Review the current routing of this board as a senior layout engineer: point out "
+                       "problems (unrouted nets, DRC items, questionable widths, pairs not coupled, missing "
+                       "return vias) and what you would change. Use only 'note' actions and set done to true."
+                       + (f"\nUser notes: {request}" if request else ""))
+        if not request:
+            wx.MessageBox("Write what the assistant should do first.", "Autorouter", wx.ICON_INFORMATION, self)
+            return
+        started = self._ai_begin("-ai")
+        if started is None:
+            return
+        binary, route_fn, selection = started
 
         def poll():
             wx.SafeYield(self, True)
@@ -962,7 +1012,7 @@ class AutorouterDialog(wx.Dialog):
     def _set_busy(self, busy: bool):
         self.busy = busy
         self.route_btn.Enable(not busy)
-        for b in (getattr(self, "ai_ask", None), getattr(self, "ai_review", None)):
+        for b in (getattr(self, "ai_ask", None), getattr(self, "ai_review", None), getattr(self, "ai_score", None)):
             if b is not None:
                 b.Enable(not busy)
         self.cancel_btn.Enable(busy)

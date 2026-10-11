@@ -141,6 +141,29 @@ def with_kicad():
     assert any(i["kind"] == "track" and i["layer"] == "B.Cu" for i in res[3].data["items"]), res[3].data
     print("test_ai: edits ok")
 
+    # the reviewer: deterministic metrics, a scored round with a fake reply,
+    # actions applied, a second round that says done
+    from autorouter.engine.ai import review
+    m = review.metrics(board)
+    assert {"segments", "vias", "length_mm", "unconnected", "nets_by_detour"} <= set(m)
+    replies = [
+        {"score": 61, "summary": "ok-ish", "done": False,
+         "criteria": [{"name": "drc", "score": 90, "comment": "clean"}],
+         "issues": [{"severity": "medium", "net": "/CANH", "x_mm": 150.0, "y_mm": 100.0,
+                     "description": "detour", "suggestion": "reroute"}],
+         "actions": [{"type": "route", "scope": "nets", "nets": ["/CANH"]}]},
+        {"score": 78, "summary": "better", "done": True, "criteria": [], "issues": [], "actions": []},
+    ]
+    os.environ["FAKE_CODEX_REPLIES"] = json.dumps(replies)
+    work2 = Path(tempfile.mkdtemp())
+    rv = review.Reviewer(board, {}, route_fn, lambda: 0, work2, log=lambda s: None, verify=False, max_rounds=4)
+    rounds = rv.run("score it")
+    del os.environ["FAKE_CODEX_REPLIES"]
+    assert [r["score"] for r in rounds] == [61, 78], rounds
+    assert rounds[0]["results"] and rounds[0]["results"][0]["type"] == "route"
+    assert (work2 / "review-rounds.json").exists()
+    print("test_ai: review ok")
+
 
 if __name__ == "__main__":
     offline()

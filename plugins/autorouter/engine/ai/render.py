@@ -65,3 +65,38 @@ def render_board(board, workdir: Path, name: str = "board.png", layers: str = "F
     except Exception:
         pass
     return None
+
+
+def crop_at(board, full_png: Path, x_mm: float, y_mm: float, size_mm: float, out: Path) -> Optional[Path]:
+    """A close-up of the full-board PNG around a board position (mm). The
+    PNG was exported in board-area page mode, so pixels map linearly onto
+    the board's bounding box."""
+    try:
+        import pcbnew
+        bb = board.GetBoardEdgesBoundingBox()
+        if bb.GetWidth() <= 0:
+            return None
+        if sys.platform == "darwin" or shutil.which("sips"):
+            # read the image size with sips, crop with sips (no PIL needed)
+            info = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(full_png)],
+                                  capture_output=True, text=True).stdout
+            w = int([l for l in info.splitlines() if "pixelWidth" in l][0].split()[-1])
+            h = int([l for l in info.splitlines() if "pixelHeight" in l][0].split()[-1])
+        else:
+            return None
+        bx, by = bb.GetX() / 1e6, bb.GetY() / 1e6
+        bw, bh = bb.GetWidth() / 1e6, bb.GetHeight() / 1e6
+        scale = min(w / bw, h / bh)                 # the page mode keeps the aspect ratio
+        px = (x_mm - bx) * scale
+        py = (y_mm - by) * scale
+        side = int(size_mm * scale)
+        left = int(max(0, min(w - side, px - side / 2)))
+        top = int(max(0, min(h - side, py - side / 2)))
+        subprocess.run(["sips", "-c", str(side), str(side), "--cropOffset", str(top), str(left),
+                        str(full_png), "--out", str(out)], capture_output=True)
+        if out.exists():
+            subprocess.run(["sips", "-Z", "900", str(out)], capture_output=True)
+            return out
+    except Exception:
+        return None
+    return None

@@ -379,9 +379,37 @@ class Router:
             kwargs = {"routed": self.routed[self._key(conn)],
                       "rippable": lambda pid: self._rippable(pid, conn),
                       "rip_penalty": RIP_PENALTY}
+        region = self._neck_region(conn)
+        if region:
+            kwargs["neck_owners"] = self.p.owners.get((conn.neck, net.rules.clearance), owners)
+            kwargs["neck_region"] = region
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, self.opts.allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=self.routable, **kwargs)
+
+    def _neck_region(self, conn: Connection) -> Set[int]:
+        """Cells within neck_length of the connection's fine-pitch exits, on
+        every layer: the track stays at the neck width there."""
+        if not conn.neck:
+            return set()
+        grid = self.grid
+        net = self.p.nets[conn.net]
+        r = int(self.opts.neck_length_mm * 1_000_000 / grid.pitch)
+        region: Set[int] = set()
+        for cluster in (conn.a, conn.b):
+            if not net.clusters[cluster].tight:
+                continue
+            for cell in net.clusters[cluster].cells:
+                if cell not in net.endpoints:
+                    continue
+                _, cx, cy = grid.unpack(cell)
+                for layer in range(grid.layers):
+                    base = layer * grid.plane
+                    for dy in range(-r, r + 1):
+                        for dx in range(-r, r + 1):
+                            if dx * dx + dy * dy <= r * r and grid.inside(cx + dx, cy + dy):
+                                region.add(base + (cy + dy) * grid.w + cx + dx)
+        return region
 
     def _blockers(self, conn: Connection, cells: List[int]) -> Set[int]:
         """Paths of other nets that a soft route runs through: along its cells
@@ -420,10 +448,36 @@ class Router:
         net = self.p.nets[conn.net]
         owners = self.p.owners[self._key(conn)]
         own_cells = set(cells)
-        cells = _smooth(self.grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, net.code))
-        segments, vias = _simplify(self.grid, cells)
+        region = self._neck_region(conn)
+        neck_owners = self.p.owners.get((conn.neck, net.rules.clearance), owners) if region else owners
+
+        def free(idx):
+            o = neck_owners[idx] if idx in region else owners[idx]
+            return idx in own_cells or o in (0, net.code)
+
+        cells = _smooth(self.grid, cells, free)
+        width = conn.width or net.rules.width
+        if region and conn.neck:
+            # split the path where it leaves the neck region, so the narrow
+            # part near the pin and the full-width part are separate segments
+            segments, vias = [], []
+            run, run_w = [cells[0]], (conn.neck if cells[0] in region else width)
+            for c in cells[1:]:
+                w_here = conn.neck if c in region else width
+                if w_here != run_w:
+                    segs, vs = _simplify(self.grid, run + [c])
+                    segments += [sg + (run_w,) for sg in segs]
+                    vias += vs
+                    run, run_w = [c], w_here
+                else:
+                    run.append(c)
+            segs, vs = _simplify(self.grid, run)
+            segments += [sg + (run_w,) for sg in segs]
+            vias += vs
+        else:
+            segments, vias = _simplify(self.grid, cells)
         segments = _with_pad_entries(self.grid, net, cells, segments)
-        rp = RoutedPath(net.code, conn.width or net.rules.width, segments, vias, net.rules.via_diameter,
+        rp = RoutedPath(net.code, width, segments, vias, net.rules.via_diameter,
                         net.rules.via_drill, pid=self.next_pid)
         self.next_pid += 1
         path = _Path(rp.pid, conn, rp, cells)
@@ -669,6 +723,60 @@ class Router:
                          "blocked_by": dict(sorted(around.items(), key=lambda kv: -kv[1])[:5])})
         return {"net": net.name, "width_mm": round((conn.width or net.rules.width) / 1e6, 3), "ends": ends}
 
+    def _cells_of_exit(self, rp: RoutedPath) -> List[int]:
+        """The exit cell a fanout path started from (its first segment ends there)."""
+        grid = self.grid
+        out = []
+        for seg in rp.segments[:2]:
+            layer, x1, y1, x2, y2 = seg[:5]
+            for x, y in ((x1, y1), (x2, y2)):
+                cx, cy = grid.cell_x(x), grid.cell_y(y)
+                if grid.inside(cx, cy):
+                    out.append(grid.index(layer, cx, cy))
+        return out
+
+    def _tie_to_net(self, code: int, cell: int, cancelled) -> Optional[RoutedPath]:
+        """Route from a pad exit to the nearest copper of the same net within
+        a few millimetres: what a designer does when a GND pad has no room
+        for its own via."""
+        p, grid = self.p, self.grid
+        net = p.nets[code]
+        owners = p.owners[net.rules.key]
+        layer, cx, cy = grid.unpack(cell)
+        reach = int(6_000_000 / grid.pitch)                    # 6 mm
+        x0, x1 = max(0, cx - reach), min(grid.w - 1, cx + reach)
+        y0, y1 = max(0, cy - reach), min(grid.h - 1, cy + reach)
+        own_exit = {cell}
+        ex, ey, px, py, _ = net.endpoints.get(cell, (None,) * 5)
+        goals: Set[int] = set()
+        base = layer * grid.plane
+        for gy in range(y0, y1 + 1):
+            row = base + gy * grid.w
+            for gx in range(x0, x1 + 1):
+                idx = row + gx
+                if owners[idx] == code and idx not in own_exit:
+                    # skip the pad's own stub lane (within 1 mm of the exit)
+                    if abs(gx - cx) + abs(gy - cy) > int(1_000_000 / grid.pitch):
+                        goals.add(idx)
+        if not goals:
+            return None
+        anchors = [grid.unpack(g)[1:] for g in list(goals)[:8]]
+        cells = astar.route(grid, owners, p.via_block, code, {cell}, goals, anchors, self.horizontal,
+                            self.opts.via_cost, False, 0, self.opts.max_expansions // 4, self.opts.turn_cost,
+                            cancelled, routable=self.routable)
+        if not cells or len(cells) < 2:
+            return None
+        own_cells = set(cells)
+        cells = _smooth(grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, code))
+        segments, _ = _simplify(grid, cells)
+        segments = _with_pad_entries(grid, net, cells, segments)
+        rp = RoutedPath(code, net.rules.width, segments, [], net.rules.via_diameter, net.rules.via_drill,
+                        pid=self.next_pid)
+        self.next_pid += 1
+        path = _Path(rp.pid, Connection(code, 0, 0, 0), rp, cells)
+        self._claim(path)
+        return rp
+
     # ---- fanout vias ------------------------------------------------------
 
     def _fanout_via(self, code: int, cell: int) -> Optional[RoutedPath]:
@@ -876,6 +984,21 @@ class Router:
                         stitch_paths.append(rp)
                         if on_path:
                             on_path(rp)
+
+        # 6. pour-net pads that got no via: a short track to the nearest
+        # copper of their net (a via, another pad, a stub) instead
+        tied_paths: List[RoutedPath] = []
+        if not stop():
+            with_via = {cell for rp in fanout_paths for cell in self._cells_of_exit(rp)}
+            for code, cell in self.p.fanout:
+                if cell in with_via:
+                    continue
+                rp = self._tie_to_net(code, cell, cancelled)
+                if rp is not None:
+                    tied_paths.append(rp)
+                    if on_path:
+                        on_path(rp)
+        fanout_paths += tied_paths
 
         result.cancelled = stop()
         result.failed = [c for c in failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
