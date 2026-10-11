@@ -59,6 +59,10 @@ def main(argv):
             v = args.pop(0)
             options.track_mode = SIZE_CURRENT if v == "current" else SIZE_FIXED
             options.track_width = 0 if v == "current" else int(v)
+        elif a == "--turn":
+            options.turn_cost = int(args.pop(0))
+        elif a == "--via-cost":
+            options.via_cost = int(args.pop(0))
         elif a == "--via":
             args.pop(0)                      # only "current" is supported here
             options.via_mode = SIZE_CURRENT
@@ -93,6 +97,13 @@ def main(argv):
 
     result = router.run(problem, progress=progress)
     print(f"route: {result.routed} routed, {len(result.failed)} failed, {result.ripped} ripped up in {result.seconds:.1f}s")
+    import math
+    from collections import Counter
+    segs = [s for p in result.paths for s in p.segments]
+    vias = sum(len(p.vias) for p in result.paths)
+    length = sum(math.hypot(s[3] - s[1], s[4] - s[2]) for s in segs) / 1e6
+    print(f"artwork: {len(segs)} segments, {vias} vias, {length:.0f} mm, "
+          f"layers {dict(Counter(problem.layers[s[0]].name for s in segs))}")
     for conn in result.failed[:20]:
         print("   failed:", problem.nets[conn.net].name)
     items = apply.add_paths(board, problem.layers, result.paths)

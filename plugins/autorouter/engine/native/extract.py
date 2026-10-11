@@ -310,6 +310,24 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     pad_cells: Dict[int, List[Tuple[object, Set[int], Tuple[int, int], str]]] = {}
     tight_by_fp: Dict[int, Set[str]] = {}
     pending = []
+    # Every piece of copper as a KiCad shape, in 2 mm buckets per layer, for
+    # exact collision tests when planning pad escapes.
+    BUCKET = 2_000_000
+    copper: Dict[Tuple[int, int, int], List[Tuple[object, int, int]]] = {}
+
+    def add_copper(layer: int, shape, code: int, clr: int, box) -> None:
+        bx0, by0 = box[0] // BUCKET, box[1] // BUCKET
+        bx1, by1 = box[2] // BUCKET, box[3] // BUCKET
+        for bx in range(bx0, bx1 + 1):
+            for by in range(by0, by1 + 1):
+                copper.setdefault((layer, bx, by), []).append((shape, code, clr))
+
+    def copper_near(layer: int, box) -> List[Tuple[object, int, int]]:
+        out = []
+        for bx in range(box[0] // BUCKET, box[2] // BUCKET + 1):
+            for by in range(box[1] // BUCKET, box[3] // BUCKET + 1):
+                out.extend(copper.get((layer, bx, by), ()))
+        return out
     for pad in board.GetPads():
         code = pad.GetNetCode()
         pl = [layer_of[l] for l in pad.GetLayerSet().CuStack() if l in layer_of]
@@ -328,6 +346,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             shape = pad.GetEffectiveShape(kicad_layer)
             box = _box(shape)
             clr = item_clearance(pad, kicad_layer, code)
+            add_copper(li, shape, code if code in nets else 0, clr, box)
             claim(li, code, lambda r, shape=shape, box=box, li=li:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)), clr)
@@ -362,6 +381,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 except TypeError:
                     radius = item.GetWidth() // 2
                 clr = item_clearance(item, kicad_layer, code)
+                add_copper(li, pcbnew.SHAPE_CIRCLE(pcbnew.VECTOR2I(pos.x, pos.y), radius), code if code in nets else 0, clr,
+                           (pos.x - radius, pos.y - radius, pos.x + radius, pos.y + radius))
                 claim(li, code, lambda r, li=li, radius=radius: grid.disc_cells(li, pos.x, pos.y, radius + r), clr)
             for layer in layers:                         # the hole goes through everything
                 claim(layer.index, code, lambda r, li=layer.index: grid.disc_cells(li, pos.x, pos.y, hole + r),
@@ -373,6 +394,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 continue
             shape = item.GetEffectiveShape()
             box = _box(shape)
+            add_copper(li, shape, code if code in nets else 0, item_clearance(item, item.GetLayer(), code), box)
             claim(li, code, lambda r, shape=shape, box=box, li=li:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)),
@@ -394,6 +416,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             box = _box(shape)
             if box[2] - box[0] > 50_000_000 and box[3] - box[1] > 50_000_000:
                 continue                                 # a huge frame: not a routing obstacle
+            add_copper(layer.index, shape, 0, ds.m_MinClearance, box)
             claim(layer.index, 0, lambda r, shape=shape, box=box, li=layer.index:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)))
@@ -403,7 +426,6 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # that lane is free of other nets' copper.
     say("Planning pad escapes...")
     exit_owner: Dict[int, int] = {}            # exit cell -> net, to keep lanes apart
-    max_r = max(max(clearance, ds.m_MinClearance) + width // 2 + safety for (width, clearance) in keys)
     for pad, code, pl, pos, own_cells, centre in pending:
         fp = footprint_of(pad)
         net = nets[code]
@@ -427,15 +449,32 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if not grid.inside(ecx, ecy):
                 continue
             gx, gy = grid.nm_x(ecx), grid.nm_y(ecy)
-            lane = []
+            # the grid search must be able to start on the exit cell
+            if any(own[grid.index(li, ecx, ecy)] not in (0, code) for li in pl):
+                continue
+            # the stub itself is checked exactly, as the DRC would: the escape
+            # lane may legally be narrower than what the owner maps assume
+            stub_shapes = [pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(pos.x, pos.y), pcbnew.VECTOR2I(ex, ey), stub_w),
+                           pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(ex, ey), pcbnew.VECTOR2I(gx, gy), stub_w)]
+            margin = stub_w // 2 + net.rules.clearance + 2 * safety
+            lane_box = (min(pos.x, ex, gx) - margin, min(pos.y, ey, gy) - margin,
+                        max(pos.x, ex, gx) + margin, max(pos.y, ey, gy) + margin)
+            clear = True
             for li in pl:
-                lane += grid.segment_cells(li, pos.x, pos.y, ex, ey, 0)
-                lane += grid.segment_cells(li, ex, ey, gx, gy, 0)
-                lane.append(grid.index(li, ecx, ecy))
-            if not all(own[idx] in (0, code) for idx in lane):
+                for shape, other, other_clr in copper_near(li, lane_box):
+                    if other == code:
+                        continue
+                    need = max(net.rules.clearance, other_clr) + safety
+                    if any(shape.Collide(stub, need) for stub in stub_shapes):
+                        clear = False
+                        break
+                if not clear:
+                    break
+            if not clear:
                 continue
             # and this lane's clearance zone must not cover another net's exit
-            zone_r = max_r + stub_w // 2
+            width, clearance = net.rules.key
+            zone_r = max(clearance, ds.m_MinClearance) + width // 2 + safety + stub_w // 2
             zone = []
             for li in pl:
                 zone += grid.segment_cells(li, pos.x, pos.y, ex, ey, zone_r)
@@ -458,6 +497,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 claim(li, code, lambda r, li=li, ex=ex, ey=ey, gx=gx, gy=gy, half=half:
                       grid.segment_cells(li, pos.x, pos.y, ex, ey, r + half)
                       + grid.segment_cells(li, ex, ey, gx, gy, r + half))
+                for stub in stub_shapes:
+                    add_copper(li, stub, code, net.rules.clearance, lane_box)
             target_cells = exit_cells
             centre = (ecx, ecy)
         else:

@@ -49,6 +49,62 @@ class _Path:
         self.via_cells: List[int] = []
 
 
+def _smooth(grid: Grid, cells: List[int], passable) -> List[int]:
+    """Straighten staircases. A run of cells that only uses two neighbouring
+    directions (say east and north-east) is a zig-zag the grid search left
+    behind; a hand-routed trace would make it one straight piece and one
+    diagonal piece. Each such run is replaced by the two-piece version whose
+    cells are all passable (tried with either piece first), so clearances
+    still hold. Layer changes are never touched."""
+    if len(cells) < 4:
+        return cells
+    plane, w = grid.plane, grid.w
+    out = [cells[0]]
+    i, n = 0, len(cells)
+    while i < n - 1:
+        layer = cells[i] // plane
+        dirs = []
+        j = i
+        while j + 1 < n and cells[j + 1] // plane == layer:
+            d = cells[j + 1] - cells[j]
+            if d not in dirs:
+                if len(dirs) == 2:
+                    break
+                dirs.append(d)
+            j += 1
+        if len(dirs) == 2 and j - i >= 3:
+            counts = {d: 0 for d in dirs}
+            for k in range(i, j):
+                counts[cells[k + 1] - cells[k]] += 1
+            replaced = None
+            for first, second in ((dirs[0], dirs[1]), (dirs[1], dirs[0])):
+                seq = [first] * counts[first] + [second] * counts[second]
+                cur, new_cells, ok = cells[i], [], True
+                for d in seq:
+                    nxt = cur + d
+                    if abs(nxt % w - cur % w) > 1 or not (0 <= nxt < grid.size) or not passable(nxt):
+                        ok = False
+                        break
+                    # no corner cutting on diagonal pieces
+                    dx = (nxt % w) - (cur % w)
+                    dy = ((nxt % plane) // w) - ((cur % plane) // w)
+                    if dx and dy and not (passable(cur + dx) and passable(cur + dy * w)):
+                        ok = False
+                        break
+                    new_cells.append(nxt)
+                    cur = nxt
+                if ok and cur == cells[j]:
+                    replaced = new_cells
+                    break
+            if replaced is not None:
+                out.extend(replaced)
+                i = j
+                continue
+        out.append(cells[i + 1])
+        i += 1
+    return out
+
+
 def _simplify(grid: Grid, cells: List[int]):
     """Cell path -> straight segments per layer plus via positions."""
     points = [grid.unpack(i) for i in cells]
@@ -226,6 +282,9 @@ class Router:
 
     def _commit(self, conn: Connection, cells: List[int], on_path) -> _Path:
         net = self.p.nets[conn.net]
+        owners = self.p.owners[net.rules.key]
+        own_cells = set(cells)
+        cells = _smooth(self.grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, net.code))
         segments, vias = _simplify(self.grid, cells)
         segments = _with_pad_entries(self.grid, net, cells, segments)
         rp = RoutedPath(net.code, net.rules.width, segments, vias, net.rules.via_diameter,
