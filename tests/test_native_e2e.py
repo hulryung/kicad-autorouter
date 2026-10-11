@@ -122,6 +122,10 @@ def main(argv):
     pcbnew.SaveBoard(str(target), board)
     reloaded = pcbnew.LoadBoard(str(target))
     after = reloaded.GetConnectivity().GetUnconnectedCount(True)
+    # reading the routed board again (now with tracks and vias as obstacles)
+    # must work too: a second, incremental run starts from here
+    again = extract.extract(reloaded, options)
+    print(f"re-extract on the routed board: {again.stats['connections']} connections left in scope")
     print(f"board: {items} items added, unconnected {before} -> {after}, saved {target}")
 
     cli = kicad_cli()

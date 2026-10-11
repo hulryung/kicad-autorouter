@@ -198,6 +198,16 @@ def pair_partner(name: str, names: Set[str]) -> Optional[str]:
     return None
 
 
+def _collides(shape, stub, clearance: int) -> bool:
+    """Does a copper shape come within clearance of a stub (SHAPE_SEGMENT)?
+    Not every SHAPE class accepts another shape in Python (SHAPE_CIRCLE only
+    takes a SEG), so fall back to the stub's centreline plus half its width."""
+    try:
+        return bool(shape.Collide(stub, clearance))
+    except TypeError:
+        return bool(shape.Collide(stub.GetSeg(), clearance + stub.GetWidth() // 2))
+
+
 def footprint_of(pad):
     parent = pad.GetParentFootprint()
     if parent is None:
@@ -593,7 +603,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             def lane_clear(shapes):
                 for shape, other, other_clr in nearby:
                     need = max(net.rules.clearance, other_clr) + safety
-                    if any(shape.Collide(stub, need) for stub in shapes):
+                    if any(_collides(shape, stub, need) for stub in shapes):
                         return False
                 return True
 
