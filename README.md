@@ -181,6 +181,8 @@ everything the plugin ever downloaded.
 plugins/autorouter/
   __init__.py        registers the action plugin (skipped outside the PCB editor)
   plugin.py          pcbnew.ActionPlugin: the toolbar button
+  engine/ai/         the Codex assistant: context.py (board -> JSON), codex.py (exec runner),
+                     actions.py (reply schema and board edits), assistant.py (the loop), headless.py
   dialog.py          wx dialog: engine choice, options, progress, log; drives both engines
   settings.py        settings.json in the data folder
   engine/
@@ -225,6 +227,37 @@ does the same round trip through Freerouting (needs Java 25+ and the jar;
 `tests/fixtures/obd2-adapter.kicad_pcb` by default.
 
 Packaging: `python3 scripts/build-package.py` writes the PCM zip to `release/`.
+
+## AI assistant (Codex)
+
+The **AI assistant** tab hands the board to the OpenAI Codex CLI and carries
+out what it answers. Write the request in plain words ("route the whole board,
+leave GND to the pours, keep the USB pair coupled, then fix what the DRC
+reports"), or press **Review current routing** for a critique without changes.
+
+Each round the plugin writes `board-context.json` (board size and layers,
+rules and pre-defined sizes, net classes, every net with its pads, class,
+tracks, pours and pair partner, footprints per sheet, the options, the last
+run's outcome, and KiCad's DRC on a refilled copy) and runs
+
+```
+codex exec --skip-git-repo-check -s read-only --ephemeral --output-schema <schema> -o <reply> -
+```
+
+with the request and the context on stdin. The model must answer with a JSON
+object (schema enforced by Codex): a `summary`, `done`, and `actions` of these
+types: `set_options`, `route` (board / nets / sheets / selection),
+`remove_tracks`, `add_track`, `add_via`, `refill_zones`, `note`, `ask`. The
+plugin applies them on the open board through the built-in router with live
+display, feeds the results and a fresh DRC back, and repeats up to the round
+limit or until `done`. Everything a session does is one undo step.
+
+Requirements: the `codex` CLI on the PATH (`npm i -g @openai/codex`), logged
+in; the sandbox is read-only and the working directory is the plugin's job
+folder, so the model can read the context files but nothing else is touched.
+`tests/test_ai.py` exercises the loop with a fake `codex`;
+`KICAD_AUTOROUTER_AI_LIVE=1 <KiCad python3> tests/test_ai_live.py [board] [request]`
+runs it against the real model.
 
 ## Roadmap
 

@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""A stand-in for the codex CLI used by the tests: reads the prompt from
+stdin, writes a canned reply (from FAKE_CODEX_REPLY, or a default) to the
+--output-last-message file. Keeps the prompt in codex-prompt-seen.md."""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+out = None
+cwd = os.getcwd()
+for i, a in enumerate(args):
+    if a in ("-o", "--output-last-message"):
+        out = args[i + 1]
+    if a in ("-C", "--cd"):
+        cwd = args[i + 1]
+prompt = sys.stdin.read()
+with open(os.path.join(cwd, "codex-prompt-seen.md"), "w") as f:
+    f.write(prompt)
+reply = os.environ.get("FAKE_CODEX_REPLY")
+if not reply:
+    n = int(os.environ.get("FAKE_CODEX_ROUND_FILE_N", "0"))
+    reply = json.dumps({"summary": "fake: nothing to do", "actions": [], "done": True})
+# a sequence of replies: FAKE_CODEX_REPLIES is a JSON list, consumed by a counter file
+seq = os.environ.get("FAKE_CODEX_REPLIES")
+if seq:
+    replies = json.loads(seq)
+    counter = os.path.join(cwd, "fake-codex-counter")
+    k = int(open(counter).read()) if os.path.exists(counter) else 0
+    reply = json.dumps(replies[min(k, len(replies) - 1)])
+    open(counter, "w").write(str(k + 1))
+if out:
+    with open(out, "w") as f:
+        f.write(reply)
+print("fake codex: done")

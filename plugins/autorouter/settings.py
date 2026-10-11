@@ -12,6 +12,8 @@ from .engine.paths import data_dir
 class Settings:
     java_path: str = ""              # "" = find one automatically
     jar_path: str = ""               # "" = the managed download
+    codex_path: str = ""             # "" = find the codex CLI automatically
+    ai_model: str = ""               # "" = codex's configured default
     options: RouteOptions = field(default_factory=RouteOptions)
 
     @staticmethod
@@ -25,11 +27,13 @@ class Settings:
         except (OSError, ValueError):
             return cls()
         return cls(java_path=data.get("java_path", ""), jar_path=data.get("jar_path", ""),
+                   codex_path=data.get("codex_path", ""), ai_model=data.get("ai_model", ""),
                    options=RouteOptions.from_dict(data.get("options", {})))
 
     def save(self) -> None:
         path = self.path()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"java_path": self.java_path, "jar_path": self.jar_path,
+                   "codex_path": self.codex_path, "ai_model": self.ai_model,
                    "options": self.options.to_dict()}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

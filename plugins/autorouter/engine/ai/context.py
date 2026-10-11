@@ -1,0 +1,149 @@
+"""The board as the model sees it: a compact JSON description."""
+import json
+import os
+import subprocess
+import tempfile
+from collections import Counter
+from pathlib import Path
+from typing import Dict, List, Optional
+
+
+def _mm(nm: int) -> float:
+    return round(nm / 1e6, 4)
+
+
+def kicad_cli() -> Optional[str]:
+    import shutil
+    for cand in (shutil.which("kicad-cli"), "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+                 r"C:\Program Files\KiCad\10.0\bin\kicad-cli.exe", r"C:\Program Files\KiCad\9.0\bin\kicad-cli.exe"):
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
+
+
+def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
+    """KiCad's DRC on a saved copy of the board (zones refilled), condensed."""
+    import pcbnew
+    cli = kicad_cli()
+    if not cli:
+        return {"available": False}
+    copy = workdir / "drc-copy.kicad_pcb"
+    report = workdir / "drc.json"
+    try:
+        pcbnew.SaveBoard(str(copy), board)
+        subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--refill-zones",
+                        "-o", str(report), str(copy)], capture_output=True, text=True, timeout=300)
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+    kinds = Counter(v.get("type") for v in data.get("violations", []))
+    items = []
+    for v in data.get("violations", [])[:limit]:
+        items.append({"type": v.get("type"), "description": v.get("description", "")[:140],
+                      "items": [it.get("description", "")[:120] for it in v.get("items", [])],
+                      "pos_mm": (v.get("items") or [{}])[0].get("pos")})
+    unconnected = Counter()
+    for u in data.get("unconnected_items", []):
+        desc = u["items"][0]["description"] if u.get("items") else ""
+        if "[" in desc:
+            unconnected[desc.split("[")[1].split("]")[0]] += 1
+    return {"available": True, "violations_by_type": dict(kinds), "violations": items,
+            "unconnected_total": len(data.get("unconnected_items", [])),
+            "unconnected_by_net": dict(unconnected.most_common(40))}
+
+
+def board_context(board, options: dict, last_run: Optional[dict], workdir: Path,
+                  selection: Optional[dict] = None, with_drc: bool = True) -> dict:
+    """Everything a routing assistant needs to reason about this board."""
+    import pcbnew
+    from ..native import extract
+
+    ds = board.GetDesignSettings()
+    ns = ds.m_NetSettings
+    bb = board.GetBoardEdgesBoundingBox()
+    layers = [(lid, board.GetLayerName(lid)) for lid in board.GetEnabledLayers().CuStack()]
+    sizes = extract.board_sizes(board)
+
+    classes = []
+    try:
+        names = ["Default"] + [str(k) for k in ns.GetNetclasses().keys()]
+    except Exception:
+        names = ["Default"]
+    for name in names:
+        try:
+            nc = ns.GetNetClassByName(name) if name != "Default" else ns.GetDefaultNetclass()
+            classes.append({"name": name, "track_width_mm": _mm(nc.GetTrackWidth()),
+                            "clearance_mm": _mm(nc.GetClearance()), "via_mm": _mm(nc.GetViaDiameter()),
+                            "via_drill_mm": _mm(nc.GetViaDrill()), "diff_pair_width_mm": _mm(nc.GetDiffPairWidth()),
+                            "diff_pair_gap_mm": _mm(nc.GetDiffPairGap())})
+        except Exception:
+            pass
+
+    pads_by_net: Dict[int, List[str]] = {}
+    sheets_by_net: Dict[int, set] = {}
+    for pad in board.GetPads():
+        code = pad.GetNetCode()
+        if code <= 0:
+            continue
+        fp = extract.footprint_of(pad)
+        ref = fp.GetReference() if fp else "?"
+        pads_by_net.setdefault(code, []).append(f"{ref}.{pad.GetNumber()}")
+        if fp:
+            sheets_by_net.setdefault(code, set()).add(extract.sheet_of(fp))
+    tracks_by_net = Counter()
+    vias_by_net = Counter()
+    for t in board.GetTracks():
+        (vias_by_net if t.GetClass() == "PCB_VIA" else tracks_by_net)[t.GetNetCode()] += 1
+    zones_by_net: Dict[int, List[str]] = {}
+    for z in board.Zones():
+        if not z.GetIsRuleArea() and z.GetNetCode() > 0:
+            zones_by_net.setdefault(z.GetNetCode(), []).extend(
+                board.GetLayerName(l) for l in z.GetLayerSet().CuStack())
+    conn = board.GetConnectivity()
+    names_all = {n.GetNetname() for c, n in board.GetNetsByNetcode().items() if c > 0}
+    nets = []
+    for code, net in board.GetNetsByNetcode().items():
+        if code <= 0 or code not in pads_by_net:
+            continue
+        name = net.GetNetname()
+        entry = {"name": name, "class": net.GetNetClassName(), "pads": len(pads_by_net[code]),
+                 "tracks": tracks_by_net.get(code, 0), "vias": vias_by_net.get(code, 0)}
+        if len(pads_by_net[code]) <= 8:
+            entry["pins"] = pads_by_net[code]
+        if code in zones_by_net:
+            entry["zones_on"] = sorted(set(zones_by_net[code]))
+        partner = extract.pair_partner(name, names_all)
+        if partner:
+            entry["pair_with"] = partner
+        if sheets_by_net.get(code):
+            entry["sheets"] = sorted(sheets_by_net[code])
+        nets.append(entry)
+
+    footprints = []
+    for fp in board.GetFootprints():
+        pos = fp.GetPosition()
+        footprints.append({"ref": fp.GetReference(), "value": fp.GetValue(), "sheet": extract.sheet_of(fp),
+                           "pads": len(list(fp.Pads())), "at_mm": [_mm(pos.x), _mm(pos.y)],
+                           "side": "back" if fp.IsFlipped() else "front"})
+
+    ctx = {
+        "board": {"file": os.path.basename(board.GetFileName() or ""),
+                  "size_mm": [_mm(bb.GetWidth()), _mm(bb.GetHeight())],
+                  "origin_mm": [_mm(bb.GetX()), _mm(bb.GetY())],
+                  "copper_layers": [n for _, n in layers],
+                  "min_track_mm": _mm(ds.m_TrackMinWidth), "min_clearance_mm": _mm(ds.m_MinClearance),
+                  "min_via_mm": _mm(ds.m_ViasMinSize), "hole_clearance_mm": _mm(getattr(ds, "m_HoleClearance", 0)),
+                  "predefined_track_widths_mm": [_mm(w) for w in sizes["track_widths"]],
+                  "predefined_vias_mm": [[_mm(d), _mm(h)] for d, h in sizes["via_sizes"]],
+                  "unconnected_total": conn.GetUnconnectedCount(True)},
+        "net_classes": classes,
+        "nets": nets,
+        "footprints": footprints,
+        "sheets": [{"name": n, "footprints": c} for n, c in extract.sheets(board)],
+        "options": options,
+        "last_run": last_run or {},
+        "selection": selection or {},
+    }
+    if with_drc:
+        ctx["drc"] = drc_summary(board, workdir)
+    return ctx

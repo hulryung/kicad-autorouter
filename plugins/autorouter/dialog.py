@@ -18,6 +18,7 @@ from .engine import freerouting, java, session
 from .engine.freerouting import (ENGINE_BUILTIN, ENGINE_FREEROUTING, RELEASE, RouteOptions,
                                  SELECTION_STRATEGIES, UPDATE_STRATEGIES)
 from .engine.native import apply as native_apply, extract as native_extract, router as native_router
+from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless
 from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                                     SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
 from .engine.paths import data_dir
@@ -78,6 +79,7 @@ class AutorouterDialog(wx.Dialog):
         self.notebook.AddPage(self._routing_page(self.notebook), "Routing")
         self.notebook.AddPage(self._layers_page(self.notebook), "Layers && nets")
         self.notebook.AddPage(self._freerouting_page(self.notebook), "Freerouting")
+        self.notebook.AddPage(self._ai_page(self.notebook), "AI assistant")
         root.Add(self.notebook, 0, wx.EXPAND | wx.ALL, 8)
 
         progress = wx.StaticBoxSizer(wx.VERTICAL, self, "Progress")
@@ -320,6 +322,145 @@ class AutorouterDialog(wx.Dialog):
         page.SetSizer(box)
         return page
 
+    def _ai_page(self, parent):
+        page = wx.Panel(parent)
+        box = wx.BoxSizer(wx.VERTICAL)
+        intro = wx.StaticText(page, label=(
+            "Describe what you want in plain words. The assistant (OpenAI Codex CLI) reads the board, "
+            "the net classes, the last run and the DRC, and answers with routing actions this plugin "
+            "carries out live: option changes, routing by net, sheet or selection, removing or adding "
+            "tracks and vias. Each round is one undo step with everything else."))
+        intro.Wrap(600)
+        box.Add(intro, 0, wx.ALL, 10)
+        self.ai_request = wx.TextCtrl(page, style=wx.TE_MULTILINE)
+        self.ai_request.SetMinSize((-1, 70))
+        self.ai_request.SetHint("e.g. Route the whole board, leave GND to the pours, keep the USB pair coupled. "
+                                "Then fix anything the DRC reports.")
+        box.Add(self.ai_request, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.StaticText(page, label="Model"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.ai_model = wx.TextCtrl(page, value=self.settings.ai_model, size=(160, -1))
+        self.ai_model.SetHint("codex default")
+        row.Add(self.ai_model, 0, wx.RIGHT, 12)
+        row.Add(wx.StaticText(page, label="Rounds"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.ai_rounds = wx.SpinCtrl(page, min=1, max=10, initial=3)
+        row.Add(self.ai_rounds, 0, wx.RIGHT, 12)
+        self.ai_drc = wx.CheckBox(page, label="Include DRC results (runs kicad-cli, slower)")
+        self.ai_drc.SetValue(True)
+        row.Add(self.ai_drc, 0, wx.ALIGN_CENTER_VERTICAL)
+        box.Add(row, 0, wx.ALL, 10)
+        row2 = wx.BoxSizer(wx.HORIZONTAL)
+        self.ai_ask = wx.Button(page, label="Ask the assistant")
+        self.ai_ask.Bind(wx.EVT_BUTTON, self._on_ai_ask)
+        self.ai_review = wx.Button(page, label="Review current routing")
+        self.ai_review.Bind(wx.EVT_BUTTON, lambda e: self._on_ai_ask(None, review=True))
+        row2.Add(self.ai_ask, 0, wx.RIGHT, 6)
+        row2.Add(self.ai_review, 0, wx.RIGHT, 12)
+        binary = ai_codex.find_codex(self.settings.codex_path)
+        self.ai_status = wx.StaticText(page, label=(f"codex: {binary}  ({ai_codex.codex_version(binary)})" if binary
+                                                    else "codex CLI not found: install with  npm i -g @openai/codex"))
+        row2.Add(self.ai_status, 0, wx.ALIGN_CENTER_VERTICAL)
+        box.Add(row2, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        page.SetSizer(box)
+        return page
+
+    # ---- the assistant ------------------------------------------------------
+
+    def _on_ai_ask(self, event, review: bool = False):
+        request = self.ai_request.GetValue().strip()
+        if review:
+            request = ("Review the current routing of this board as a senior layout engineer: point out "
+                       "problems (unrouted nets, DRC items, questionable widths, pairs not coupled, missing "
+                       "return vias) and what you would change. Use only 'note' actions and set done to true."
+                       + (f"\nUser notes: {request}" if request else ""))
+        if not request:
+            wx.MessageBox("Write what the assistant should do first.", "Autorouter", wx.ICON_INFORMATION, self)
+            return
+        binary = ai_codex.find_codex(self.settings.codex_path)
+        if not binary:
+            wx.MessageBox("The codex CLI was not found. Install it with  npm i -g @openai/codex  and log in once.",
+                          "Autorouter", wx.ICON_ERROR, self)
+            return
+        self._save_settings()
+        options = self._collect_options()
+        self.log.Clear()
+        self._cancel = False
+        self.applied = False
+        self._set_busy(True)
+        name = Path(self.board.GetFileName()).stem if self.board.GetFileName() else "board"
+        self.job = session.new_job(name + "-ai")
+        base = self.native_options(options)
+        selection = {"refs": list(self.sel_refs), "nets": list(self.sel_nets)}
+        self._path_items = {}
+        self._native_layers = None
+
+        def on_path(path):
+            if self._native_layers is not None:
+                self._add_native_path(path)
+
+        def route_fn(spec):
+            # the router needs the layers for live display; read them per run
+            o = ai_headless.apply_scope(ai_headless.native_options_from(spec.get("options", {}), base), spec, selection)
+            if spec.get("options", {}).get("remove_existing"):
+                session.remove_tracks(self.board)
+            try:
+                problem = native_extract.extract(self.board, o, status=self._status_now)
+            except Exception as e:
+                return {"error": f"could not read the board: {e}"}
+            self._native_layers = problem.layers
+            started = time.time()
+
+            def progress(done, total, routed, failed, net):
+                self._show_progress(f"[assistant] routing {done}/{total}: {routed} routed, {failed} failed "
+                                    f"({time.time() - started:.0f}s) {net}", done / total if total else None)
+                wx.SafeYield(self, True)
+
+            result = native_router.run(problem, progress=progress, on_path=on_path,
+                                       cancelled=lambda: self._cancel,
+                                       on_remove=lambda pid: self._remove_native_path(pid))
+            self._refill_if_wanted()
+            pcbnew.Refresh()
+            failed = sorted({problem.nets[c.net].name for c in result.failed})
+            outcome = {"error": None, "scope": spec.get("scope", "board"),
+                       "connections_in_scope": problem.stats["connections"], "routed": result.routed,
+                       "failed": failed, "ripped_up": result.ripped, "fanout_vias": result.fanout,
+                       "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
+                       "unconnected_after": self.board.GetConnectivity().GetUnconnectedCount(True)}
+            outcome["summary"] = (f"{result.routed} routed, {len(failed)} failed, {result.fanout} fanout vias, "
+                                  f"{result.stitched} stitching vias; {outcome['unconnected_after']} unconnected left")
+            return outcome
+
+        def poll():
+            wx.SafeYield(self, True)
+
+        helper = ai_assistant.Assistant(self.board, {}, route_fn, lambda: session.refill_zones(self.board),
+                                        self.job.directory, log=self._append_log, binary=binary,
+                                        model=self.ai_model.GetValue().strip(), max_rounds=self.ai_rounds.GetValue(),
+                                        with_drc=self.ai_drc.GetValue(), poll=poll,
+                                        cancelled=lambda: self._cancel, selection=selection)
+        self._show_progress("Assistant: reading the board and asking Codex...", None)
+        try:
+            history = helper.run(request)
+        except ai_codex.CodexError as e:
+            self._set_busy(False)
+            self._show_progress(f"Assistant stopped: {e}", 0.0)
+            return
+        except Exception as e:
+            logger.exception("Assistant failed")
+            self._set_busy(False)
+            self._show_progress(f"Assistant failed: {e}", 0.0)
+            return
+        self._set_busy(False)
+        pcbnew.Refresh()
+        asked = [a for h in helper.transcript for a in h["reply"].get("actions", []) if a.get("type") == "ask"]
+        if asked:
+            self._show_progress("Assistant asks: " + asked[-1].get("question", ""), 0.0)
+        else:
+            last = history[-1]["summary"] if history else ""
+            self._show_progress(f"Assistant done after {len(history)} round(s). {last}"[:300], 1.0)
+        self.applied = self.applied or any(r.get("type") in ("route", "add_track", "add_via", "remove_tracks") and r.get("ok")
+                                           for h in history for r in h["results"])
+
     # ---- options <-> widgets ------------------------------------------------
 
     def _load_options(self, o: RouteOptions):
@@ -429,6 +570,8 @@ class AutorouterDialog(wx.Dialog):
     def _save_settings(self):
         self.settings.java_path = self.java_path.GetValue().strip()
         self.settings.jar_path = self.jar_path.GetValue().strip()
+        if hasattr(self, "ai_model"):
+            self.settings.ai_model = self.ai_model.GetValue().strip()
         self.settings.options = self._collect_options()
         try:
             self.settings.save()
@@ -747,6 +890,9 @@ class AutorouterDialog(wx.Dialog):
     def _set_busy(self, busy: bool):
         self.busy = busy
         self.route_btn.Enable(not busy)
+        for b in (getattr(self, "ai_ask", None), getattr(self, "ai_review", None)):
+            if b is not None:
+                b.Enable(not busy)
         self.cancel_btn.Enable(busy)
         self.notebook.Enable(not busy)
         if not busy:
