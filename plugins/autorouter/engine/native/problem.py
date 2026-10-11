@@ -11,6 +11,7 @@ class LayerInfo:
     kicad_id: int
     name: str
     horizontal: bool        # preferred direction
+    routable: bool = True   # False: copper is modelled (vias must clear it) but no track may go there
 
 
 @dataclass(frozen=True)

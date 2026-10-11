@@ -258,6 +258,7 @@ class Router:
         self.grid = problem.grid
         self.opts = problem.options
         self.horizontal = [l.horizontal for l in problem.layers]
+        self.routable = [l.routable for l in problem.layers]
         # fixed copper as read from the board; the live maps start as copies
         self.fixed = {key: array("i", own) for key, own in problem.owners.items()}
         self.fixed_via_block = bytearray(problem.via_block)
@@ -380,7 +381,7 @@ class Router:
                       "rip_penalty": RIP_PENALTY}
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, self.opts.allow_vias, via_reach, cap,
-                           self.opts.turn_cost, cancelled, **kwargs)
+                           self.opts.turn_cost, cancelled, routable=self.routable, **kwargs)
 
     def _blockers(self, conn: Connection, cells: List[int]) -> Set[int]:
         """Paths of other nets that a soft route runs through: along its cells
@@ -543,7 +544,7 @@ class Router:
         anchors = [grid.unpack(c)[1:] for c in list(g_cells)[:1]]
         cells = astar.route(grid, owners, p.via_block, ca.net, s_cells, g_cells, anchors,
                             self.horizontal, via_cost, False, 0, cap, self.opts.turn_cost, cancelled,
-                            also_ok=cb.net, source_costs=s_costs)
+                            also_ok=cb.net, source_costs=s_costs, routable=self.routable)
         if not cells or len(cells) < 2:
             self.pair_log.append((na.name, 'no coupled path'))
             return False

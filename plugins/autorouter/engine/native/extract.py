@@ -259,16 +259,21 @@ def selection_scope(board, items) -> Tuple[List[str], List[str]]:
 
 
 def copper_layers(board, options: NativeOptions) -> List[LayerInfo]:
+    """Every enabled copper layer. Layers the options exclude stay in the
+    model (a via goes through them, so their copper matters) but are marked
+    not routable, so no track is searched on them."""
     stack = list(board.GetEnabledLayers().CuStack())
     layers = []
     for i, lid in enumerate(stack):
-        if options.routable_layers and i < len(options.routable_layers) and not options.routable_layers[i]:
-            continue
+        routable = not (options.routable_layers and i < len(options.routable_layers) and not options.routable_layers[i])
         if options.horizontal_layers and i < len(options.horizontal_layers):
             horizontal = bool(options.horizontal_layers[i])
         else:
             horizontal = (i % 2 == 0)
-        layers.append(LayerInfo(len(layers), lid, board.GetLayerName(lid), horizontal))
+        layers.append(LayerInfo(len(layers), lid, board.GetLayerName(lid), horizontal, routable))
+    if not any(l.routable for l in layers):
+        for l in layers:
+            l.routable = True
     return layers
 
 

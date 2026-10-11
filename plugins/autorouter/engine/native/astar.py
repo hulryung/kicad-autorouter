@@ -28,7 +28,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           horizontal: Sequence[bool], via_cost: int, allow_vias: bool, via_reach: int,
           max_expansions: int, turn_cost: int = 2,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
-          also_ok: int = 0, source_costs=None) -> Optional[List[int]]:
+          also_ok: int = 0, source_costs=None, routable=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -38,6 +38,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
     w, plane, nlayers = grid.w, grid.plane, grid.layers
     via_step = via_cost * STRAIGHT
     soft = routed is not None and rippable is not None
+    routable = list(routable) if routable is not None else [True] * nlayers
     anchors = list(anchors) or [grid.unpack(next(iter(goals)))[1:]]
 
     def h(idx: int) -> int:
@@ -124,6 +125,8 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
         cy, cx = divmod(rest, w)
         base = layer * plane
         horiz = horizontal[layer]
+        if not routable[layer]:
+            continue                       # a pad exit on an excluded layer: nowhere to go
         for m, (dx, dy, diag) in enumerate(MOVES):
             nx, ny = cx + dx, cy + dy
             if nx < 0 or ny < 0 or nx >= w or ny >= grid.h:
@@ -148,7 +151,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 heapq.heappush(heap, (ng + h(nidx), ng, nidx, m))
         if allow_vias and nlayers > 1 and via_ok(cx, cy):
             for other in range(nlayers):
-                if other == layer:
+                if other == layer or not routable[other]:
                     continue
                 nidx = other * plane + rest
                 if nidx in closed or not passable(nidx):
