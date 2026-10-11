@@ -20,6 +20,7 @@ def main():
     except ImportError:
         print("test_ai_live: skipped (needs KiCad's Python)")
         return
+    from autorouter.engine import session
     from autorouter.engine.ai import assistant, codex, headless
     binary = codex.find_codex()
     if not binary:
@@ -34,7 +35,7 @@ def main():
     route_fn = headless.make_route_fn(board, log=print)
     if "--review" in sys.argv:
         from autorouter.engine.ai import review
-        rv = review.Reviewer(board, {}, route_fn, lambda: 0, work, log=print, max_rounds=2)
+        rv = review.Reviewer(board, {}, route_fn, lambda: session.refill_zones(board), work, log=print, max_rounds=2)
         rounds = rv.run(request if request != "--review" else "")
         print("scores:", [r["score"] for r in rounds])
         out = work / board_file.name
@@ -43,7 +44,7 @@ def main():
         assert rounds, "no review rounds"
         print("test_ai_live: review ok")
         return
-    a = assistant.Assistant(board, {}, route_fn, lambda: 0, work, log=print, max_rounds=3, with_drc=True)
+    a = assistant.Assistant(board, {}, route_fn, lambda: session.refill_zones(board), work, log=print, max_rounds=3, with_drc=True)
     history = a.run(request)
     for h in history:
         print(f"round {h['round']}: {h['summary']}")

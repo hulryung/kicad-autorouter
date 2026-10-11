@@ -55,40 +55,57 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
 
 def run_job(board, options: NativeOptions, status=None, progress=None, on_path=None, on_remove=None,
             cancelled: Optional[Callable[[], bool]] = None, escalate: bool = True,
-            apply_paths: bool = True) -> JobResult:
-    """Route with the options, then escalate on failures. When apply_paths
-    is False the caller adds paths itself through on_path (the dialog does,
-    for live display)."""
+            apply_paths: bool = True, extract_fn=None, on_layers=None) -> JobResult:
+    """The whole job, in the order a designer works:
+      1. signals at the normal grid (pour vias held back);
+      2. a finer second pass on what is still open;
+      3. the pours: fanout vias, ties and stitching in the room that is left.
+    When apply_paths is False the caller adds paths itself through on_path
+    (the dialog does, for live display); extract_fn lets the caller run the
+    board reads on its UI thread; on_layers is told the layer list of each
+    pass before its paths arrive."""
+    extract = extract_fn or (lambda b, o, st: native_extract.extract(b, o, status=st))
     out = JobResult()
-    problem = native_extract.extract(board, options, status=status)
+
+    def one_pass(opts: NativeOptions):
+        problem = extract(board, opts, status)
+        if problem is None:
+            return None, None
+        if on_layers:
+            on_layers(problem.layers)
+        result = native_router.run(problem, progress=progress, on_path=on_path, on_remove=on_remove,
+                                   cancelled=cancelled)
+        if apply_paths:
+            native_apply.add_paths(board, problem.layers, result.paths)
+        return problem, result
+
+    pours_later = options.fanout_vias or options.stitch_vias
+    first = copy.deepcopy(options)
+    if pours_later:
+        first.fanout_vias = False
+        first.stitch_vias = False
+    problem, result = one_pass(first)
+    if problem is None:
+        return out
     out.layers = problem.layers
     out.stats = dict(problem.stats)
-    result = native_router.run(problem, progress=progress, on_path=on_path, on_remove=on_remove, cancelled=cancelled)
-    if apply_paths:
-        native_apply.add_paths(board, problem.layers, result.paths)
-    out.routed, out.ripped, out.fanout, out.pairs, out.stitched = (result.routed, result.ripped, result.fanout,
-                                                                 result.pairs, result.stitched)
+    out.routed, out.ripped, out.pairs = result.routed, result.ripped, result.pairs
     out.pair_log = list(getattr(result, "pair_log", []))
     out.failed_detail = list(getattr(result, "failed_detail", []))
     out.seconds = result.seconds
     out.cancelled = result.cancelled
-    failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
-    out.failed = failed_nets
+    out.failed = sorted({problem.nets[c.net].name for c in result.failed})
 
-    if escalate and failed_nets and not out.cancelled and options.pitch_mm > 0.04:
+    if escalate and out.failed and not out.cancelled and options.pitch_mm > 0.04 and not (cancelled and cancelled()):
         if status:
-            status(f"Second pass on {len(failed_nets)} open connection(s): finer grid, neck width, cheaper vias...")
-        fine = fine_options(options, failed_nets, board)
+            status(f"Second pass on {len(out.failed)} open connection(s): finer grid, neck width, cheaper vias...")
+        fine = fine_options(options, out.failed, board)
         try:
-            problem2 = native_extract.extract(board, fine, status=status)
+            problem2, result2 = one_pass(fine)
         except Exception as e:
             out.stats["escalation_error"] = str(e)
-            return out
-        if problem2.connections:
-            result2 = native_router.run(problem2, progress=progress, on_path=on_path, on_remove=on_remove,
-                                        cancelled=cancelled)
-            if apply_paths:
-                native_apply.add_paths(board, problem2.layers, result2.paths)
+            problem2 = None
+        if problem2 is not None and problem2.connections:
             out.passes = 2
             out.escalated = result2.routed
             out.routed += result2.routed
@@ -96,5 +113,18 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             out.seconds += result2.seconds
             out.failed = sorted({problem2.nets[c.net].name for c in result2.failed})
             out.failed_detail = list(getattr(result2, "failed_detail", []))
-            out.layers = problem2.layers if on_path is None else out.layers
+
+    if pours_later and not (cancelled and cancelled()):
+        if status:
+            status("Pour nets: fanout vias, ties and stitching in the remaining room...")
+        pours = copy.deepcopy(options)
+        pours.pours_only = True                       # same scope, no signal routing
+        try:
+            problem3, result3 = one_pass(pours)
+        except Exception as e:
+            out.stats["pour_error"] = str(e)
+            problem3 = None
+        if problem3 is not None:
+            out.fanout, out.stitched = result3.fanout, result3.stitched
+            out.seconds += result3.seconds
     return out

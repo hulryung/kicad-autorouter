@@ -512,12 +512,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     # Existing tracks and vias.
     say("Rasterizing existing tracks...")
+    existing_vias: Dict[int, List[Tuple[int, int]]] = {}     # net code -> via centres, for idempotent pours
     for item in board.GetTracks():
         code = item.GetNetCode()
         cls = item.GetClass()
         if cls == "PCB_VIA":
             vl = [layer_of[l] for l in item.GetLayerSet().CuStack() if l in layer_of]
             pos = item.GetPosition()
+            existing_vias.setdefault(code, []).append((pos.x, pos.y))
             hole = item.GetDrillValue() // 2
             for li in vl:
                 kicad_layer = layers[li].kicad_id
@@ -684,10 +686,34 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # for each of them after the signal routing, where there is room left (a
     # via placed first would sit in the escape lanes the signals need).
     fanout: List[Tuple[int, int]] = []           # (net code, exit cell)
+
+    def _via_near(code: int, x: int, y: int, within: int) -> bool:
+        """Is a via of this net already within the distance (nm)? Then a
+        fanout or stitch there would only stack on it (a second run of the
+        router, or an AI route call, must not add vias again)."""
+        for vx, vy in existing_vias.get(code, ()):
+            if abs(vx - x) <= within and abs(vy - y) <= within and (vx - x) ** 2 + (vy - y) ** 2 <= within * within:
+                return True
+        return False
+
+    scope_refs_set: Set[str] = set(options.scope_refs)
+    scope_net_set: Set[str] = set(options.scope_nets)
+    if options.scope == SCOPE_SHEETS:
+        wanted_sheets = set(options.scope_sheets)
+        scope_refs_set = {fp.GetReference() for fp in board.GetFootprints() if sheet_of(fp) in wanted_sheets}
+        scope_net_set = set()
+
     if options.fanout_vias and zone_layers:
         for pad, code, pl, pos, own_cells, centre in pending:
             if code not in zone_layers or code not in nets:
                 continue
+            if options.scope != SCOPE_BOARD:
+                fp = pad.GetParentFootprint()
+                ref = pcbnew.Cast_to_FOOTPRINT(fp).GetReference() if fp else ""
+                if ref not in scope_refs_set and nets[code].name not in scope_net_set:
+                    continue                      # pours follow the routing scope
+            if _via_near(code, pos.x, pos.y, 1_500_000 + nets[code].rules.via_diameter):
+                continue                          # a via already fans this pad out
             if nets[code].route and not (options.power_pours and len(zone_layers[code]) >= 1):
                 continue                          # a routed net without a usable pour
             if pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
@@ -706,7 +732,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # least two of those layers. The router drops vias there after everything
     # else, where they still fit, to shorten return paths.
     stitch: Dict[int, List[Tuple[int, int]]] = {}
-    if options.stitch_vias:
+    if options.stitch_vias and options.scope == SCOPE_BOARD:
         step = max(grid.pitch, int(options.stitch_pitch_mm * 1_000_000))
         step_cells = max(1, step // grid.pitch)
         for code, lset in zone_layers.items():
@@ -725,9 +751,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     for idx in grid.polygon_cells(0, pts, zholes, 0):
                         cover[idx] = cover.get(idx, 0) + len(zl)
             spots = []
+            half = cells_here * grid.pitch // 2
             for cy in range(cells_here // 2, grid.h, cells_here):
                 for cx in range(cells_here // 2, grid.w, cells_here):
-                    if cover.get(cy * grid.w + cx, 0) >= 2:
+                    if cover.get(cy * grid.w + cx, 0) >= 2 and not _via_near(code, grid.nm_x(cx), grid.nm_y(cy), half):
                         spots.append((cx, cy))
             if spots:
                 stitch[code] = spots
@@ -840,6 +867,8 @@ def in_scope(board, nets: Dict[int, NetInfo], connections: List[Connection],
     """Keep the connections the scope asks for. A connection is in scope when
     either end touches a footprint in scope (selected, or on a chosen sheet),
     or its net is in scope (a selected track, via or zone)."""
+    if options.pours_only:
+        return []
     if options.scope == SCOPE_BOARD:
         return connections
     refs: Set[str] = set(options.scope_refs)

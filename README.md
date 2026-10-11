@@ -104,11 +104,11 @@ Benchmark figures for that board (GND nets excluded), from
 
 | | Original | Built-in router |
 |---|---|---|
-| Open signal connections | 0 | 1 of 104 (after the finer second pass) |
+| Open signal connections | 0 | 1 of 104 (2 saved by the finer second pass) |
 | DRC violations | 0 | 0 |
-| Track segments | 353 | 469 |
-| Track length | 764 mm | 901 mm |
-| Vias | 46 | 65 (36 of them pad-to-plane fanout) |
+| Track segments | 353 | 552 |
+| Track length | 764 mm | 985 mm |
+| Vias | 46 | 85 (56 of them pad-to-plane fanout) |
 | Stitching vias (GND pours, 4 mm) | – | 161 |
 
 ## KiCad's routing settings
@@ -184,7 +184,10 @@ obstacle.
    stubborn connections by hand.
 3. **Finish**: pads of unrouted pour nets get **fanout vias** to their planes,
    pours spanning two or more layers get **stitching vias** on a grid, both
-   only where a via still fits; copper zones are refilled.
+   only where a via still fits and only where no via of that net sits already
+   (a second run, or a scoped AI route call, adds none twice); copper zones
+   are refilled. The pours come last on purpose: a via dropped first would
+   sit in the escape lanes the signals need.
 4. **Apply** (PCB API, main thread): each path becomes `PCB_TRACK` segments and
    through `PCB_VIA`s, added to the open board as it is found; ripped-up paths
    are removed again. KiCad records the whole run as one undo step.

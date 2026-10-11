@@ -438,11 +438,6 @@ class AutorouterDialog(wx.Dialog):
             o = ai_headless.apply_hints(o, spec, [name for _, name in self.layers])
             if spec.get("options", {}).get("remove_existing"):
                 session.remove_tracks(self.board)
-            try:
-                problem = native_extract.extract(self.board, o, status=self._status_now)
-            except Exception as e:
-                return {"error": f"could not read the board: {e}"}
-            self._native_layers = problem.layers
             started = time.time()
 
             def progress(done, total, routed, failed, net):
@@ -450,35 +445,31 @@ class AutorouterDialog(wx.Dialog):
                                     f"({time.time() - started:.0f}s) {net}", done / total if total else None)
                 wx.SafeYield(self, True)
 
-            result = native_router.run(problem, progress=progress, on_path=on_path,
-                                       cancelled=lambda: self._cancel,
-                                       on_remove=lambda pid: self._remove_native_path(pid))
-            escalated = 0
-            if result.failed and not self._cancel and spec.get("options", {}).get("escalate", True):
-                failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
-                fine = native_pipeline.fine_options(o, failed_nets, self.board)
-                try:
-                    problem2 = native_extract.extract(self.board, fine, status=self._status_now)
-                except Exception:
-                    problem2 = None
-                if problem2 is not None and problem2.connections:
-                    self._native_layers = problem2.layers
-                    result2 = native_router.run(problem2, progress=progress, on_path=on_path,
-                                                cancelled=lambda: self._cancel,
-                                                on_remove=lambda pid: self._remove_native_path(pid))
-                    escalated = result2.routed
-                    result.routed += result2.routed
-                    result.failed = result2.failed
-                    problem = problem2
+            def set_layers(layers):
+                self._native_layers = layers
+
+            self._path_items = getattr(self, "_path_items", {}) or {}
+            try:
+                job = native_pipeline.run_job(self.board, o, status=self._status_now, progress=progress,
+                                              on_path=on_path, on_remove=lambda pid: self._remove_native_path(pid),
+                                              cancelled=lambda: self._cancel,
+                                              escalate=spec.get("options", {}).get("escalate", True),
+                                              apply_paths=False, on_layers=set_layers)
+            except Exception as e:
+                return {"error": f"could not route: {e}"}
+            if not job.layers:
+                return {"error": "could not read the board"}
+            escalated = job.escalated
+            result = job
             self._refill_if_wanted()
             pcbnew.Refresh()
             try:
                 self.board.BuildConnectivity()
             except Exception:
                 pass
-            failed = sorted({problem.nets[c.net].name for c in result.failed})
+            failed = list(job.failed)
             outcome = {"error": None, "scope": spec.get("scope", "board"),
-                       "connections_in_scope": problem.stats["connections"], "routed": result.routed,
+                       "connections_in_scope": job.stats.get("connections", 0), "routed": result.routed,
                        "failed": failed, "ripped_up": result.ripped, "fanout_vias": result.fanout,
                        "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
                        "failed_detail": getattr(result, "failed_detail", []), "escalated": escalated,
@@ -764,25 +755,6 @@ class AutorouterDialog(wx.Dialog):
             return
         self._set_busy(True)
         self._show_progress("Reading the board...", None)
-        wx.SafeYield(self, True)
-        try:
-            problem = native_extract.extract(self.board, native, status=self._status_now)
-        except Exception as e:
-            self._set_busy(False)
-            logger.exception("Reading the board failed")
-            self._show_progress(f"Could not read the board: {e}", 0.0)
-            return
-        self._native_layers = problem.layers
-        stats = problem.stats
-        self._append_log(f"[plugin] grid {problem.grid.w}x{problem.grid.h}x{problem.grid.layers} cells at "
-                         f"{native.pitch_mm:g} mm, {stats['nets']} nets, {stats['connections']} of "
-                         f"{stats['all_connections']} connections in scope, {stats.get('fanout_vias', 0)} fanout vias, "
-                         f"read in {stats['extract_seconds']:.1f}s")
-        if not problem.connections and not problem.fanout and not problem.stitch:
-            self._set_busy(False)
-            self._show_progress("Nothing to route in this scope: every connection is done or skipped.", 1.0)
-            return
-        self._show_progress(f"Routing {stats['connections']} connections...", 0.0)
         started = time.time()
 
         def progress(done, total, routed, failed, name):
@@ -796,44 +768,38 @@ class AutorouterDialog(wx.Dialog):
         def on_remove(pid):
             wx.CallAfter(self._remove_native_path, pid)
 
+        def extract_on_ui(board, opts, status):
+            # pcbnew work belongs on the UI thread; no yielding in there
+            def read():
+                problem = native_extract.extract(board, opts, status=lambda t: self._append_log("[plugin] " + t))
+                st = problem.stats
+                self._append_log(f"[plugin] grid {problem.grid.w}x{problem.grid.h}x{problem.grid.layers} cells at "
+                                 f"{opts.pitch_mm:g} mm, {st['nets']} nets, {st['connections']} of "
+                                 f"{st['all_connections']} connections in scope, {st.get('fanout_vias', 0)} fanout vias, "
+                                 f"{len(problem.stitch)} stitch sites, read in {st['extract_seconds']:.1f}s")
+                return problem
+            return self._on_main(read)
+
+        def set_layers(layers):
+            self._native_layers = layers
+
+        def status(text):
+            wx.CallAfter(self._show_progress, text, None)
+
         self._path_items = {}
+        self._native_layers = None
 
         def work():
             try:
-                result = native_router.run(problem, progress=progress, on_path=on_path,
-                                           cancelled=lambda: self._cancel, on_remove=on_remove)
-                # a finer second pass on what is still open, as a designer would
-                # do by hand for the last stubborn connections
-                if result.failed and not result.cancelled and not self._cancel:
-                    failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
-
-                    def second_pass_problem():
-                        # pcbnew work belongs on the UI thread; no yielding in here
-                        fine = native_pipeline.fine_options(native, failed_nets, self.board)
-                        self._append_log(f"[plugin] second pass on {failed_nets}: grid {fine.pitch_mm:g} mm, "
-                                         f"width {fine.track_width / 1e6:g} mm, via cost {fine.via_cost}")
-                        self._show_progress("Second pass on the open connections...", None)
-                        return native_extract.extract(self.board, fine, status=lambda t: self._append_log("[plugin] " + t))
-
-                    problem2 = self._on_main(second_pass_problem)
-                    if problem2 is None:
-                        wx.CallAfter(self._append_log, "[plugin] second pass skipped (see error above)")
-                    elif not problem2.connections:
-                        wx.CallAfter(self._append_log, "[plugin] second pass: nothing in scope")
-                    if problem2 is not None and problem2.connections:
-                        self._native_layers = problem2.layers
-                        result2 = native_router.run(problem2, progress=progress, on_path=on_path,
-                                                    cancelled=lambda: self._cancel, on_remove=on_remove)
-                        result.escalated = result2.routed
-                        result.routed += result2.routed
-                        result.failed = result2.failed
-                        result.failed_nets = sorted({problem2.nets[c.net].name for c in result2.failed})
-                        result.seconds += result2.seconds
+                job = native_pipeline.run_job(self.board, native, status=status, progress=progress,
+                                              on_path=on_path, on_remove=on_remove,
+                                              cancelled=lambda: self._cancel, escalate=True, apply_paths=False,
+                                              extract_fn=extract_on_ui, on_layers=set_layers)
             except Exception as e:
                 logger.exception("Routing failed")
                 wx.CallAfter(self._native_done, None, e)
                 return
-            wx.CallAfter(self._native_done, result, None)
+            wx.CallAfter(self._native_done, job, None)
 
         threading.Thread(target=work, name="autorouter-native", daemon=True).start()
 
@@ -876,6 +842,7 @@ class AutorouterDialog(wx.Dialog):
             pcbnew.Refresh()
 
     def _native_done(self, result, error):
+        """result is a pipeline.JobResult."""
         self._set_busy(False)
         if error is not None:
             pcbnew.Refresh()
@@ -883,24 +850,30 @@ class AutorouterDialog(wx.Dialog):
             return
         self._refill_if_wanted()
         pcbnew.Refresh()
+        if result is None or not result.layers:
+            self._show_progress("Could not read the board (see the log).", 0.0)
+            return
         if result.cancelled:
             text = f"Cancelled after {result.routed} connections; they stay on the board (Ctrl+Z removes them)."
             self._show_progress(text, 0.0)
             return
-        failed = getattr(result, "failed_nets", None) or sorted({self.board.FindNet(c.net).GetNetname() for c in result.failed})
+        if not result.routed and not result.fanout and not result.stitched and not result.failed:
+            self._show_progress("Nothing to route in this scope: every connection is done or skipped.", 1.0)
+            return
+        failed = list(result.failed)
         text = f"Done: {result.routed} connections routed in {result.seconds:.0f}s"
-        if getattr(result, "escalated", 0):
+        if result.escalated:
             text += f" ({result.escalated} on the finer second pass)"
-        if getattr(result, "fanout", 0):
+        if result.fanout:
             text += f", {result.fanout} fanout vias"
-        if getattr(result, "pairs", 0):
+        if result.pairs:
             text += f", {result.pairs} coupled pairs"
-        if getattr(result, "stitched", 0):
+        if result.stitched:
             text += f", {result.stitched} stitching vias"
-        for name, why in getattr(result, "pair_log", []):
-            self._append_log(f"[plugin] pair {name} routed separately: {why}")
-        if getattr(result, "ripped", 0):
+        if result.ripped:
             text += f" ({result.ripped} rerouted)"
+        for name, why in result.pair_log:
+            self._append_log(f"[plugin] pair {name} routed separately: {why}")
         if result.failed:
             text += f", {len(result.failed)} not routed ({', '.join(failed[:6])}{'...' if len(failed) > 6 else ''})"
             self._append_log("[plugin] unrouted: " + ", ".join(failed))

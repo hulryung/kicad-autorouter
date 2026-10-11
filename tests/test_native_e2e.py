@@ -95,7 +95,18 @@ def main(argv):
         if done % 25 == 0 or done == total:
             print(f"  {done}/{total} routed={routed} failed={failed} ({time.time() - t1:.0f}s) {name}")
 
-    result = router.run(problem, progress=progress)
+    from autorouter.engine.native import pipeline
+    job = pipeline.run_job(board, options, status=lambda s: print("  ", s), progress=progress,
+                           escalate="--no-escalate" not in sys.argv, apply_paths=True)
+    print(f"job: {job.routed} routed ({job.escalated} on pass 2), open {job.failed}, {job.fanout} fanout/tie vias, "
+          f"{job.stitched} stitching vias, {job.seconds:.0f}s")
+
+    class _R:                      # the statistics below read a router result
+        pass
+    result = _R()
+    result.routed, result.failed, result.ripped, result.fanout, result.pairs, result.stitched = (
+        job.routed, [], job.ripped, job.fanout, job.pairs, job.stitched)
+    result.seconds, result.pair_log, result.paths = job.seconds, job.pair_log, []
     print(f"route: {result.routed} routed, {len(result.failed)} failed, {result.ripped} ripped up, "
           f"{result.fanout} fanout vias, {result.pairs} coupled pairs, {result.stitched} stitching vias "
           f"in {result.seconds:.1f}s")
@@ -104,26 +115,14 @@ def main(argv):
           "pair log:", getattr(result, "pair_log", []))
     import math
     from collections import Counter
-    segs = [s for p in result.paths for s in p.segments]
-    vias = sum(len(p.vias) for p in result.paths)
-    length = sum(math.hypot(s[3] - s[1], s[4] - s[2]) for s in segs) / 1e6
+    segs = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
+    vias = sum(1 for t in board.GetTracks() if t.GetClass() == "PCB_VIA")
+    length = sum(t.GetLength() for t in segs) / 1e6
     print(f"artwork: {len(segs)} segments, {vias} vias, {length:.0f} mm, "
-          f"layers {dict(Counter(problem.layers[s[0]].name for s in segs))}")
-    for conn in result.failed[:20]:
-        print("   failed:", problem.nets[conn.net].name)
-    items = apply.add_paths(board, problem.layers, result.paths)
-    # the second pass of the pipeline on what is still open (finer grid, neck width)
-    if result.failed and "--no-escalate" not in sys.argv:
-        from autorouter.engine.native import pipeline
-        failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
-        fine = pipeline.copy.deepcopy(options)
-        fine.scope, fine.scope_nets = "selection", failed_nets
-        job = pipeline.run_job(board, fine, escalate=True, apply_paths=True,
-                               status=lambda s: print("  ", s))
-        # run_job routes the open nets at the normal pitch again first; what
-        # matters here is the escalation result
-        print(f"escalation: {job.escalated} saved on pass 2, still open: {job.failed}")
-        items += job.routed
+          f"layers {dict(Counter(board.GetLayerName(t.GetLayer()) for t in segs))}")
+    for name in job.failed[:20]:
+        print("   failed:", name)
+    items = len(segs) + vias
     from autorouter.engine import session
     print(f"refilled {session.refill_zones(board)} zones")
     target = out / board_file.name
@@ -159,7 +158,7 @@ def main(argv):
             print(f"drc: {summary['drc_violations']} violations {kinds}, "
                   f"{summary['drc_unconnected']} unconnected items")
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
-    assert result.routed + result.fanout + result.stitched > 0, "nothing was routed"
+    assert job.routed + job.fanout + job.stitched > 0, "nothing was routed"
     assert after < before, "the board is not better connected than before"
     print("test_native_e2e: ok")
 
