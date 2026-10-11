@@ -756,8 +756,20 @@ class AutorouterDialog(wx.Dialog):
                 # do by hand for the last stubborn connections
                 if result.failed and not result.cancelled and not self._cancel:
                     failed_nets = sorted({problem.nets[c.net].name for c in result.failed})
-                    fine = native_pipeline.fine_options(native, failed_nets, self.board)
-                    problem2 = self._on_main(lambda: native_extract.extract(self.board, fine, status=self._status_now))
+
+                    def second_pass_problem():
+                        # pcbnew work belongs on the UI thread; no yielding in here
+                        fine = native_pipeline.fine_options(native, failed_nets, self.board)
+                        self._append_log(f"[plugin] second pass on {failed_nets}: grid {fine.pitch_mm:g} mm, "
+                                         f"width {fine.track_width / 1e6:g} mm, via cost {fine.via_cost}")
+                        self._show_progress("Second pass on the open connections...", None)
+                        return native_extract.extract(self.board, fine, status=lambda t: self._append_log("[plugin] " + t))
+
+                    problem2 = self._on_main(second_pass_problem)
+                    if problem2 is None:
+                        wx.CallAfter(self._append_log, "[plugin] second pass skipped (see error above)")
+                    elif not problem2.connections:
+                        wx.CallAfter(self._append_log, "[plugin] second pass: nothing in scope")
                     if problem2 is not None and problem2.connections:
                         self._native_layers = problem2.layers
                         result2 = native_router.run(problem2, progress=progress, on_path=on_path,
@@ -786,6 +798,7 @@ class AutorouterDialog(wx.Dialog):
             except Exception as e:
                 logger.exception("Main-thread call failed")
                 box["error"] = e
+                self._append_log(f"[plugin] error: {e!r}")
             done.set()
 
         wx.CallAfter(call)
@@ -972,6 +985,13 @@ class AutorouterDialog(wx.Dialog):
 
     def _append_log(self, line: str):
         self.log.AppendText(line + "\n")
+        job = getattr(self, "job", None)
+        if job is not None:
+            try:
+                with open(job.directory / "dialog.log", "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
 
     def _browse(self, ctrl, what, wildcard="*"):
         with wx.FileDialog(self, f"Choose the {what}", wildcard=f"{what}|{wildcard}|All files|*",
