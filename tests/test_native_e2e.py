@@ -59,6 +59,8 @@ def main(argv):
             v = args.pop(0)
             options.track_mode = SIZE_CURRENT if v == "current" else ("auto" if v == "auto" else SIZE_FIXED)
             options.track_width = int(v) if v not in ("current", "auto") else 0
+        elif a == "--shove":
+            options.shove = True
         elif a == "--turn":
             options.turn_cost = int(args.pop(0))
         elif a == "--via-cost":
@@ -99,7 +101,7 @@ def main(argv):
     job = pipeline.run_job(board, options, status=lambda s: print("  ", s), progress=progress,
                            escalate="--no-escalate" not in sys.argv, apply_paths=True)
     print(f"job: {job.routed} routed ({job.escalated} on pass 2), open {job.failed}, {job.fanout} fanout/tie vias, "
-          f"{job.stitched} stitching vias, {job.seconds:.0f}s")
+          f"{job.stitched} stitching vias, {job.shoved} existing pieces moved, {job.seconds:.0f}s")
 
     class _R:                      # the statistics below read a router result
         pass

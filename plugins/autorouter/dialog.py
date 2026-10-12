@@ -194,6 +194,13 @@ class AutorouterDialog(wx.Dialog):
                                      "get a via at each pad on a layer the pour does not cover, and a coarser via "
                                      "grid through the pour when it spans two or more layers.")
         native.Add(self.native_power, 0, wx.LEFT | wx.BOTTOM, 6)
+        self.native_shove = wx.CheckBox(page, label="Move existing tracks out of the way (rip up and reroute them, "
+                                                    "like the interactive router's shove)")
+        self.native_shove.SetToolTip("When a connection finds no room, unlocked tracks and vias already on the "
+                                     "board may be removed and routed again, the way KiCad's interactive router "
+                                     "shoves tracks aside. Locked tracks and pour nets stay where they are. "
+                                     "Also lets the second pass move what the first pass placed.")
+        native.Add(self.native_shove, 0, wx.LEFT | wx.BOTTOM, 6)
         box.Add(native, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
 
         scope = wx.StaticBoxSizer(wx.HORIZONTAL, page, "What to route (built-in router)")
@@ -448,13 +455,19 @@ class AutorouterDialog(wx.Dialog):
             def set_layers(layers):
                 self._native_layers = layers
 
-            self._path_items = getattr(self, "_path_items", {}) or {}
+            self._path_items = {}
+
+            def extract_here(board, opts, status):
+                problem = native_extract.extract(board, opts, status=status)
+                self._path_items = {ex.path.pid: list(ex.items) for ex in problem.existing}
+                return problem
+
             try:
                 job = native_pipeline.run_job(self.board, o, status=self._status_now, progress=progress,
                                               on_path=on_path, on_remove=lambda pid: self._remove_native_path(pid),
                                               cancelled=lambda: self._cancel,
                                               escalate=spec.get("options", {}).get("escalate", True),
-                                              apply_paths=False, on_layers=set_layers)
+                                              apply_paths=False, on_layers=set_layers, extract_fn=extract_here)
             except Exception as e:
                 return {"error": f"could not route: {e}"}
             if not job.layers:
@@ -542,6 +555,7 @@ class AutorouterDialog(wx.Dialog):
         self.native_stitch.SetValue(o.native_stitch_vias)
         self.stitch_pitch.SetValue(o.native_stitch_pitch_mm)
         self.native_power.SetValue(o.native_power_pours)
+        self.native_shove.SetValue(o.native_shove)
         self.track_size.SetSelection(0)
         for i, (mode, value, _) in enumerate(self.track_choices):
             if mode == o.native_track_mode and (mode != SIZE_FIXED or value == o.native_track_width):
@@ -590,6 +604,7 @@ class AutorouterDialog(wx.Dialog):
             native_stitch_vias=self.native_stitch.GetValue(),
             native_stitch_pitch_mm=self.stitch_pitch.GetValue(),
             native_power_pours=self.native_power.GetValue(),
+            native_shove=self.native_shove.GetValue(),
             native_max_expansions_k=self.native_budget.GetValue(),
             skip_nets=self.skip_nets.GetValue().strip(),
             native_track_mode=self.track_choices[self.track_size.GetSelection()][0],
@@ -624,7 +639,7 @@ class AutorouterDialog(wx.Dialog):
             max_expansions=o.native_max_expansions_k * 1000, retry_failed=o.native_retry,
             fanout_vias=o.native_fanout_vias, diff_pairs=o.native_diff_pairs,
             stitch_vias=o.native_stitch_vias, stitch_pitch_mm=o.native_stitch_pitch_mm,
-            power_pours=o.native_power_pours,
+            power_pours=o.native_power_pours, shove=o.native_shove,
             skip_nets=[s.strip() for s in o.skip_nets.split(",") if s.strip()],
             ignore_net_classes=list(o.ignore_net_classes),
             routable_layers=o.routable_layers, horizontal_layers=o.horizontal_layers,
@@ -648,8 +663,8 @@ class AutorouterDialog(wx.Dialog):
         builtin = self.engine_choice.GetSelection() == 0
         for ctrl in (self.pitch, self.native_via_cost, self.native_budget, self.skip_nets,
                      self.native_vias, self.native_retry, self.native_fanout, self.native_pairs,
-                     self.native_stitch, self.stitch_pitch, self.native_power, self.track_size, self.via_size,
-                     self.scope_choice):
+                     self.native_stitch, self.stitch_pitch, self.native_power, self.native_shove, self.track_size,
+                     self.via_size, self.scope_choice):
             ctrl.Enable(builtin)
         self.sheet_list.Enable(builtin and self.scope_choice.GetSelection() == 2)
 
@@ -772,11 +787,14 @@ class AutorouterDialog(wx.Dialog):
             # pcbnew work belongs on the UI thread; no yielding in there
             def read():
                 problem = native_extract.extract(board, opts, status=lambda t: self._append_log("[plugin] " + t))
+                # shove mode: the board's own pieces are removable by path id
+                self._path_items = {ex.path.pid: list(ex.items) for ex in problem.existing}
                 st = problem.stats
                 self._append_log(f"[plugin] grid {problem.grid.w}x{problem.grid.h}x{problem.grid.layers} cells at "
                                  f"{opts.pitch_mm:g} mm, {st['nets']} nets, {st['connections']} of "
                                  f"{st['all_connections']} connections in scope, {st.get('fanout_vias', 0)} fanout vias, "
-                                 f"{len(problem.stitch)} stitch sites, read in {st['extract_seconds']:.1f}s")
+                                 f"{len(problem.stitch)} stitch sites, {st.get('movable_paths', 0)} movable pieces, "
+                                 f"read in {st['extract_seconds']:.1f}s")
                 return problem
             return self._on_main(read)
 
@@ -826,6 +844,8 @@ class AutorouterDialog(wx.Dialog):
         for item in self._path_items.pop(pid, []):
             try:
                 self.board.Remove(item)
+                item.thisown = 0                   # KiCad's undo list owns it now
+                session._REMOVED.append(item)
             except Exception as e:
                 logger.warning("Could not remove a ripped-up item: %s", e)
 
@@ -872,6 +892,8 @@ class AutorouterDialog(wx.Dialog):
             text += f", {result.stitched} stitching vias"
         if result.ripped:
             text += f" ({result.ripped} rerouted)"
+        if result.shoved:
+            text += f", {result.shoved} existing pieces moved"
         for name, why in result.pair_log:
             self._append_log(f"[plugin] pair {name} routed separately: {why}")
         if result.failed:

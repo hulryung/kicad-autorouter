@@ -18,6 +18,7 @@ OPTION_KEYS = {
     "neck_down": bool, "fanout_vias": bool, "stitch_vias": bool, "stitch_pitch_mm": float,
     "diff_pairs": bool, "allow_vias": bool, "routable_layers": list, "horizontal_layers": list,
     "remove_existing": bool, "power_pours": bool, "rip_up": bool, "max_expansions": int,
+    "move_existing": bool,
 }
 
 def _nullable(t, **extra):
@@ -41,6 +42,7 @@ _OPTION_PROPS = {
     "horizontal_layers": _nullable("array", items={"type": "boolean"}),
     "remove_existing": _nullable("boolean"), "power_pours": _nullable("boolean"),
     "rip_up": _nullable("boolean"), "max_expansions": _nullable("integer"),
+    "move_existing": _nullable("boolean"),
 }
 
 _ACTION_PROPS = {

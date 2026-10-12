@@ -57,6 +57,7 @@ class RouteOptions:
     native_stitch_vias: bool = True       # via stitching across multi-layer pour nets (GND)
     native_stitch_pitch_mm: float = 4.0
     native_power_pours: bool = True       # power nets with pours: pad vias to the plane and coarse stitching
+    native_shove: bool = False            # existing tracks may be ripped up and rerouted to make room
     native_max_expansions_k: int = 400    # A* search budget per connection, thousands
     skip_nets: str = ""                   # comma-separated names or patterns, e.g. GND,+3V3,*_PLANE
     native_track_mode: str = "auto"       # auto | netclass | current | fixed

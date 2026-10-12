@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import pcbnew
 
 from .grid import BLOCKED, Grid
-from .problem import (Cluster, Connection, LayerInfo, NativeOptions, NetInfo, NetRules,
+from .problem import (ExistingPath, Cluster, Connection, LayerInfo, NativeOptions, NetInfo, NetRules,
                       RoutedPath, RoutingProblem, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                       SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED)
 
@@ -513,13 +513,26 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Existing tracks and vias.
     say("Rasterizing existing tracks...")
     existing_vias: Dict[int, List[Tuple[int, int]]] = {}     # net code -> via centres, for idempotent pours
+    movable: Dict[int, List] = {}      # shove mode: net code -> unlocked tracks and vias the router may move
+    fixed_tracks: Dict[int, List] = {} # ...and the locked ones of those nets (they still join pads)
     for item in board.GetTracks():
         code = item.GetNetCode()
         cls = item.GetClass()
         if cls == "PCB_VIA":
-            vl = [layer_of[l] for l in item.GetLayerSet().CuStack() if l in layer_of]
             pos = item.GetPosition()
             existing_vias.setdefault(code, []).append((pos.x, pos.y))
+        # shove mode: an unlocked track of a routable net enters the model as a
+        # movable path (claimed by the router, rip-up-able), but stays in the
+        # exact-shape copper index so pad escapes are planned around it
+        is_movable = False
+        if options.shove and code in nets and nets[code].route and cls in ("PCB_TRACK", "PCB_VIA"):
+            if item.IsLocked():
+                fixed_tracks.setdefault(code, []).append(item)
+            else:
+                movable.setdefault(code, []).append(item)
+                is_movable = True
+        if cls == "PCB_VIA":
+            vl = [layer_of[l] for l in item.GetLayerSet().CuStack() if l in layer_of]
             hole = item.GetDrillValue() // 2
             for li in vl:
                 kicad_layer = layers[li].kicad_id
@@ -530,7 +543,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 clr = item_clearance(item, kicad_layer, code)
                 add_copper(li, pcbnew.SHAPE_CIRCLE(pcbnew.VECTOR2I(pos.x, pos.y), radius), code if code in nets else 0, clr,
                            (pos.x - radius, pos.y - radius, pos.x + radius, pos.y + radius))
-                claim(li, code, lambda r, li=li, radius=radius: grid.disc_cells(li, pos.x, pos.y, radius + r), clr)
+                if not is_movable:
+                    claim(li, code, lambda r, li=li, radius=radius: grid.disc_cells(li, pos.x, pos.y, radius + r), clr)
+            if is_movable:
+                continue
             for layer in layers:                         # the hole goes through everything
                 claim(layer.index, code, lambda r, li=layer.index: grid.disc_cells(li, pos.x, pos.y, hole + r),
                       max(hole_clr, clearance_of(code)))
@@ -542,6 +558,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             shape = item.GetEffectiveShape()
             box = _box(shape)
             add_copper(li, shape, code if code in nets else 0, item_clearance(item, item.GetLayer(), code), box)
+            if is_movable:
+                continue
             claim(li, code, lambda r, shape=shape, box=box, li=li:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)),
@@ -762,9 +780,16 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Clusters (pads already joined by copper) and the connections between them.
     say("Building the connection list...")
     connections: List[Connection] = []
+    existing: List[ExistingPath] = []
+    zones_by_net: Dict[int, List] = {}
+    if options.shove:
+        say("Reading the existing tracks as movable paths...")
+        for zone in board.Zones():
+            if not zone.GetIsRuleArea() and zone.GetNetCode() in nets:
+                zones_by_net.setdefault(zone.GetNetCode(), []).append(zone)
     for code, entries in pad_cells.items():
         net = nets[code]
-        index_of = {id(pad): i for i, (pad, _, _, _, _) in enumerate(entries)}
+        pads = [pad for pad, _, _, _, _ in entries]
         parent = list(range(len(entries)))
 
         def find(i):
@@ -773,24 +798,37 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 i = parent[i]
             return i
 
-        for i, (pad, _, _, _, _) in enumerate(entries):
-            try:
-                linked = conn.GetConnectedItems(pad)
-            except Exception:
-                linked = []
-            for other in linked:
-                j = index_of.get(id(other))
-                if j is None and other.GetClass() == "PAD":
-                    # a different wrapper object for the same pad: match by position/footprint
-                    for k, (cand, _, _, _, _) in enumerate(entries):
-                        if cand.GetPosition() == other.GetPosition() and cand.GetNumber() == other.GetNumber():
-                            j = k
-                            break
-                if j is not None:
-                    parent[find(i)] = find(j)
+        pieces = []
+        if options.shove:
+            # pads joined by copper the router may not move: zones, locked tracks
+            for i, j in _fixed_links(board, pads, fixed_tracks.get(code, []), zones_by_net.get(code, [])):
+                parent[find(i)] = find(j)
+            pieces = _movable_pieces(pads, movable.get(code, []), zones_by_net.get(code, []), layer_of)
+        else:
+            index_of = {id(pad): i for i, (pad, _, _, _, _) in enumerate(entries)}
+            for i, (pad, _, _, _, _) in enumerate(entries):
+                try:
+                    linked = conn.GetConnectedItems(pad)
+                except Exception:
+                    linked = []
+                for other in linked:
+                    j = index_of.get(id(other))
+                    if j is None and other.GetClass() == "PAD":
+                        # a different wrapper object for the same pad: match by position/footprint
+                        for k, (cand, _, _, _, _) in enumerate(entries):
+                            if cand.GetPosition() == other.GetPosition() and cand.GetNumber() == other.GetNumber():
+                                j = k
+                                break
+                    if j is not None:
+                        parent[find(i)] = find(j)
         groups: Dict[int, Cluster] = {}
+        cluster_index: Dict[int, int] = {}
         for i, (pad, cells, centre, ref, tight) in enumerate(entries):
-            cl = groups.setdefault(find(i), Cluster())
+            root = find(i)
+            if root not in groups:
+                cluster_index[root] = len(groups)
+                groups[root] = Cluster()
+            cl = groups[root]
             cl.cells.update(cells)
             cl.anchors.append(centre)
             if ref:
@@ -798,6 +836,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if tight:
                 cl.tight = True
         net.clusters = list(groups.values())
+        for piece in pieces:
+            touched = sorted({cluster_index[find(i)] for i in piece["pads"]})
+            rp = RoutedPath(code, piece["width"], piece["segments"], piece["vias"],
+                            piece["via_diameter"] or net.rules.via_diameter, piece["via_drill"] or net.rules.via_drill,
+                            pid=len(existing) + 1)
+            cells: List[int] = []
+            for li, x1, y1, x2, y2, w in piece["segments"]:
+                cells += grid.segment_cells(li, x1, y1, x2, y2, w // 2)
+            for x, y in piece["vias"]:
+                for li in range(grid.layers):
+                    cells += grid.disc_cells(li, x, y, rp.via_diameter // 2)
+            existing.append(ExistingPath(rp, list(zip(touched, touched[1:])), touched[0] if touched else -1,
+                                         cells, piece["items"]))
         if len(net.clusters) < 2 or not net.route:
             continue
         # Minimum spanning tree over clusters by nearest anchor distance (Prim).
@@ -854,12 +905,179 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
-                             fanout=fanout, stitch=stitch)
+                             fanout=fanout, stitch=stitch, existing=existing)
     problem.stats = {"extract_seconds": time.time() - t0, "cells": grid.size,
-                     "nets": len(nets), "connections": len(connections),
+                     "nets": len(nets), "connections": len(connections), "movable_paths": len(existing),
                      "all_connections": all_connections, "owner_maps": len(owners),
                      "fanout_vias": len(fanout), "stitch_spots": sum(len(v) for v in stitch.values())}
     return problem
+
+
+# ---- shove mode: the board's tracks as movable pieces -------------------------
+
+def _overlap(a, b, layer) -> bool:
+    """Do two items' copper shapes overlap on this layer?"""
+    try:
+        return bool(a.GetEffectiveShape(layer).Collide(b.GetEffectiveShape(layer), 0))
+    except Exception:
+        return False
+
+
+def _touches_pad(pad, item) -> bool:
+    """Does the track or via's copper overlap this pad (a hand-drawn track
+    often ends exactly on the pad's edge, so a point test is not enough)?"""
+    if item.GetClass() == "PCB_VIA":
+        return any(_overlap(pad, item, l) for l in pad.GetLayerSet().CuStack() if item.IsOnLayer(l))
+    return pad.IsOnLayer(item.GetLayer()) and _overlap(pad, item, item.GetLayer())
+
+
+def _touches_zone(zone, item, kicad_layers) -> bool:
+    """Does the item sit on the zone's filled copper on any of its layers?"""
+    for layer in kicad_layers:
+        if item.GetClass() != "PCB_VIA" and item.GetLayer() != layer:
+            continue
+        try:
+            filled = zone.GetFilledPolysList(layer)
+            if filled.OutlineCount() and filled.Collide(item.GetEffectiveShape(layer), 0):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _link_items(items) -> List[int]:
+    """Union-find over tracks and vias of one net by touching geometry; returns
+    the root per item."""
+    n = len(items)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    ends: Dict[Tuple[int, int], List[int]] = {}
+    for i, item in enumerate(items):
+        pts = [item.GetPosition()] if item.GetClass() == "PCB_VIA" else [item.GetStart(), item.GetEnd()]
+        for pt in pts:
+            ends.setdefault((pt.x, pt.y), []).append(i)
+    for same in ends.values():                      # coincident ends (the common case)
+        for i in same[1:]:
+            parent[find(i)] = find(same[0])
+    boxes = [item.GetBoundingBox() for item in items]
+    for i, item in enumerate(items):                # T joints, ends inside a via, overlapping copper
+        for j in range(i + 1, n):
+            other = items[j]
+            if find(i) == find(j) or not boxes[i].Intersects(boxes[j]):
+                continue
+            if item.GetClass() == "PCB_VIA" or other.GetClass() == "PCB_VIA":
+                track = other if item.GetClass() == "PCB_VIA" else item
+                via = item if item.GetClass() == "PCB_VIA" else other
+                if track.GetClass() == "PCB_VIA":
+                    layer = pcbnew.F_Cu          # two vias: through, same stack
+                else:
+                    layer = track.GetLayer()
+                if via.IsOnLayer(layer) and _overlap(track, via, layer):
+                    parent[find(i)] = find(j)
+            elif other.GetLayer() == item.GetLayer() and _overlap(item, other, item.GetLayer()):
+                parent[find(i)] = find(j)
+    return [find(i) for i in range(n)]
+
+
+def _fixed_links(board, pads, locked_items, zones) -> List[Tuple[int, int]]:
+    """Pad index pairs joined by copper the router may not move: a zone fill
+    both touch, or a chain of locked tracks."""
+    links: List[Tuple[int, int]] = []
+    for i in range(len(pads)):                  # overlapping pads (stacked USB-C pins, ...)
+        for j in range(i + 1, len(pads)):
+            shared = [l for l in pads[i].GetLayerSet().CuStack() if pads[j].IsOnLayer(l)]
+            for layer in shared:
+                try:
+                    if pads[i].GetEffectiveShape(layer).Collide(pads[j].GetEffectiveShape(layer), 0):
+                        links.append((i, j))
+                        break
+                except Exception:
+                    continue
+    for zone in zones:
+        kl = list(zone.GetLayerSet().CuStack())
+        on = []
+        for i, pad in enumerate(pads):
+            for layer in kl:
+                if not pad.IsOnLayer(layer):
+                    continue
+                try:
+                    filled = zone.GetFilledPolysList(layer)
+                    if filled.OutlineCount() and filled.Collide(pad.GetEffectiveShape(layer), 0):
+                        on.append(i)
+                        break
+                except Exception:
+                    continue
+        links += [(on[0], k) for k in on[1:]]
+    if locked_items:
+        roots = _link_items(locked_items)
+        by_root: Dict[int, List[int]] = {}
+        for item, root in zip(locked_items, roots):
+            for i, pad in enumerate(pads):
+                if _touches_pad(pad, item):
+                    by_root.setdefault(root, []).append(i)
+        for on in by_root.values():
+            links += [(on[0], k) for k in on[1:]]
+    return links
+
+
+def _movable_pieces(pads, items, zones, layer_of: Dict[int, int]) -> List[dict]:
+    """The unlocked tracks and vias of one net as connected pieces, each with
+    the pads it touches (a piece on a zone fill counts the zone's pads too,
+    since the fill joins them)."""
+    if not items:
+        return []
+    roots = _link_items(items)
+    pieces: Dict[int, dict] = {}
+    zone_pads: Dict[int, List[int]] = {}
+    for zi, zone in enumerate(zones):
+        kl = list(zone.GetLayerSet().CuStack())
+        for i, pad in enumerate(pads):
+            for layer in kl:
+                if pad.IsOnLayer(layer):
+                    try:
+                        filled = zone.GetFilledPolysList(layer)
+                        if filled.OutlineCount() and filled.Collide(pad.GetEffectiveShape(layer), 0):
+                            zone_pads.setdefault(zi, []).append(i)
+                            break
+                    except Exception:
+                        continue
+    for item, root in zip(items, roots):
+        piece = pieces.setdefault(root, {"segments": [], "vias": [], "pads": set(), "items": [],
+                                         "width": 0, "via_diameter": 0, "via_drill": 0})
+        if item.GetClass() == "PCB_VIA":
+            pos = item.GetPosition()
+            piece["vias"].append((pos.x, pos.y))
+            try:
+                d = int(item.GetWidth(pcbnew.F_Cu))
+            except TypeError:
+                d = int(item.GetWidth())
+            piece["via_diameter"] = max(piece["via_diameter"], d)
+            piece["via_drill"] = max(piece["via_drill"], int(item.GetDrillValue()))
+        else:
+            li = layer_of.get(item.GetLayer())
+            if li is None:
+                continue
+            a, b = item.GetStart(), item.GetEnd()
+            w = int(item.GetWidth())
+            piece["segments"].append((li, a.x, a.y, b.x, b.y, w))
+            piece["width"] = max(piece["width"], w)
+        piece["items"].append(item)
+        for i, pad in enumerate(pads):
+            if _touches_pad(pad, item):
+                piece["pads"].add(i)
+        for zi, zone in enumerate(zones):
+            if zi in zone_pads and _touches_zone(zone, item, list(zone.GetLayerSet().CuStack())):
+                piece["pads"].update(zone_pads[zi])
+    out = [piece for piece in pieces.values() if piece["segments"] or piece["vias"]]
+    for piece in out:
+        piece["width"] = piece["width"] or (piece["via_diameter"] // 2)
+    return out
 
 
 def in_scope(board, nets: Dict[int, NetInfo], connections: List[Connection],

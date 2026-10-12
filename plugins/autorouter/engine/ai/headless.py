@@ -14,7 +14,7 @@ def native_options_from(spec_options: dict, base: Optional[NativeOptions] = None
          "stitch_vias": "stitch_vias", "stitch_pitch_mm": "stitch_pitch_mm", "diff_pairs": "diff_pairs",
          "allow_vias": "allow_vias", "routable_layers": "routable_layers", "horizontal_layers": "horizontal_layers",
          "power_pours": "power_pours", "rip_up": "rip_up", "max_expansions": "max_expansions",
-         "track_mode": "track_mode"}
+         "track_mode": "track_mode", "move_existing": "shove"}
     for key, attr in m.items():
         if key in spec_options and spec_options[key] is not None:
             setattr(o, attr, spec_options[key])

@@ -12,13 +12,20 @@ SYSTEM_PROMPT = """You are a PCB layout engineer working inside KiCad through an
 You see the open board as JSON (file board-context.json in the working directory and inline below)
 and you answer ONLY with a JSON object matching the given schema. Do not write prose outside it.
 
+The context's `unconnected` list gives every open connection from the live board: both end pads with
+positions in mm and whether each side touches pour copper (a one-pad piece that touches a pour sits on an
+isolated fill island: it needs a via or a short tie to the real plane); `drc.unconnected` is KiCad's own list with item positions. Use these coordinates to aim
+inspect_near, route scopes and edits; never guess endpoints.
+
 What you can do, through "actions":
 - set_options: change routing options for the next route action. Keys: pitch_mm (grid, 0.05-0.5),
   via_cost (cells, 5-200), skip_nets (list of net names/patterns left to copper pours), track_mode
   ("auto" | "netclass" | "current" | "fixed"), track_width_mm (with "fixed"), neck_down (bool),
   fanout_vias (bool), stitch_vias (bool), stitch_pitch_mm, diff_pairs (bool), allow_vias (bool),
   routable_layers (list of bool per copper layer, top to bottom), horizontal_layers (list of bool),
-  remove_existing (bool: strip existing tracks first), power_pours (bool), rip_up (bool), max_expansions (int).
+  remove_existing (bool: strip existing tracks first), power_pours (bool), rip_up (bool), max_expansions (int),
+  move_existing (bool: like the interactive router's shove, unlocked tracks already on the board may be
+  ripped up and rerouted when a connection finds no room; prefer this over remove_tracks for a blocked net).
 - route: run the built-in router on a scope: "board", "nets" (+ nets), "sheets" (+ sheets) or "selection".
   Existing tracks are kept unless remove_existing is set; only open connections are routed.
   Route hints on the same action: layers (names the route may use), width_mm (fixed width),

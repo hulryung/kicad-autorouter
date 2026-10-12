@@ -14,6 +14,8 @@ from typing import Callable, List, Optional
 from . import apply as native_apply, extract as native_extract, router as native_router
 from .problem import NativeOptions, SCOPE_SELECTION
 
+_REMOVED: list = []        # board items taken off headless; Python must not free them
+
 
 @dataclass
 class JobResult:
@@ -21,6 +23,7 @@ class JobResult:
     failed: List[str] = field(default_factory=list)       # net names still open
     failed_detail: List[dict] = field(default_factory=list)
     ripped: int = 0
+    shoved: int = 0                 # existing board tracks moved out of the way (shove mode)
     fanout: int = 0
     pairs: int = 0
     stitched: int = 0
@@ -73,10 +76,31 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             return None, None
         if on_layers:
             on_layers(problem.layers)
-        result = native_router.run(problem, progress=progress, on_path=on_path, on_remove=on_remove,
+        movable = {ex.path.pid: list(ex.items) for ex in problem.existing}
+
+        def remove(pid):
+            # shove mode: a board piece ripped up comes off the board (the
+            # caller does it itself when it places paths live)
+            if apply_paths:
+                for item in movable.pop(pid, []):
+                    try:
+                        board.Remove(item)
+                        item.thisown = 0
+                        _REMOVED.append(item)
+                    except Exception:
+                        pass
+            if on_remove:
+                on_remove(pid)
+
+        result = native_router.run(problem, progress=progress, on_path=on_path, on_remove=remove,
                                    cancelled=cancelled)
         if apply_paths:
             native_apply.add_paths(board, problem.layers, result.paths)
+            if result.shoved:
+                try:
+                    board.BuildConnectivity()
+                except Exception:
+                    pass
         return problem, result
 
     pours_later = options.fanout_vias or options.stitch_vias
@@ -90,6 +114,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.layers = problem.layers
     out.stats = dict(problem.stats)
     out.routed, out.ripped, out.pairs = result.routed, result.ripped, result.pairs
+    out.shoved = result.shoved
     out.pair_log = list(getattr(result, "pair_log", []))
     out.failed_detail = list(getattr(result, "failed_detail", []))
     out.seconds = result.seconds
@@ -110,6 +135,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             out.escalated = result2.routed
             out.routed += result2.routed
             out.ripped += result2.ripped
+            out.shoved += result2.shoved
             out.seconds += result2.seconds
             out.failed = sorted({problem2.nets[c.net].name for c in result2.failed})
             out.failed_detail = list(getattr(result2, "failed_detail", []))

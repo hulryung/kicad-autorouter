@@ -73,7 +73,7 @@ board back exactly as it was).
 
 | Tab | What you set |
 |-----|--------------|
-| **Routing** | The engine. For the built-in router: routing grid pitch, via cost, search budget per connection, nets to leave to the pours (patterns such as `GND,*_PLANE`), **track width** (automatic, net class, the editor's current choice, or any pre-defined size), **via size**, vias on/off, retry pass, **fanout vias** for GND/power pads, **coupled differential pairs**, **GND via stitching** with its pitch, **power pours** (pad vias and coarser stitching), and **what to route**: the whole board, the items selected in the editor, or the footprints of chosen schematic sheets. Whether to remove the existing tracks first and whether to refill the zones when done. |
+| **Routing** | The engine. For the built-in router: routing grid pitch, via cost, search budget per connection, nets to leave to the pours (patterns such as `GND,*_PLANE`), **track width** (automatic, net class, the editor's current choice, or any pre-defined size), **via size**, vias on/off, retry pass, **fanout vias** for GND/power pads, **coupled differential pairs**, **GND via stitching** with its pitch, **power pours** (pad vias and coarser stitching), **move existing tracks** (shove: unlocked tracks already on the board may be ripped up and rerouted when a connection finds no room, like the interactive router), and **what to route**: the whole board, the items selected in the editor, or the footprints of chosen schematic sheets. Whether to remove the existing tracks first and whether to refill the zones when done. |
 | **Layers & nets** | Which copper layers may be routed, an optional preferred-direction override per layer, and net classes to leave unrouted. Both engines honour these. |
 | **Freerouting** | Passes, optimizer threads and threshold, via / plane-via / rip-up costs, strategies, JVM heap, extra arguments, SMD fanout, and where Java and the jar come from (leave empty for auto-detection and the managed download). |
 | **AI assistant** | A request in plain words, the model, the round limit, whether to include the DRC, and the **Review current routing** button for a critique without changes. |
@@ -110,6 +110,11 @@ Benchmark figures for that board (GND nets excluded), from
 | Track length | 764 mm | 985 mm |
 | Vias | 46 | 85 (56 of them pad-to-plane fanout) |
 | Stitching vias (GND pours, 4 mm) | – | 161 |
+
+With **Move existing tracks** on, the finer second pass may also shove what the
+first pass placed: on the same board it reroutes 3 pieces, saves 5 of the open
+connections and finishes in about a third of the time (126 s against 372 s),
+still with 0 DRC violations.
 
 ## KiCad's routing settings
 
@@ -176,7 +181,10 @@ obstacle.
    penalty). A connection that cannot be routed gets a **rip-up and reroute**
    pass: a search that may cross paths this run created (never fixed copper)
    at a penalty, those paths are removed, the connection is routed, and the
-   removed ones are rerouted. Zig-zag runs are straightened into one straight
+   removed ones are rerouted. With **Move existing tracks** on, the board's own
+   unlocked tracks and vias of routable nets enter the run as such paths too,
+   so a blocked connection can shove them aside the way KiCad's interactive
+   router does; locked tracks and pour nets never move. Zig-zag runs are straightened into one straight
    and one diagonal piece. Differential pairs go first, as one coupled route.
    Connections still open after that get a **second pass** on their own: half
    the grid pitch, the board's narrowest pre-defined width, cheaper vias, in a
@@ -220,7 +228,7 @@ The model must answer with a JSON object (schema enforced by Codex): a
 
 | Action | What it does |
 |---|---|
-| `set_options` | change routing options for the next route (grid, via cost, skip nets, widths, layers, fanout, stitching, pairs, ...) |
+| `set_options` | change routing options for the next route (grid, via cost, skip nets, widths, layers, fanout, stitching, pairs, move_existing, ...) |
 | `route` | run the built-in router on the board, a list of nets, schematic sheets or the selection, with hints: allowed `layers`, a fixed `width_mm`, `via_cost`, `avoid_mm` rectangles |
 | `remove_tracks`, `remove_items_near` | delete a net's copper, or the tracks/vias around a point |
 | `add_track`, `add_via` | draw copper by hand (polyline in mm, via at a point) |
@@ -229,8 +237,11 @@ The model must answer with a JSON object (schema enforced by Codex): a
 | `inspect_near` | list the tracks, vias, pads and footprints around a point (returned to the model) |
 | `refill_zones`, `note`, `ask` | refill pours, leave a remark, ask the user (the loop stops) |
 
-The plugin applies them on the open board through the built-in router with
-live display. **Every edit is measured**: KiCad's DRC and the unconnected
+The model sees the board as data: nets, classes, footprints, sheets, the last
+run, KiCad's DRC and an `unconnected` list with both end pads and positions of
+every open connection, so it can aim its inspections and edits at exact
+coordinates. The plugin applies the actions on the open board through the
+built-in router with live display. **Every edit is measured**: KiCad's DRC and the unconnected
 count are taken before and after, hand edits that add violations are rolled
 back automatically (unless the model sets `force` because a later action will
 fix it), and each round's results, the `failed_detail` of connections that

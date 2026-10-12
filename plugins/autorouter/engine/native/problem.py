@@ -76,6 +76,18 @@ class RoutedPath:
     pid: int = 0                     # set by the router; rip-up removes paths by id
 
 
+@dataclass
+class ExistingPath:
+    """Tracks and vias already on the board that the router may rip up and
+    reroute (shove mode): one connected piece of one net, with the clusters
+    it joins and the board items behind it."""
+    path: RoutedPath
+    joins: List[Tuple[int, int]]     # cluster index pairs this piece connects
+    cluster: int                     # one cluster it touches (-1: a dangling piece)
+    cells: List[int]                 # centreline cells, where a route may end on it
+    items: list                      # the pcbnew items, for removal on rip-up
+
+
 SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS = "board", "selection", "sheets"
 SIZE_AUTO, SIZE_NETCLASS, SIZE_CURRENT, SIZE_FIXED = "auto", "netclass", "current", "fixed"
 POWER_PATTERNS = ["+*", "V*", "*VCC*", "*VDD*", "*VBUS*", "*VIN*", "*VOUT*", "*3V3*", "*5V*", "*12V*", "*24V*",
@@ -102,6 +114,7 @@ class NativeOptions:
     stitch_pitch_mm: float = 4.0    # grid pitch of the stitching vias
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     pours_only: bool = False          # the pipeline's last pass: fanout/stitch, no signal routing
+    shove: bool = False             # existing (unlocked) tracks of routable nets may be ripped up and rerouted
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
     track_mode: str = SIZE_AUTO
@@ -139,3 +152,4 @@ class RoutingProblem:
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum
     max_via_drill: int = 0                        # nm, the largest via drill any net uses
     safety: int = 0                               # nm added to every obstacle radius
+    existing: List[ExistingPath] = field(default_factory=list)   # shove mode: movable board copper

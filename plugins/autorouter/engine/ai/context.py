@@ -1,5 +1,6 @@
 """The board as the model sees it: a compact JSON description."""
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -43,13 +44,93 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
                       "items": [it.get("description", "")[:120] for it in v.get("items", [])],
                       "pos_mm": (v.get("items") or [{}])[0].get("pos")})
     unconnected = Counter()
+    opens = []
     for u in data.get("unconnected_items", []):
         desc = u["items"][0]["description"] if u.get("items") else ""
         if "[" in desc:
             unconnected[desc.split("[")[1].split("]")[0]] += 1
+        if len(opens) < limit:
+            opens.append({"items": [it.get("description", "")[:100] for it in u.get("items", [])],
+                          "pos_mm": [[it.get("pos", {}).get("x"), it.get("pos", {}).get("y")]
+                                     for it in u.get("items", [])]})
     return {"available": True, "violations_by_type": dict(kinds), "violations": items,
             "unconnected_total": len(data.get("unconnected_items", [])),
-            "unconnected_by_net": dict(unconnected.most_common(40))}
+            "unconnected_by_net": dict(unconnected.most_common(40)),
+            "unconnected": opens}
+
+
+def unconnected_edges(board, limit: int = 60) -> List[dict]:
+    """Where the open connections are, from the live board: for every net
+    whose copper is in more than one piece, the nearest pad pair between the
+    largest piece and each other piece (what the ratsnest draws), with pad
+    names, positions and whether each side already sits on a pour."""
+    from ..native import extract
+    conn = board.GetConnectivity()
+    pads_by_net: Dict[int, list] = {}
+    for pad in board.GetPads():
+        if pad.GetNetCode() > 0:
+            pads_by_net.setdefault(pad.GetNetCode(), []).append(pad)
+    out: List[dict] = []
+    for code, pads in sorted(pads_by_net.items()):
+        if len(pads) < 2:
+            continue
+        name = board.FindNet(code).GetNetname()
+
+        def key(pad):
+            fp = extract.footprint_of(pad)
+            pos = pad.GetPosition()
+            return (fp.GetReference() if fp else "?", pad.GetNumber(), pos.x, pos.y)
+
+        index = {key(pad): i for i, pad in enumerate(pads)}
+        parent = list(range(len(pads)))
+        on_pour = [False] * len(pads)
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i, pad in enumerate(pads):
+            try:
+                linked = conn.GetConnectedItems(pad)
+            except Exception:
+                linked = []
+            for other in linked:
+                cls = other.GetClass()
+                if cls == "ZONE":
+                    on_pour[i] = True
+                elif cls == "PAD":
+                    j = index.get(key(other))
+                    if j is not None:
+                        parent[find(i)] = find(j)
+        groups: Dict[int, List[int]] = {}
+        for i in range(len(pads)):
+            groups.setdefault(find(i), []).append(i)
+        if len(groups) < 2:
+            continue
+        roots = sorted(groups, key=lambda r: -len(groups[r]))
+        main = groups[roots[0]]
+        for r in roots[1:]:
+            best = None
+            for i in main:
+                pi = pads[i].GetPosition()
+                for j in groups[r]:
+                    pj = pads[j].GetPosition()
+                    d = abs(pi.x - pj.x) + abs(pi.y - pj.y)
+                    if best is None or d < best[0]:
+                        best = (d, i, j)
+            d, i, j = best
+            ki, kj = key(pads[i]), key(pads[j])
+            out.append({"net": name,
+                        "from": f"{kj[0]}.{kj[1]}", "from_mm": [_mm(kj[2]), _mm(kj[3])],
+                        "from_on_pour": any(on_pour[k] for k in groups[r]),
+                        "to": f"{ki[0]}.{ki[1]}", "to_mm": [_mm(ki[2]), _mm(ki[3])],
+                        "to_on_pour": any(on_pour[k] for k in main),
+                        "piece_pads": len(groups[r]), "distance_mm": round(math.hypot(ki[2] - kj[2], ki[3] - kj[3]) / 1e6, 2)})
+            if len(out) >= limit:
+                return out
+    return out
 
 
 def board_context(board, options: dict, last_run: Optional[dict], workdir: Path,
@@ -100,6 +181,11 @@ def board_context(board, options: dict, last_run: Optional[dict], workdir: Path,
             zones_by_net.setdefault(z.GetNetCode(), []).extend(
                 board.GetLayerName(l) for l in z.GetLayerSet().CuStack())
     conn = board.GetConnectivity()
+    try:
+        board.BuildConnectivity()                  # the live board may have changed since the last build
+    except Exception:
+        pass
+    opens = unconnected_edges(board)
     names_all = {n.GetNetname() for c, n in board.GetNetsByNetcode().items() if c > 0}
     nets = []
     for code, net in board.GetNetsByNetcode().items():
@@ -135,7 +221,8 @@ def board_context(board, options: dict, last_run: Optional[dict], workdir: Path,
                   "min_via_mm": _mm(ds.m_ViasMinSize), "hole_clearance_mm": _mm(getattr(ds, "m_HoleClearance", 0)),
                   "predefined_track_widths_mm": [_mm(w) for w in sizes["track_widths"]],
                   "predefined_vias_mm": [[_mm(d), _mm(h)] for d, h in sizes["via_sizes"]],
-                  "unconnected_total": conn.GetUnconnectedCount(True)},
+                  "unconnected_total": len(opens)},
+        "unconnected": opens,
         "net_classes": classes,
         "nets": nets,
         "footprints": footprints,

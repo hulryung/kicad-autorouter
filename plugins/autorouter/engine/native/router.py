@@ -40,6 +40,7 @@ class RouteResult:
         self.fanout = 0
         self.pairs = 0
         self.stitched = 0
+        self.shoved = 0                                  # existing board paths ripped up and rerouted
         self.failed_detail: List[dict] = []
         self.seconds = 0.0
         self.cancelled = False
@@ -51,6 +52,8 @@ class _Path:
         self.pid, self.conn, self.path, self.cells = pid, conn, path, cells
         self.claims: Dict[Tuple[int, int], List[int]] = {}      # owner-map key -> claimed cells
         self.via_cells: List[int] = []
+        self.joins: List[Tuple[int, int]] = [(conn.a, conn.b)]  # cluster pairs this path connects
+        self.existing = False                                   # copper that was on the board already
         self.paired = paired                                   # half of a coupled pair: never ripped up
 
 
@@ -270,6 +273,23 @@ class Router:
         # union-find over each net's initial clusters, joined by surviving paths
         self.parent: Dict[int, List[int]] = {code: list(range(len(n.clusters)))
                                              for code, n in problem.nets.items()}
+        # shove mode: the board's own tracks enter as paths that rip-up may
+        # take out of the way; their connections are rerouted like any other
+        self.shoved = 0
+        for ex in problem.existing:
+            net = problem.nets.get(ex.path.net)
+            if net is None or not net.clusters:
+                continue
+            c = max(ex.cluster, 0)
+            path = _Path(ex.path.pid, Connection(ex.path.net, c, c, 0), ex.path, list(ex.cells))
+            path.joins = list(ex.joins)
+            path.existing = True
+            self.paths[path.pid] = path
+            self._claim(path)
+            self.next_pid = max(self.next_pid, path.pid + 1)
+        for code in {ex.path.net for ex in problem.existing}:
+            if code in self.parent:
+                self._rebuild_union(code)
 
     # ---- clusters -------------------------------------------------------
 
@@ -284,7 +304,8 @@ class Router:
         self.parent[code] = list(range(len(self.p.nets[code].clusters)))
         for path in self.paths.values():
             if path.conn.net == code:
-                self.parent[code][self._find(code, path.conn.a)] = self._find(code, path.conn.b)
+                for a, b in path.joins:
+                    self.parent[code][self._find(code, a)] = self._find(code, b)
 
     def _component(self, code: int, i: int) -> Tuple[Set[int], List[Tuple[int, int]]]:
         """All cells and anchors a route may start from / end on for the
@@ -494,7 +515,15 @@ class Router:
             path = self.paths.pop(pid, None)
             if path is None:
                 continue
-            conns.append(path.conn)
+            if path.existing:
+                # a board piece may have joined several clusters: each join
+                # becomes a connection to route again
+                self.shoved += 1
+                for a, b in path.joins:
+                    if a != b:
+                        conns.append(Connection(path.conn.net, a, b, 0))
+            else:
+                conns.append(path.conn)
             key = (path.conn.net, path.conn.a, path.conn.b)
             self.rips[key] = self.rips.get(key, 0) + 1
             if on_remove:
@@ -1011,9 +1040,11 @@ class Router:
         result.cancelled = stop()
         result.failed = [c for c in failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
         result.failed_detail = [self._why_failed(c) for c in result.failed]
-        result.paths = [self.paths[pid].path for pid in sorted(self.paths)] + fanout_paths + stitch_paths
+        new_paths = [self.paths[pid] for pid in sorted(self.paths) if not self.paths[pid].existing]
+        result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths
         result.stitched = len(stitch_paths)
-        result.routed = len(self.paths)
+        result.routed = len(new_paths)
+        result.shoved = self.shoved
         result.fanout = len(fanout_paths)
         result.pairs = getattr(self, "pairs_routed", 0)
         result.pair_log = getattr(self, "pair_log", [])
