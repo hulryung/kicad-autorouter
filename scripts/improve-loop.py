@@ -35,16 +35,18 @@ DEFAULT_REFERENCE = Path.home() / "dev/CAN-debugger-hw/hardware/can-debugger/CAN
 KICAD_PYTHONS = ["/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
                  r"C:\Program Files\KiCad\bin\python.exe", "/usr/bin/python3"]
 
+CRITERIA = ["connectivity", "drc", "similarity_to_reference", "escape_and_fanout", "directness", "via_use", "neatness",
+            # the design intent (only meaningful with --intent; otherwise the reviewer gives 10)
+            "impedance_widths", "diff_pairs", "length_matching", "routing_priority"]
+
 EVAL_SCHEMA = {
     "type": "object",
     "properties": {
         "score": {"type": "integer", "minimum": 0, "maximum": 100},
         "criteria": {"type": "object", "properties": {
             k: {"type": "integer", "minimum": 0, "maximum": 10}
-            for k in ("connectivity", "drc", "similarity_to_reference", "escape_and_fanout", "directness",
-                      "via_use", "neatness")},
-            "required": ["connectivity", "drc", "similarity_to_reference", "escape_and_fanout", "directness",
-                         "via_use", "neatness"], "additionalProperties": False},
+            for k in CRITERIA},
+            "required": CRITERIA, "additionalProperties": False},
         "issues": {"type": "array", "items": {"type": "object", "properties": {
             "title": {"type": "string"}, "x_mm": {"type": ["number", "null"]}, "y_mm": {"type": ["number", "null"]},
             "severity": {"type": "string", "enum": ["high", "medium", "low"]},
@@ -68,21 +70,25 @@ reference, escape-side agreement for the pins of the larger parts, the positions
 every image listed in its "images" (use the Read tool on each path): the whole board and close-ups,
 routed and reference side by side.
 
+{intent}
 Judge: open connections and DRC first; then how close the routing is to what the designer did
 (pin escape directions, layer use, via placement, route topology); detours, zig-zags, odd angles, tracks
 squeezed between pads, stubs, vias where none are needed, long parallel runs that block other pins.
 {goal}
-Give a score 0-100, criteria 0-10, and concrete issues with board positions in mm and what in an
+Give a score 0-100 (the overall quality a layout engineer would sign off on), each criterion 0-10
+(10 = nothing to fix), and concrete issues with board positions in mm and what in an
 autorouter's logic most likely causes each (pad escape planning, route ordering, rip-up, via cost,
-fanout, cost function...). "focus" is the single change to the router you would make next.
+fanout, cost function, pair coupling, impedance sizing, meander placement...). "focus" is the single change to the router you would make next.
 Answer only with the JSON object."""
 
 IMPROVE_PROMPT = """You improve the built-in PCB autorouter in this repository (a KiCad plugin, Python).
 
-Code: plugins/autorouter/engine/native/ (extract.py reads the board and plans pad escapes, grid.py,
-astar.py the search, router.py ordering/rip-up/pairs/fanout/stitching, pipeline.py the passes, apply.py
-writes tracks, problem.py the data model and NativeOptions). README.md "How the built-in router works"
-explains the design.
+Code: plugins/autorouter/engine/native/ (extract.py reads the board, plans pad escapes, assigns routing
+groups; grid.py, astar.py the search, router.py ordering/rip-up/pairs/fanout/stitching, pipeline.py the
+passes, tuning.py length matching with meanders, apply.py writes tracks, problem.py the data model and
+NativeOptions); plugins/autorouter/engine/si.py (design intent: impedance classes, length groups, routing
+order, KiCad net classes and DRC rules) and engine/stackup.py (stackups, impedance formulas).
+README.md "How the built-in router works" explains the design.
 
 A benchmark strips the tracks of a finished reference board ({board}) and routes it again. The latest
 result, before your change: {bench}/metrics.json and the images it lists (Read them).
@@ -94,14 +100,15 @@ Earlier rounds of this loop (what was tried, and whether it helped; do not repea
 
 Task: make ONE focused change to the router that addresses the reviewer's "focus" (or the most important
 issue you see), so the next benchmark run is better: fewer open connections and DRC problems first, then
-closer to the reference artwork (escape sides, fewer detours and vias, shorter tracks), without making
-routing much slower.
+closer to the reference artwork (escape sides, fewer detours and vias, shorter tracks), and meeting the
+design intent when there is one (impedance widths, coupled pairs, matched lengths, routing groups in
+order), without making routing much slower.
 Rules:
-- edit only files under plugins/autorouter/engine/native/ (and tests/ if a test needs updating);
+- edit only files under plugins/autorouter/engine/ (and tests/ if a test needs updating);
 - keep it deterministic (no randomness, no wall-clock decisions);
 - run the tests before you finish: {kicad_py} scripts/run-tests.py
 - you may run the benchmark yourself to check (takes 1-3 minutes):
-  {kicad_py} {bench_script} --reference {reference} --plugins plugins --out {scratch} --skip {skip} --no-images
+  {kicad_py} {bench_script} --reference {reference} --plugins plugins --out {scratch} --skip {skip} --no-images{intent_arg}
   (it prints a one-line JSON summary at the end); never write to the reference board;
 - do not commit; the loop measures your change and keeps or discards it.
 Finish with a short plain summary: what you changed, where, and why."""
@@ -163,9 +170,22 @@ def structured(data):
     return json.loads(text[start:end + 1])
 
 
+INTENT_TEXT = """This run also has a design intent ({intent_file}): controlled-impedance classes (track
+widths per layer computed from the stackup), length-matching groups (meanders after routing), differential
+pairs and a routing order of net groups. metrics.json "intent" reports how well it is met: the share of
+controlled track length at the right width per layer, each pair's coupled share and skew, each length
+group's spread before/after tuning, and open nets per routing group. The intent is also written into
+KiCad's DRC rules, so "rule_errors" and the drc entries diff_pair_gap_out_of_range, skew_out_of_range,
+length_out_of_range, track_width are intent violations (judged under the intent criteria, not "drc").
+Look at the meanders and pairs in the images too: even bumps, no bumps squeezed against other copper,
+pairs running side by side at a constant gap."""
+
+
 def bench(args, plugins, out, images=True):
     cmd = [args.kicad_py, str(args.bench_script), "--reference", str(args.reference), "--plugins", str(plugins),
            "--out", str(out), "--skip", args.skip]
+    if args.intent:
+        cmd += ["--intent", str(args.intent_frozen)]
     if args.shove:
         cmd.append("--shove")
     if not images:
@@ -189,6 +209,19 @@ def penalty(m, base_seconds):
     p = (1000 * (m.get("unconnected_after") or 0) + 300 * m.get("drc_errors", 0) + 40 * m.get("dangling", 0)
          + 20 * m.get("off_45", 0) + 20 * m.get("doubled_back", 0) + 5 * (total - agree)
          + 0.05 * m["length_mm"] + 0.5 * max(0, own_vias))
+    p += 60 * m.get("rule_errors", 0)
+    it = m.get("intent") or {}
+    if it:
+        if it.get("impedance_width_ok_pct") is not None:
+            p += 3 * (100 - it["impedance_width_ok_pct"])
+        for pr in it.get("pairs", []):
+            p += 1.0 * (100 - pr["coupled_pct"])
+        for g in it.get("length_groups", []):
+            if not g["ok"]:
+                p += 150 + 50 * min(10.0, sum(abs(v) for v in g["off_by_mm"].values()))
+        for group, nets in (it.get("open_by_group") or {}).items():
+            if group in ("pairs", "memory", "high_speed"):
+                p += 500 * len(nets)                 # an important net left open is worse than any other
     slow = m["route_seconds"] - 1.5 * base_seconds
     if slow > 0:
         p += 0.5 * slow
@@ -196,8 +229,14 @@ def penalty(m, base_seconds):
 
 
 def figures(m):
-    return {k: m.get(k) for k in ("routed", "unconnected_after", "drc_errors", "dangling", "off_45", "doubled_back",
-                                  "length_mm", "vias", "route_seconds", "escape_side_agreement")}
+    f = {k: m.get(k) for k in ("routed", "unconnected_after", "drc_errors", "rule_errors", "dangling", "off_45",
+                               "doubled_back", "length_mm", "vias", "route_seconds", "escape_side_agreement")}
+    it = m.get("intent") or {}
+    if it:
+        f["impedance_ok_pct"] = it.get("impedance_width_ok_pct")
+        f["pairs_coupled_pct"] = [p["coupled_pct"] for p in it.get("pairs", [])]
+        f["length_groups_ok"] = it.get("length_groups_ok")
+    return f
 
 
 def git(*a, cwd=REPO, check=True):
@@ -247,21 +286,26 @@ def unit_tests(args, wt):
 def write_report(args, rounds, best, base):
     lines = [f"# Router improvement run {args.name}", "",
              f"Reference board: `{args.reference}`  ", f"Branch: `{args.branch}` (worktree `{args.worktree}`)  ",
-             f"Nets left to pours: {args.skip}", "",
-             "| Round | Reviewer score | Penalty | Routed | Open | DRC errors | Dangling | Off 45 | Length mm | Vias | Escape sides | Time s | Kept |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             f"Nets left to pours: {args.skip}  ", f"Design intent: {args.intent or 'none'}", "",
+             "| Round | Reviewer score | Penalty | Routed | Open | DRC errors | Rule errors | Dangling | Off 45 | Length mm | Vias | Escape sides | Impedance ok % | Pairs coupled % | Length groups ok | Time s | Kept |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rounds:
         m = r.get("metrics") or {}
         lines.append(f"| {r['round']} | {r.get('score', '')} | {r.get('penalty', '')} | {m.get('routed', '')} | "
-                     f"{m.get('unconnected_after', '')} | {m.get('drc_errors', '')} | {m.get('dangling', '')} | "
+                     f"{m.get('unconnected_after', '')} | {m.get('drc_errors', '')} | {m.get('rule_errors', '')} | "
+                     f"{m.get('dangling', '')} | "
                      f"{m.get('off_45', '')} | {m.get('length_mm', '')} | {m.get('vias', '')} | "
-                     f"{m.get('escape_side_agreement', '')} | {m.get('route_seconds', '')} | {r.get('kept', '')} |")
+                     f"{m.get('escape_side_agreement', '')} | {m.get('impedance_ok_pct', '')} | "
+                     f"{m.get('pairs_coupled_pct', '')} | {m.get('length_groups_ok', '')} | "
+                     f"{m.get('route_seconds', '')} | {r.get('kept', '')} |")
     lines += ["", f"Baseline penalty {base}, best {best}.", ""]
     for r in rounds:
         lines.append(f"## Round {r['round']}")
         if r.get("evaluation"):
             e = r["evaluation"]
+            crit = ", ".join(f"{k} {v}" for k, v in (e.get("criteria") or {}).items())
             lines += ["", f"**Reviewer ({e.get('score')}/100):** {e.get('summary', '')}", "",
+                      f"**Criteria (0-10):** {crit}", "",
                       f"**Focus:** {e.get('focus', '')}", ""]
             for i in e.get("issues", [])[:8]:
                 at = f" at ({i['x_mm']}, {i['y_mm']})" if i.get("x_mm") is not None else ""
@@ -285,6 +329,8 @@ def main():
     ap.add_argument("--bench-timeout", type=int, default=1800)
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
     ap.add_argument("--no-final-eval", action="store_true")
+    ap.add_argument("--intent", default="", help="design intent JSON (impedance classes, length groups, routing "
+                    "order); default: examples/<board>.intent.json when it exists, 'none' for no intent")
     args = ap.parse_args()
 
     args.reference = Path(args.reference).expanduser().resolve()
@@ -299,6 +345,16 @@ def main():
     args.bench_script = args.run_dir / "improve_bench.py"           # frozen: every round measured the same way
     shutil.copy(REPO / "scripts" / "improve_bench.py", args.bench_script)
     args.worktree, args.branch = make_worktree(args.run_dir, args.name)
+    if not args.intent:
+        cand = REPO / "examples" / (args.reference.stem + ".intent.json")
+        args.intent = str(cand) if cand.exists() else ""
+    if args.intent == "none":
+        args.intent = ""
+    intent_text = ""
+    if args.intent:
+        args.intent_frozen = args.run_dir / "intent.json"
+        shutil.copy(Path(args.intent).expanduser(), args.intent_frozen)
+        intent_text = INTENT_TEXT.format(intent_file=args.intent_frozen)
     goal = f"\nThe user's goal for this run: {args.goal}\n" if args.goal else ""
     log(f"run {args.run_dir}  branch {args.branch}")
 
@@ -316,7 +372,8 @@ def main():
         rounds.append(rd)
         log(f"round {k}: evaluating the current result...")
         try:
-            data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=current_dir, goal=goal),
+            data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=current_dir, goal=goal,
+                                                intent=intent_text),
                               args.run_dir, args.run_dir / f"round{k}-evaluation.json", args, schema=EVAL_SCHEMA)
             evaluation = structured(data)
         except Exception as e:
@@ -333,7 +390,8 @@ def main():
                                        evaluation=json.dumps(evaluation, indent=1) + goal,
                                        history=json.dumps(history, indent=1) if history else "(none yet)",
                                        kicad_py=args.kicad_py, bench_script=args.bench_script, scratch=scratch,
-                                       skip=args.skip)
+                                       skip=args.skip,
+                                       intent_arg=f" --intent {args.intent_frozen}" if args.intent else "")
         tools = ("Read", "Edit", "Write", "Glob", "Grep", f"Bash({args.kicad_py} *)", "Bash(python3 *)",
                  "Bash(git diff*)", "Bash(git status*)", "Bash(ls *)")
         try:
@@ -374,6 +432,7 @@ def main():
         p = penalty(m, base_seconds)
         rd["metrics"], rd["penalty"] = figures(m), p
         worse_hard = ((m.get("unconnected_after") or 0) > (current.get("unconnected_after") or 0)
+                      or m.get("rule_errors", 0) > current.get("rule_errors", 0) + 2
                       or m.get("drc_errors", 0) > current.get("drc_errors", 0))
         if p < best - 0.5 and not worse_hard:
             git("add", "-A", cwd=args.worktree)
@@ -395,7 +454,8 @@ def main():
     if not args.no_final_eval and rounds[-1].get("kept") == "yes":
         log("final evaluation of the best result...")
         try:
-            data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=current_dir, goal=goal),
+            data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=current_dir, goal=goal,
+                                                intent=intent_text),
                               args.run_dir, args.run_dir / "final-evaluation.json", args, schema=EVAL_SCHEMA)
             rounds[-1]["score"] = structured(data)["score"]
         except Exception as e:

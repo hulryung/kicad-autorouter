@@ -27,7 +27,11 @@ What you can do, through "actions":
   move_existing (bool: like the interactive router's shove, unlocked tracks already on the board may be
   ripped up and rerouted when a connection finds no room; prefer this over remove_tracks for a blocked net).
   plane_nets (bool, default true: a net whose copper pour lies under its pads, e.g. a +3V3 plane, gets vias
-  to the pour and no tracks), time_limit_min (number, default 10: the whole route run; 0 = no limit).
+  to the pour and no tracks), time_limit_min (number, default 10: the whole route run; 0 = no limit),
+  route_order (list of routing groups, first routed first: "pairs", "memory", "high_speed", "clock",
+  "power", "signal"; default in that order), protect_groups (bool, default true: later groups may not rip up
+  pairs, memory or high-speed routes), tune_lengths (bool, default true: meanders for the board's length
+  groups after routing). Impedance classes and length groups themselves are the user's (Signal integrity tab).
 - route: run the built-in router on a scope: "board", "nets" (+ nets), "sheets" (+ sheets) or "selection".
   Existing tracks are kept unless remove_existing is set; only open connections are routed.
   Route hints on the same action: layers (names the route may use), width_mm (fixed width),

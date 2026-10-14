@@ -350,6 +350,42 @@ def _skip_net(net, options: NativeOptions) -> bool:
     return any(fnmatch.fnmatchcase(name, pat) or name == pat for pat in options.skip_nets)
 
 
+def _assign_groups(board, nets: Dict[int, NetInfo], options: NativeOptions, plane_codes: Set[int]) -> None:
+    """Each routed net's routing group and its place in the routing order:
+    pairs, nets on memory parts, high-speed names (and every net with an
+    impedance or length rule), clocks, routed power nets, the rest."""
+    from .. import si
+    order = [g for g in (options.route_order or si.DEFAULT_ORDER) if g in si.DEFAULT_ORDER]
+    order += [g for g in si.DEFAULT_ORDER if g not in order]
+    rank = {g: i for i, g in enumerate(order)}
+    patterns = {g: list(si.GROUP_PATTERNS.get(g, [])) + list(options.route_groups.get(g, []))
+                for g in si.DEFAULT_ORDER}
+    memory_codes: Set[int] = set()
+    for fp in board.GetFootprints():
+        if si.is_memory_part(fp):
+            memory_codes |= {p.GetNetCode() for p in fp.Pads() if p.GetNetCode() > 0}
+    tuned = {n for g in options.length_groups for n in g.get("nets", [])}
+    for n in nets.values():
+        power = any(fnmatch.fnmatchcase(n.name.upper(), pat.upper()) or
+                    fnmatch.fnmatchcase(n.name.rsplit("/", 1)[-1].upper(), pat.upper())
+                    for pat in options.power_patterns)
+        if n.partner or si.matches(n.name, patterns[si.GROUP_PAIRS]):
+            group = si.GROUP_PAIRS
+        elif si.matches(n.name, patterns[si.GROUP_MEMORY]) or (n.code in memory_codes and not power):
+            group = si.GROUP_MEMORY
+        elif si.matches(n.name, patterns[si.GROUP_HIGH_SPEED]) or n.name in options.impedance or n.name in tuned:
+            group = si.GROUP_HIGH_SPEED
+        elif si.matches(n.name, patterns[si.GROUP_CLOCK]):
+            group = si.GROUP_CLOCK
+        elif power or si.matches(n.name, patterns[si.GROUP_POWER]):
+            group = si.GROUP_POWER
+        else:
+            group = si.GROUP_SIGNAL
+        if si.matches(n.name, patterns[si.GROUP_SIGNAL]):
+            group = si.GROUP_SIGNAL                 # the user's override
+        n.group, n.rank = group, rank[group]
+
+
 def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     t0 = time.time()
     say = status or (lambda text: None)
@@ -406,6 +442,22 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if skipped and not (options.fanout_vias and code in zone_layers):
             continue
         nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options, hints), route=not skipped)
+    # Controlled impedance: the width each layer needs for the net's target.
+    # The search clears for the widest of them; each segment is drawn at its
+    # own layer's width. It overrides every other width choice (the finer
+    # pass's neck width included): a 90 ohm pair at the wrong width is wrong.
+    ds = board.GetDesignSettings()
+    for n in nets.values():
+        z = options.impedance.get(n.name)
+        if not z or not n.route:
+            continue
+        per_layer = {l.index: int(z["widths"][l.kicad_id]) for l in layers
+                     if l.routable and l.kicad_id in z["widths"]}
+        if not per_layer:
+            continue
+        n.layer_widths = per_layer
+        n.rules = NetRules(max(max(per_layer.values()), ds.m_TrackMinWidth), n.rules.clearance,
+                           n.rules.via_diameter, n.rules.via_drill)
     # Differential pairs: both nets take the net class's pair width and gap
     # (the designer's impedance choice in Board Setup) and are routed together.
     ds = board.GetDesignSettings()
@@ -421,11 +473,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             nc = ds.m_NetSettings.GetEffectiveNetClass(n.name)
             width = nc.GetDiffPairWidth() if nc.GetDiffPairWidth() > 0 else n.rules.width
             gap = max(nc.GetDiffPairGap(), n.rules.clearance)
+            z = options.impedance.get(n.name)
+            if z and z.get("diff"):
+                # the coupled run goes on the first routable layer: its sizes
+                top = next((l for l in layers if l.routable), layers[0])
+                width = int(z["widths"].get(top.kicad_id, width))
+                gap = int(z["gaps"].get(top.kicad_id, gap))
             for a, b in ((n, m), (m, n)):
                 a.partner = b.code
                 a.pair_gap = gap
-                a.rules = NetRules(max(width, ds.m_TrackMinWidth), a.rules.clearance,
-                                   a.rules.via_diameter, a.rules.via_drill)
+                a.pair_width = max(width, ds.m_TrackMinWidth)
+                a.rules = NetRules(max(width, max(a.layer_widths.values() or [0]), ds.m_TrackMinWidth),
+                                   a.rules.clearance, a.rules.via_diameter, a.rules.via_drill)
+    _assign_groups(board, nets, options, plane_codes)
     # Connections that end on fine-pitch pins are routed at the board's
     # narrowest pre-defined width (the neck width), as a designer would, so
     # the escapes and the tracks between the pins have room. Those widths
@@ -433,7 +493,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     keys = {n.rules.key for n in nets.values()}
     for n in nets.values():
         if n.partner:
-            keys.add((2 * n.rules.width + n.pair_gap, n.rules.clearance))
+            keys.add((2 * (n.pair_width or n.rules.width) + n.pair_gap, n.rules.clearance))
     if options.neck_down:
         for n in nets.values():
             narrow = neck_width(board, n.rules)
@@ -1100,7 +1160,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             tight = net.clusters[i].tight or net.clusters[j].tight
             neck = neck_width(board, net.rules) if (tight and options.neck_down and not net.partner) else 0
             connections.append(Connection(code, i, j, d, 0 if tight else 1, net.rules.width,
-                                          neck=neck if neck < net.rules.width else 0))
+                                          neck=neck if neck < net.rules.width else 0, rank=net.rank))
             in_tree.add(j)
             for m in list(best_edge):
                 dm = dist(net.clusters[j], net.clusters[m])
@@ -1137,7 +1197,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                              fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, stitch=stitch, existing=existing, via_guard=via_guard,
                              lane_guard=lane_guard)
     problem.escape_sides = problem_escape_sides
-    problem.stats = {"extract_seconds": time.time() - t0, "cells": grid.size,
+    problem.stats = {"groups": dict(Counter(n.group for n in nets.values() if n.route)),
+                     "net_groups": {n.name: n.group for n in nets.values() if n.route},
+                     "extract_seconds": time.time() - t0, "cells": grid.size,
                      "nets": len(nets), "connections": len(connections), "movable_paths": len(existing),
                      "all_connections": all_connections, "owner_maps": len(owners),
                      "fanout_vias": len(fanout), "plane_nets": len(plane_codes), "stitch_spots": sum(len(v) for v in stitch.values()),

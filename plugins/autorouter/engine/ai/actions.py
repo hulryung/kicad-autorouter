@@ -19,6 +19,7 @@ OPTION_KEYS = {
     "diff_pairs": bool, "allow_vias": bool, "routable_layers": list, "horizontal_layers": list,
     "remove_existing": bool, "power_pours": bool, "rip_up": bool, "max_expansions": int,
     "move_existing": bool, "plane_nets": bool, "time_limit_min": float,
+    "route_order": list, "tune_lengths": bool, "protect_groups": bool,
 }
 
 def _nullable(t, **extra):
@@ -44,6 +45,9 @@ _OPTION_PROPS = {
     "rip_up": _nullable("boolean"), "max_expansions": _nullable("integer"),
     "move_existing": _nullable("boolean"), "plane_nets": _nullable("boolean"),
     "time_limit_min": _nullable("number"),
+    "route_order": _nullable("array", items={"type": "string", "enum": ["pairs", "memory", "high_speed", "clock",
+                                                                         "power", "signal"]}),
+    "tune_lengths": _nullable("boolean"), "protect_groups": _nullable("boolean"),
 }
 
 _ACTION_PROPS = {

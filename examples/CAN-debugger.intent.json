@@ -1,0 +1,7 @@
+{
+ "stackup": "board",
+ "impedance": [{"name": "USB_90R", "nets": ["*USB_DP", "*USB_DN", "/DP", "/DN"], "diff_ohm": 90, "skew_mm": 0.1}],
+ "length_groups": [{"name": "SWD", "nets": ["*SWCLK", "*SWDIO"], "tolerance_mm": 0.5},
+                   {"name": "CAN TX/RX", "nets": ["CAN1_TX", "CAN1_RX", "CAN2_TX", "CAN2_RX"], "tolerance_mm": 1.0}],
+ "route_order": ["pairs", "memory", "high_speed", "clock", "power", "signal"]
+}

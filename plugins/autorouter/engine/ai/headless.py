@@ -14,7 +14,8 @@ def native_options_from(spec_options: dict, base: Optional[NativeOptions] = None
          "stitch_vias": "stitch_vias", "stitch_pitch_mm": "stitch_pitch_mm", "diff_pairs": "diff_pairs",
          "allow_vias": "allow_vias", "routable_layers": "routable_layers", "horizontal_layers": "horizontal_layers",
          "power_pours": "power_pours", "rip_up": "rip_up", "max_expansions": "max_expansions",
-         "track_mode": "track_mode", "move_existing": "shove", "plane_nets": "plane_nets"}
+         "track_mode": "track_mode", "move_existing": "shove", "plane_nets": "plane_nets",
+         "route_order": "route_order", "tune_lengths": "tune_lengths", "protect_groups": "protect_groups"}
     for key, attr in m.items():
         if key in spec_options and spec_options[key] is not None:
             setattr(o, attr, spec_options[key])
@@ -88,6 +89,7 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
                    "timed_out": job.timed_out,
                    "pair_log": [list(x) for x in job.pair_log],
                    "failed_detail": job.failed_detail,
+                   "length_matching": job.tuning_lines,
                    "unconnected_after": board.GetConnectivity().GetUnconnectedCount(True)}
         outcome["summary"] = (f"{job.routed} routed ({job.escalated} on the finer second pass), "
                               f"{len(job.failed)} failed, {job.fanout} fanout vias, "

@@ -117,6 +117,126 @@ def escape_sides(board, min_pads=8):
     return out
 
 
+INTENT_RULES = {"diff_pair_gap_out_of_range", "diff_pair_uncoupled_length_too_long", "length_out_of_range",
+                "skew_out_of_range", "track_width"}
+
+
+def intent_metrics(board, o, job, si_plan) -> dict:
+    """How well the routed board meets the design intent: impedance widths
+    per layer, pair coupling and skew, length groups, and completion per
+    routing group (with the order they were routed in)."""
+    import math
+    from autorouter.engine.native.extract import pair_partner
+    names = {c: n.GetNetname() for c, n in board.GetNetsByNetcode().items()}
+    by_net = {}
+    for t in board.GetTracks():
+        if t.GetClass() == "PCB_TRACK" and t.GetNetCode() > 0:
+            by_net.setdefault(names[t.GetNetCode()], []).append(t)
+    pads_of = {}
+    for p in board.GetPads():
+        pads_of.setdefault(names.get(p.GetNetCode(), ""), []).append(p)
+    # 1. widths of the controlled nets, by length; a pad stub (a segment
+    # touching a pad) may be necked down and does not count
+    ok_len = all_len = 0.0
+    wrong = []
+    for name, z in o.impedance.items():
+        for t in by_net.get(name, []):
+            want = z["widths"].get(t.GetLayer())
+            if want is None:
+                continue
+            on_pad = any(p.HitTest(t.GetStart()) or p.HitTest(t.GetEnd()) for p in pads_of.get(name, []))
+            if on_pad and t.GetLength() < 1.5e6:
+                continue
+            all_len += t.GetLength()
+            if abs(t.GetWidth() - want) <= 5000:
+                ok_len += t.GetLength()
+            else:
+                wrong.append({"net": name, "layer": board.GetLayerName(t.GetLayer()), "width_mm": t.GetWidth() / 1e6,
+                              "want_mm": want / 1e6, "x": t.GetStart().x / 1e6, "y": t.GetStart().y / 1e6,
+                              "what": f"{name} {t.GetWidth() / 1e6:.3f} mm, want {want / 1e6:.3f}"})
+    # 2. pairs: share of each half's length running at the pair spacing beside the other half
+    pairs = []
+    seen = set()
+    routed_names = set(by_net)
+    for name in sorted(routed_names):
+        other = pair_partner(name, routed_names)
+        if not other or name in seen:
+            continue
+        seen |= {name, other}
+        a, b = by_net[name], by_net[other]
+        z = o.impedance.get(name)
+        gap = None
+        if z and z.get("gaps"):
+            gap = z["gaps"].get(a[0].GetLayer())
+        coupled = total = 0.0
+        for t in a:
+            s, e = t.GetStart(), t.GetEnd()
+            n = max(1, int(t.GetLength() / 100_000))
+            for k in range(n):
+                x = s.x + (e.x - s.x) * (k + 0.5) / n
+                y = s.y + (e.y - s.y) * (k + 0.5) / n
+                best = None
+                for u in b:
+                    if u.GetLayer() != t.GetLayer():
+                        continue
+                    us, ue = u.GetStart(), u.GetEnd()
+                    dx, dy = ue.x - us.x, ue.y - us.y
+                    ll = dx * dx + dy * dy
+                    q = 0.0 if ll == 0 else max(0.0, min(1.0, ((x - us.x) * dx + (y - us.y) * dy) / ll))
+                    d = math.hypot(x - (us.x + q * dx), y - (us.y + q * dy))
+                    best = d if best is None or d < best else best
+                total += t.GetLength() / n
+                pitch = (t.GetWidth() + (gap or 0)) if gap else None
+                if best is not None and (abs(best - pitch) < 30_000 if pitch else best < 3 * t.GetWidth()):
+                    coupled += t.GetLength() / n
+        la = sum(t.GetLength() for t in a)
+        lb = sum(t.GetLength() for t in b)
+        pairs.append({"pair": f"{name} / {other}", "coupled_pct": round(100 * coupled / total, 1) if total else 0.0,
+                      "skew_mm": round(abs(la - lb) / 1e6, 3), "length_mm": round(max(la, lb) / 1e6, 2)})
+    # 3. length groups after tuning
+    groups = []
+    tuned = {g["name"]: g for g in job.tuning}
+    for g in o.length_groups:
+        lens = {n: sum(t.GetLength() for t in by_net.get(n, [])) for n in g["nets"]}
+        routed = {n: v for n, v in lens.items() if v > 0}
+        if not routed:
+            continue
+        target = g["target"] or max(routed.values())
+        tol = max(g["tolerance"], 10_000)
+        off = {n: round((v - target) / 1e6, 3) for n, v in routed.items() if abs(v - target) > tol}
+        where = None
+        if off:
+            t = max(by_net[next(iter(off))], key=lambda t: t.GetLength())
+            where = (t.GetStart().x / 1e6, t.GetStart().y / 1e6)
+        before = tuned.get(g["name"], {}).get("spread_before")
+        groups.append({"name": g["name"], "pair": bool(g.get("pair")), "target_mm": round(target / 1e6, 3),
+                       "tolerance_mm": round(tol / 1e6, 3),
+                       "spread_before_mm": round(before / 1e6, 3) if before is not None else None,
+                       "spread_after_mm": round((max(routed.values()) - min(routed.values())) / 1e6, 3),
+                       "ok": not off, "off_by_mm": off, "where": where})
+    # 4. routing groups: how many nets each had, which stayed open
+    open_by_group = {}
+    group_of = job.stats.get("net_groups", {})
+    for n in job.failed:
+        open_by_group.setdefault(group_of.get(n, "?"), []).append(n)
+    return {
+        "stackup": si_plan.source if si_plan else None,
+        "plan": si_plan.lines if si_plan else [],
+        "warnings": si_plan.warnings if si_plan else [],
+        "impedance_width_ok_pct": round(100 * ok_len / all_len, 1) if all_len else None,
+        "wrong_width": wrong[:10],
+        "pairs": pairs,
+        "length_groups": groups,
+        "length_groups_ok": f"{sum(1 for g in groups if g['ok'])} of {len(groups)}",
+        "route_order": list(o.route_order),
+        "nets_per_group": job.stats.get("groups", {}),
+        "open_by_group": open_by_group,
+        "tuning_log": job.tuning_lines,
+        "pairs_routed_coupled": job.pairs,
+        "pair_log": [f"{n}: {why}" for n, why in job.pair_log],
+    }
+
+
 def drc(board_path: Path, report: Path):
     cli = kicad_cli()
     if not cli:
@@ -208,6 +328,8 @@ def main():
     ap.add_argument("--shove", action="store_true")
     ap.add_argument("--no-images", action="store_true")
     ap.add_argument("--focus", default="", help="extra close-ups: x,y[,half];x,y ... in mm")
+    ap.add_argument("--intent", default="", help="design intent JSON (engine/si.py SiConfig): stackup, "
+                    "impedance classes, length groups, routing order; also written as net classes and DRC rules")
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(args.plugins).resolve()))
@@ -239,7 +361,21 @@ def main():
 
     o = NativeOptions(pitch_mm=args.pitch)
     o.skip_nets = [s for s in args.skip.split(",") if s]
+    si_cfg = si_plan = None
+    if args.intent:
+        from autorouter.engine import si
+        si_cfg = si.SiConfig.from_dict(json.loads(Path(args.intent).read_text(encoding="utf-8")))
+        si_plan = si.plan(board, si_cfg)
+        o = si.apply_to_options(o, si_cfg, si_plan)
+        for line in si_plan.lines + [f"warning: {w}" for w in si_plan.warnings]:
+            print("  [intent] " + line, flush=True)
+        # KiCad gets the same intent: net classes on the board, rules in the copy's .kicad_dru
+        for line in si.apply_net_classes(board, si_cfg, si_plan):
+            print("  [intent] " + line, flush=True)
     o.shove = args.shove
+    for kv in [x for x in os.environ.get("AUTOROUTER_BENCH_SET", "").split(",") if x]:
+        k, v = kv.split("=")
+        setattr(o, k, json.loads(v))          # quick experiments: AUTOROUTER_BENCH_SET=protect_groups=false
     o.time_limit_s = 0             # same input, same result: no wall-clock cut-offs in a benchmark
     o.fine_budget_s = 0
     stages = []
@@ -261,13 +397,22 @@ def main():
     session.refill_zones(board)
     board.BuildConnectivity()
     pcbnew.SaveBoard(str(routed_path), board)
+    if si_cfg is not None:
+        from autorouter.engine import si
+        from autorouter.engine.native import tuning
+        names = {c: n.GetNetname() for c, n in board.GetNetsByNetcode().items()}
+        lengths = {names[c]: l for c, l in tuning.track_lengths(board).items()}
+        saved = pcbnew.LoadBoard(str(routed_path))     # the rules file goes next to the routed copy
+        si.write_drc_rules(saved, si.drc_rules(board, si_cfg, si_plan, lengths))
 
     tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
     vias = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
     ref = pcbnew.LoadBoard(str(ref_path))
     ref_tracks = [t for t in ref.GetTracks() if t.GetClass() == "PCB_TRACK"]
 
+    print(f"  [{time.time() - t0:5.0f}s] saved; DRC...", flush=True)
     report = drc(routed_path, out / "drc.json")
+    print(f"  [{time.time() - t0:5.0f}s] DRC done; measuring...", flush=True)
     violations = Counter()
     issues = []                     # positions worth a close-up
     unconnected = None
@@ -302,8 +447,16 @@ def main():
     for t in off45[:5]:
         issues.append({"kind": "off_45", "x": t.GetStart().x / 1e6, "y": t.GetStart().y / 1e6, "what": t.GetNetname()})
 
+    intent = intent_metrics(board, o, job, si_plan) if si_cfg is not None else None
+    if intent:
+        for w in intent.get("wrong_width", [])[:5]:
+            issues.append({"kind": "impedance_width", "x": w["x"], "y": w["y"], "what": w["what"]})
+        for g in intent.get("length_groups", []):
+            if not g["ok"] and g.get("where"):
+                issues.append({"kind": "length_mismatch", "x": g["where"][0], "y": g["where"][1], "what": g["name"]})
     metrics = {
         "board": ref_path.name,
+        "intent": intent,
         "connections_before": before,
         "routed": job.routed, "open_nets": job.failed, "escalated": job.escalated,
         "fanout_vias": job.fanout, "stitching_vias": job.stitched,
@@ -312,7 +465,9 @@ def main():
         "stages": stages,
         "unconnected_after": unconnected,
         "drc": {f"{t}/{s}": n for (t, s), n in sorted(violations.items())},
-        "drc_errors": sum(n for (t, s), n in violations.items() if s == "error"),
+        # physical errors (clearance, shorts...) apart from the design-intent rules (width, gap, skew, length)
+        "drc_errors": sum(n for (t, s), n in violations.items() if s == "error" and t not in INTENT_RULES),
+        "rule_errors": sum(n for (t, s), n in violations.items() if s == "error" and t in INTENT_RULES),
         "dangling": violations.get(("track_dangling", "warning"), 0),
         "segments": len(tracks), "vias": len(vias),
         "length_mm": round(sum(t.GetLength() for t in tracks) / 1e6, 1),
@@ -325,6 +480,7 @@ def main():
         "issues": issues[:30],
     }
 
+    print(f"  [{time.time() - t0:5.0f}s] measured; images...", flush=True)
     images = []
     if not args.no_images and kicad_cli():
         imgdir = out / "images"
@@ -362,9 +518,14 @@ def main():
                 images.append({"what": f"reference close-up {k}, same place", "path": str(b)})
     metrics["images"] = images
     (out / "metrics.json").write_text(json.dumps(metrics, indent=1), encoding="utf-8")
-    print(json.dumps({k: metrics[k] for k in ("routed", "open_nets", "unconnected_after", "drc_errors", "dangling",
+    print(json.dumps({k: metrics[k] for k in ("routed", "open_nets", "unconnected_after", "drc_errors", "rule_errors",
+                                              "dangling",
                                               "off_45", "doubled_back", "length_mm", "vias", "route_seconds",
                                               "escape_side_agreement")}), flush=True)
+    if intent:
+        print(json.dumps({"impedance_width_ok_pct": intent["impedance_width_ok_pct"],
+                          "length_groups_ok": intent["length_groups_ok"],
+                          "pairs": [(p["pair"], p["coupled_pct"], p["skew_mm"]) for p in intent["pairs"]]}), flush=True)
 
 
 if __name__ == "__main__":

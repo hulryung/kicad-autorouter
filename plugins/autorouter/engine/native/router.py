@@ -33,6 +33,7 @@ _DEBUG = bool(os.environ.get("AUTOROUTER_DEBUG"))
 RIP_PENALTY = 400                                           # per cell, in cost units (40 straight cells)
 HISTORY_STEP = 100                                          # per rip-up, on each contested cell (10 straight cells)
 MAX_BLOCKERS = 10
+PROTECTED_GROUPS = ("pairs", "memory", "high_speed")          # routing groups lower groups may not rip up
 
 
 class RouteResult:
@@ -316,7 +317,7 @@ class Router:
             if net is None or not net.clusters:
                 continue
             c = max(ex.cluster, 0)
-            path = _Path(ex.path.pid, Connection(ex.path.net, c, c, 0), ex.path, list(ex.cells))
+            path = _Path(ex.path.pid, Connection(ex.path.net, c, c, 0, rank=net.rank), ex.path, list(ex.cells))
             path.joins = list(ex.joins)
             path.existing = True
             self.paths[path.pid] = path
@@ -522,6 +523,11 @@ class Router:
             return False
         if path.conn.net == for_conn.net:
             return True                       # own net's copper is never in the way
+        # a less important group does not push a pair, memory or high-speed
+        # route off its line (those were routed first for a reason)
+        if self.opts.protect_groups and path.conn.rank < for_conn.rank \
+                and self.p.nets[path.conn.net].group in PROTECTED_GROUPS:
+            return False
         key = (path.conn.net, path.conn.a, path.conn.b)
         return self.rips.get(key, 0) < self.opts.rip_limit
 
@@ -558,6 +564,10 @@ class Router:
         else:
             segments, vias = _simplify(self.grid, cells)
         segments = _with_pad_entries(self.grid, net, cells, segments)
+        if net.layer_widths:
+            # controlled impedance: each layer's own width (neck segments keep theirs)
+            segments = [sg if len(sg) > 5 or net.layer_widths.get(sg[0], width) == width
+                        else sg + (net.layer_widths[sg[0]],) for sg in segments]
         rp = RoutedPath(net.code, width, segments, vias, net.rules.via_diameter,
                         net.rules.via_drill, pid=self.next_pid)
         self.next_pid += 1
@@ -581,7 +591,7 @@ class Router:
                 self.shoved += 1
                 for a, b in path.joins:
                     if a != b:
-                        conns.append(Connection(path.conn.net, a, b, 0))
+                        conns.append(Connection(path.conn.net, a, b, 0, rank=path.conn.rank))
             else:
                 conns.append(path.conn)
             key = (path.conn.net, path.conn.a, path.conn.b)
@@ -636,7 +646,7 @@ class Router:
         if la != lb or la2 != lb2:
             self.pair_log.append((na.name, 'exits on different layers'))
             return False
-        w, gap = na.rules.width, na.pair_gap
+        w, gap = na.pair_width or na.rules.width, na.pair_gap
         W = 2 * w + gap
         key = (W, na.rules.clearance)
         owners = p.owners.get(key)
@@ -1041,8 +1051,10 @@ class Router:
         opts = self.opts
         result = RouteResult()
         started = time.time()
-        # fine-pitch escapes first (they have the least room), then shortest first
-        queue = sorted(self.p.connections, key=lambda c: (c.priority, c.estimate))
+        # the routing groups in their order (pairs, memory, high speed, clocks,
+        # power, the rest); within a group fine-pitch escapes first (they have
+        # the least room), then shortest first
+        queue = sorted(self.p.connections, key=lambda c: (c.rank, c.priority, c.estimate))
         total = len(queue)
         failed: List[Connection] = []
         done = 0

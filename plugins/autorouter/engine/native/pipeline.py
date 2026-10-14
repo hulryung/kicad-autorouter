@@ -11,7 +11,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from . import apply as native_apply, extract as native_extract, router as native_router
+from . import apply as native_apply, extract as native_extract, router as native_router, tuning as native_tuning
 from .problem import NativeOptions, SCOPE_SELECTION
 
 _REMOVED: list = []        # board items taken off headless; Python must not free them
@@ -35,6 +35,8 @@ class JobResult:
     layers: list = field(default_factory=list)
     cancelled: bool = False
     timed_out: bool = False                                # the time limit cut a pass short
+    tuning: List[dict] = field(default_factory=list)       # length groups: target, lengths before/after
+    tuning_lines: List[str] = field(default_factory=list)
 
 
 def fine_options(options: NativeOptions, failed_nets: List[str], board) -> NativeOptions:
@@ -216,4 +218,26 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
         live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
         out.stats["trimmed"] = native_apply.trim_overlaps(board, live)
+    if apply_paths and not (cancelled and cancelled()):
+        report = tune_lengths(board, options, status)
+        if report is not None:
+            out.tuning, out.tuning_lines = report.groups, report.lines()
     return out
+
+
+def tune_lengths(board, options: NativeOptions, status=None):
+    """Length matching after routing (and after the overlap merge): the
+    options' length groups get meanders. None when there is nothing to tune.
+    Main thread only (it edits the board)."""
+    if not options.tune_lengths or not options.length_groups:
+        return None
+    try:
+        report = native_tuning.tune(board, options.length_groups, status=status, removed_sink=_REMOVED)
+    except Exception as e:
+        if status:
+            status(f"Length matching failed: {e!r}")
+        return None
+    if status:
+        for line in report.lines():
+            status("Length matching: " + line)
+    return report

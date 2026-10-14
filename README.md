@@ -157,6 +157,59 @@ do:
 
 Not read yet: custom DRC rules (`.kicad_dru`) that set track width or via size
 per condition (their clearances are honoured through the per-item clearance).
+Impedance widths, pairs and length matching are set on the Signal integrity
+tab instead (next section), which can also write such rules.
+
+## Signal integrity: impedance, pairs, length matching, routing order
+
+The **Signal integrity** tab holds what the net classes cannot say. It is
+saved next to the board as `<board>.autorouter.json`, so it travels with the
+project.
+
+- **Stackup**: the board's own (Board Setup > Physical Stackup) or one of
+  JLCPCB's standard 1.6 mm builds: 2-layer, 4-layer with 7628, 3313 or 2116
+  prepreg (`JLC04161H-*`), and 6-layer with 2116 or 3313 (`JLC06161H-*`). The
+  template values are JLCPCB's published ones as far as known; order with
+  impedance control for exact widths.
+- **Controlled impedance**: classes of nets (name patterns) with a
+  single-ended and/or differential target, e.g. USB 90 ohm differential,
+  Ethernet or LVDS 100 ohm, RF 50 ohm (presets are in the "Add preset" menu).
+  The width each copper layer needs is computed from the stackup: microstrip
+  (Hammerstad-Jensen, with a solder mask correction) on the outer layers,
+  stripline (Wheeler, between the nearest copper layers) inside, and
+  IPC-2141 coupling for pairs. A pair's gap is the track width up to 0.2 mm
+  unless you set one. The router then draws each segment at its own layer's
+  width (pad escapes may still neck down at fine-pitch pins), and a coupled
+  pair at the pair width and gap of the layer it starts on. The widths are
+  shown under the stackup ("Compute sizes"). On JLC04161H-7628, for example,
+  50 ohm is 0.365 mm on the outer layers and 90 ohm differential is
+  0.300/0.200 mm.
+- **Differential pairs into KiCad**: "Write to KiCad" creates a net class per
+  impedance class (track width, diff pair width and gap, with the patterns
+  assigned), so KiCad's interactive and differential pair routers (keys X
+  and 6) use the same sizes. It also writes rules into the project's
+  `.kicad_dru`, between marker comments, keeping the rest of the file:
+  per-layer track width and pair gap, maximum uncoupled length, skew per pair,
+  and a length window per length group. KiCad's DRC and its length tuner then
+  check against the same targets.
+- **Length matching**: groups of nets (a memory byte lane, an address bus,
+  QSPI, RGMII...) with a tolerance and an optional target (default: the
+  longest member). Pairs of an impedance class with a skew are matched to that
+  skew. After routing, the shorter nets get trapezoid meanders with 45-degree
+  corners on their straight runs, as many and as tall as the room beside each
+  run allows (checked against pads, tracks, vias, keepouts and the board
+  edge at the net's clearance), until each is inside the window. Meander
+  spacing and amplitude come from KiCad's tuning pattern defaults (Board
+  Setup > Length-tuning Patterns). The log reports each group's spread before
+  and after.
+- **Routing order**: nets are sorted into groups and routed group by group,
+  most important first: differential pairs, memory (nets on DDR/SDRAM/PSRAM/
+  flash parts, found by part value, and DQ/DQS/FMC-style names), high speed
+  (USB, Ethernet, MIPI, SDIO... and every net with an impedance or length
+  rule), clocks and crystals, routed power nets, everything else. Reorder the
+  list with Up/Down. Within a group fine-pitch escapes go first, then the
+  shortest. During rip-up a later group may not move a pair, memory or
+  high-speed route.
 
 ## Routing part of a board
 
@@ -387,6 +440,19 @@ python3 scripts/improve-loop.py --rounds 3                 # CAN-debugger, GND n
 python3 scripts/improve-loop.py --reference path/to/board.kicad_pcb --skip GND,+3V3 \
         --goal "pins of U1 should escape like the reference" --model opus --budget-usd 5
 ```
+
+With a design intent (`--intent file.json`, the same format as
+`<board>.autorouter.json`; `examples/<board>.intent.json` is picked up by
+default and `--intent none` turns it off) the benchmark routes with those
+impedance classes, length groups and routing order, writes them into the
+routed copy's net classes and `.kicad_dru`, and measures them: the share of
+controlled track length at the right width, each pair's coupled share and
+skew, each length group's spread, open nets per routing group, and KiCad's
+rule violations (gap, skew, length, width) apart from the physical DRC
+errors. The reviewer scores those under four more criteria
+(impedance_widths, diff_pairs, length_matching, routing_priority, 0-10 each,
+next to connectivity, drc, similarity, escapes, directness, vias and
+neatness, and the 0-100 overall score), and they enter the penalty too.
 
 Everything lands in `.improve/<time>/`: each round's benchmark and images,
 the evaluation and improvement transcripts, the patches (kept or not), and

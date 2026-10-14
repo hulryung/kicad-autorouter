@@ -49,6 +49,10 @@ class NetInfo:
     route: bool = True              # False: pour net, only fanned out to its plane with vias
     partner: int = 0                # the other net of a differential pair, 0 if none
     pair_gap: int = 0               # nm, gap between the pair's tracks
+    pair_width: int = 0             # nm, each track of the coupled run (0 = rules.width)
+    layer_widths: Dict[int, int] = field(default_factory=dict)   # layer index -> nm (controlled impedance)
+    group: str = ""                 # routing group (see engine/si.py)
+    rank: int = 0                   # the group's place in the routing order (0 = first)
 
 
 @dataclass
@@ -61,6 +65,7 @@ class Connection:
     width: int = 0          # nm; 0 = the net's width
     neck: int = 0           # nm; >0: near fine-pitch ends the track is this narrow, then widens
     pair: int = 0           # >0: id shared by the two connections of a differential pair
+    rank: int = 0           # the net's routing group's place in the order (0 = routed first)
 
 
 @dataclass
@@ -145,6 +150,14 @@ class NativeOptions:
     routable_layers: Optional[List[bool]] = None             # over the board's copper stack
     horizontal_layers: Optional[List[bool]] = None
     turn_cost: int = 2
+    # Design intent (engine/si.py): the order of the routing groups, extra name
+    # patterns per group, per-net controlled-impedance sizes and length groups.
+    route_order: List[str] = field(default_factory=list)                 # empty = si.DEFAULT_ORDER
+    route_groups: Dict[str, List[str]] = field(default_factory=dict)
+    impedance: Dict[str, dict] = field(default_factory=dict)             # net name -> sizes per KiCad layer id
+    length_groups: List[dict] = field(default_factory=list)              # tuned after routing
+    tune_lengths: bool = True
+    protect_groups: bool = True        # rip-up may not move a pair/memory/high-speed route for a later group
 
 
 @dataclass

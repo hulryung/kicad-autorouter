@@ -11,7 +11,7 @@ from typing import Optional
 import pcbnew
 import wx
 
-from .engine import session
+from .engine import session, si
 from .engine.options import RouteOptions
 from .engine.native import (apply as native_apply, extract as native_extract, pipeline as native_pipeline,
                             router as native_router)
@@ -21,6 +21,7 @@ from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION,
 from .engine.paths import data_dir
 from .log import get_logger
 from .settings import Settings
+from .si_page import SiPage
 
 logger = get_logger("dialog")
 
@@ -66,6 +67,8 @@ class AutorouterDialog(wx.Dialog):
         root = wx.BoxSizer(wx.VERTICAL)
         self.notebook = wx.Notebook(self)
         self.notebook.AddPage(self._routing_page(self.notebook), "Routing")
+        self.si_page = SiPage(self.notebook, self.board, self._append_log)
+        self.notebook.AddPage(self.si_page, "Signal integrity")
         self.notebook.AddPage(self._layers_page(self.notebook), "Layers && nets")
         self.notebook.AddPage(self._ai_page(self.notebook), "AI assistant")
         root.Add(self.notebook, 0, wx.EXPAND | wx.ALL, 8)
@@ -435,6 +438,16 @@ class AutorouterDialog(wx.Dialog):
                 return {"error": "could not read the board"}
             escalated = job.escalated
             result = job
+            # as after a dialog run: shared copper written once, then length matching
+            try:
+                live = [t for t in self._run_added if str(t.m_Uuid.AsString()) not in self._run_removed]
+                native_apply.trim_overlaps(self.board, live)
+                report = native_pipeline.tune_lengths(self.board, o, status=self._status_now)
+                if report is not None:
+                    job.tuning, job.tuning_lines = report.groups, report.lines()
+            except Exception as e:
+                logger.exception("Finishing the assistant's run")
+                self._append_log(f"[plugin] could not finish the run (overlaps, length matching): {e!r}")
             self._refill_if_wanted()
             pcbnew.Refresh()
             try:
@@ -447,6 +460,7 @@ class AutorouterDialog(wx.Dialog):
                        "failed": failed, "ripped_up": result.ripped, "fanout_vias": result.fanout,
                        "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
                        "failed_detail": getattr(result, "failed_detail", []), "escalated": escalated,
+                       "length_matching": job.tuning_lines, "pair_log": [list(x) for x in job.pair_log],
                        "unconnected_after": self.board.GetConnectivity().GetUnconnectedCount(True)}
             outcome["summary"] = (f"{result.routed} routed ({escalated} on the finer second pass), {len(failed)} failed, "
                                   f"{result.fanout} fanout vias, {result.stitched} stitching vias; "
@@ -571,7 +585,7 @@ class AutorouterDialog(wx.Dialog):
 
     def native_options(self, o: RouteOptions) -> NativeOptions:
         scope = (SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS)[self.scope_choice.GetSelection()]
-        return NativeOptions(
+        native = NativeOptions(
             pitch_mm=o.native_pitch_mm, via_cost=o.native_via_cost, allow_vias=o.native_allow_vias,
             max_expansions=o.native_max_expansions_k * 1000, retry_failed=o.native_retry,
             time_limit_s=o.native_time_limit_min * 60.0,
@@ -585,6 +599,16 @@ class AutorouterDialog(wx.Dialog):
             scope_sheets=[self.sheets[i][0] for i in self.sheet_list.GetCheckedItems()],
             track_mode=o.native_track_mode, track_width=o.native_track_width,
             via_mode=o.native_via_mode, via_diameter=o.native_via_diameter, via_drill=o.native_via_drill)
+        # the Signal integrity tab: impedance widths, length groups, routing order
+        cfg = self.si_page.config()
+        try:
+            plan = si.plan(self.board, cfg)
+        except Exception as e:
+            logger.exception("Design intent")
+            self._append_log(f"[plugin] signal integrity settings ignored: {e!r}")
+            return native
+        self._si_plan = plan
+        return si.apply_to_options(native, cfg, plan)
 
     def _save_settings(self):
         if hasattr(self, "ai_model"):
@@ -630,6 +654,12 @@ class AutorouterDialog(wx.Dialog):
         if not self._prepare(options):
             return
         native = self.native_options(options)
+        self.si_page.save()
+        self._native_opts = native
+        plan = getattr(self, "_si_plan", None)
+        if plan is not None and (native.impedance or native.length_groups):
+            for line in [l for l in plan.lines if not l.startswith("  ")] + [f"warning: {w}" for w in plan.warnings]:
+                self._append_log("[plugin] " + line)
         if native.scope == SCOPE_SHEETS and not native.scope_sheets:
             wx.MessageBox("Tick at least one schematic sheet, or route the whole board.",
                           "Autorouter", wx.ICON_WARNING, self)
@@ -760,6 +790,18 @@ class AutorouterDialog(wx.Dialog):
             except Exception as e:
                 logger.exception("Trimming overlaps failed")
                 self._append_log(f"[plugin] could not merge overlapping segments: {e!r}")
+            # length matching on the finished copper (meanders)
+            if not result.cancelled and getattr(self, "_native_opts", None) is not None:
+                try:
+                    self._show_progress("Length matching...", None)
+                    report = native_pipeline.tune_lengths(self.board, self._native_opts)
+                    if report is not None:
+                        result.tuning, result.tuning_lines = report.groups, report.lines()
+                        for line in report.lines():
+                            self._append_log("[plugin] length matching: " + line)
+                except Exception as e:
+                    logger.exception("Length matching failed")
+                    self._append_log(f"[plugin] length matching failed: {e!r}")
             # a pass that broke (pad vias, the finer pass, the pours) is
             # recorded, not fatal: say so instead of quietly leaving its work undone
             for key in ("fanout_error", "escalation_error", "pour_error"):
@@ -788,6 +830,8 @@ class AutorouterDialog(wx.Dialog):
             text += f", {result.fanout} fanout vias"
         if result.pairs:
             text += f", {result.pairs} coupled pairs"
+        if result.tuning:
+            text += f", {sum(1 for g in result.tuning if g['ok'])}/{len(result.tuning)} length groups matched"
         if result.stitched:
             text += f", {result.stitched} stitching vias"
         if result.ripped:
@@ -829,6 +873,7 @@ class AutorouterDialog(wx.Dialog):
                 return
             self._cancel = True
         self._save_settings()
+        self.si_page.save()
         self.EndModal(wx.ID_OK if self.applied else wx.ID_CANCEL)
 
     def _set_busy(self, busy: bool):

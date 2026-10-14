@@ -37,6 +37,18 @@ def main():
     o = dialog._collect_options()
     assert o.native_time_limit_min == 7 and o.ignore_net_classes == ["Default"]
     assert o.horizontal_layers == [False, True]
+    # the Signal integrity tab: a preset class, a template stackup, sizes computed, options carry them
+    from autorouter.engine import si
+    from autorouter.si_page import PRESETS
+    page = dialog.si_page
+    page.stackup.SetSelection(page.stackups.index("JLC 2L 1.6mm"))
+    page._add_row(page.zgrid, ["Z50", "*", "50", "0", "0", "0"])
+    cfg = page.config()
+    assert cfg.stackup == "JLC 2L 1.6mm" and cfg.impedance[0].single_ohm == 50 and cfg.route_order == si.DEFAULT_ORDER
+    assert "Z50" in page.sizes.GetValue(), page.sizes.GetValue()
+    native = dialog.native_options(dialog._collect_options())
+    assert native.impedance and native.route_order == si.DEFAULT_ORDER
+    assert len(PRESETS) >= 5
     dialog._show_progress("x", 0.5)
     assert dialog.gauge.GetValue() == 500
     dialog.Destroy()
