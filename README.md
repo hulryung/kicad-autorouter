@@ -356,6 +356,45 @@ python3 scripts/run-tests.py        # offline: router core on synthetic grids (i
 KICAD_AUTOROUTER_AI_LIVE=1 <KiCad python3> tests/test_ai_live.py [board] [request]
 ```
 
+## Improving the router with Claude Code
+
+`scripts/improve-loop.py` runs a closed loop on a finished reference board
+(by default the CAN-debugger board this README benchmarks):
+
+1. **Benchmark** (`scripts/improve_bench.py`, KiCad's Python): a copy of the
+   reference is stripped of its tracks and routed by the code under test.
+   It writes `metrics.json` with the open connections, DRC by type, dangling
+   tracks, off-45-degree and doubled-back segments, length, vias, and how
+   many pins of the larger parts leave on the same side as the reference.
+   It also writes images: the whole board and close-ups of every problem and
+   of the largest parts, each next to the same view of the reference. Time
+   budgets are off and the hash seed is fixed, so the same code gives the
+   same result.
+2. **Evaluate**: `claude -p` reads the metrics and looks at the images, and
+   answers with a score, per-criterion marks, issues with board positions
+   and their likely cause in the router, and the one change it would make
+   next.
+3. **Improve**: `claude -p` edits `plugins/autorouter/engine/native/` in a
+   separate git worktree, given the evaluation and what earlier rounds tried.
+4. **Verify**: the unit tests and the benchmark run again. The change is
+   committed on the loop's branch only if a deterministic penalty drops
+   (open connections and DRC errors weigh most, then dangling and odd-angle
+   copper, escape-side disagreements, length and vias, and slowness) and
+   nothing hard gets worse. Otherwise the worktree is reset.
+
+```bash
+python3 scripts/improve-loop.py --rounds 3                 # CAN-debugger, GND nets left to the pours
+python3 scripts/improve-loop.py --reference path/to/board.kicad_pcb --skip GND,+3V3 \
+        --goal "pins of U1 should escape like the reference" --model opus --budget-usd 5
+```
+
+Everything lands in `.improve/<time>/`: each round's benchmark and images,
+the evaluation and improvement transcripts, the patches (kept or not), and
+`report.md` with a table of the rounds. The reference board is only read and
+your checkout is not touched; the kept changes are on the branch
+`improve/<time>`, to review with `git diff main...improve/<time>` and merge or
+delete (`git worktree remove .improve/<time>/worktree`).
+
 ## Roadmap
 
 - Built-in router: a congestion analysis for failed connections, blind/buried

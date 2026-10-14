@@ -99,7 +99,7 @@ routing much slower.
 Rules:
 - edit only files under plugins/autorouter/engine/native/ (and tests/ if a test needs updating);
 - keep it deterministic (no randomness, no wall-clock decisions);
-- run the unit tests before you finish: {kicad_py} tests/test_native_grid.py
+- run the tests before you finish: {kicad_py} scripts/run-tests.py
 - you may run the benchmark yourself to check (takes 1-3 minutes):
   {kicad_py} {bench_script} --reference {reference} --plugins plugins --out {scratch} --skip {skip} --no-images
   (it prints a one-line JSON summary at the end); never write to the reference board;
@@ -236,10 +236,11 @@ def reset(wt):
 
 
 def unit_tests(args, wt):
-    for t in ("tests/test_native_grid.py",):
-        r = subprocess.run([args.kicad_py, t], cwd=str(wt), capture_output=True, text=True, timeout=900)
-        if r.returncode != 0:
-            return False, (r.stdout + r.stderr)[-2000:]
+    """The whole suite with KiCad's Python (router core, AI loop, end to end on the fixture)."""
+    r = subprocess.run([args.kicad_py, "scripts/run-tests.py"], cwd=str(wt), capture_output=True, text=True,
+                       timeout=1800)
+    if r.returncode != 0:
+        return False, (r.stdout + r.stderr)[-2000:]
     return True, ""
 
 
@@ -382,7 +383,7 @@ def main():
             rd["verdict"] = f"kept: penalty {best} -> {p}"
             history.append({"round": k, "change": change[:600], "kept": True, "penalty": [best, p], "figures": figures(m)})
             best, current, current_dir = p, m, out_dir
-            log(f"  kept: penalty {rd['verdict']}")
+            log(f"  {rd['verdict']}")
         else:
             rd["kept"] = "no"
             rd["verdict"] = f"discarded: penalty {best} -> {p}" + (" (more open connections or DRC errors)" if worse_hard else "")
