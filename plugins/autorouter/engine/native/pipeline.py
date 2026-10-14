@@ -34,6 +34,7 @@ class JobResult:
     stats: dict = field(default_factory=dict)
     layers: list = field(default_factory=list)
     cancelled: bool = False
+    timed_out: bool = False                                # the time limit cut a pass short
 
 
 def fine_options(options: NativeOptions, failed_nets: List[str], board) -> NativeOptions:
@@ -45,6 +46,7 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.max_expansions = options.max_expansions * 3
     fine.scope, fine.scope_nets, fine.scope_refs = SCOPE_SELECTION, list(failed_nets), []
     fine.fanout_vias = False
+    fine.dual_escapes = True       # leave a stubborn pad by either end, whichever the search finds open
     fine.stitch_vias = False
     fine.rip_rounds = max(fine.rip_rounds, 12)
     fine.rip_limit = max(fine.rip_limit, 8)
@@ -69,6 +71,14 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     pass before its paths arrive."""
     extract = extract_fn or (lambda b, o, st: native_extract.extract(b, o, status=st))
     out = JobResult()
+    added: list = []                       # board items this job created (apply_paths)
+    import time as _time
+    job_started = _time.time()
+    limit = options.time_limit_s if options.time_limit_s and options.time_limit_s > 0 else 0.0
+
+    def remaining() -> float:
+        """Seconds left of the job's time limit (0 = no limit)."""
+        return max(0.0, limit - (_time.time() - job_started)) if limit else 0.0
 
     def one_pass(opts: NativeOptions):
         problem = extract(board, opts, status)
@@ -95,7 +105,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         result = native_router.run(problem, progress=progress, on_path=on_path, on_remove=remove,
                                    cancelled=cancelled)
         if apply_paths:
-            native_apply.add_paths(board, problem.layers, result.paths)
+            added.extend(native_apply.add_paths(board, problem.layers, result.paths))
             if result.shoved:
                 try:
                     board.BuildConnectivity()
@@ -104,10 +114,33 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         return problem, result
 
     pours_later = options.fanout_vias or options.stitch_vias
+    if options.fanout_vias and options.fanout_first and not options.pours_only:
+        # Pad vias of the plane nets first, as a designer drops the decoupling
+        # vias before routing signals: the pins keep their outlets (via guards)
+        # and the signals route around the vias instead of walling them off.
+        if status:
+            status("Plane nets: pad vias before the signals...")
+        early = copy.deepcopy(options)
+        early.pours_only = True
+        early.stitch_vias = False
+        early.time_limit_s = 0
+        try:
+            problem0, result0 = one_pass(early)
+        except Exception as e:
+            out.stats["fanout_error"] = str(e)
+            problem0 = None
+        if problem0 is not None:
+            out.fanout += result0.fanout
+            out.seconds += result0.seconds
+            # the sides the pads were left by, decided before those vias existed
+            options = copy.copy(options)
+            options.escape_sides = dict(problem0.escape_sides)
     first = copy.deepcopy(options)
     if pours_later:
         first.fanout_vias = False
         first.stitch_vias = False
+    if limit:
+        first.time_limit_s = max(1.0, remaining())
     problem, result = one_pass(first)
     if problem is None:
         return out
@@ -119,12 +152,24 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.failed_detail = list(getattr(result, "failed_detail", []))
     out.seconds = result.seconds
     out.cancelled = result.cancelled
+    out.timed_out = result.timed_out
     out.failed = sorted({problem.nets[c.net].name for c in result.failed})
 
-    if escalate and out.failed and not out.cancelled and options.pitch_mm > 0.04 and not (cancelled and cancelled()):
+    # the finer pass needs room in the time limit (its board read alone takes a while)
+    time_for_more = not limit or remaining() > 60.0
+    if not time_for_more:
+        out.timed_out = True
+        if status:
+            status("Time limit reached: no finer second pass.")
+    if escalate and out.failed and not out.cancelled and time_for_more and options.pitch_mm > 0.04 \
+            and not (cancelled and cancelled()):
         if status:
             status(f"Second pass on {len(out.failed)} open connection(s): finer grid, neck width, cheaper vias...")
         fine = fine_options(options, out.failed, board)
+        # the finer grid is four times the cells: a stubborn connection could
+        # search for minutes there, so the pass gets its own budget
+        budget = 60.0 + 20.0 * len(out.failed)
+        fine.time_limit_s = min(budget, max(1.0, remaining())) if limit else budget
         try:
             problem2, result2 = one_pass(fine)
         except Exception as e:
@@ -139,18 +184,29 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             out.seconds += result2.seconds
             out.failed = sorted({problem2.nets[c.net].name for c in result2.failed})
             out.failed_detail = list(getattr(result2, "failed_detail", []))
+            # the finer pass running out of its own budget is not the job's
+            # time limit: only report that when the job's limit was what ended it
+            if result2.timed_out and limit and remaining() <= 1.0:
+                out.timed_out = True
 
     if pours_later and not (cancelled and cancelled()):
         if status:
             status("Pour nets: fanout vias, ties and stitching in the remaining room...")
         pours = copy.deepcopy(options)
         pours.pours_only = True                       # same scope, no signal routing
+        pours.time_limit_s = 0                        # the pour stages are bounded; always finish them
         try:
             problem3, result3 = one_pass(pours)
         except Exception as e:
             out.stats["pour_error"] = str(e)
             problem3 = None
         if problem3 is not None:
-            out.fanout, out.stitched = result3.fanout, result3.stitched
+            out.fanout += result3.fanout
+            out.stitched = result3.stitched
             out.seconds += result3.seconds
+    if apply_paths and added:
+        # SWIG wrappers do not compare by item: tell the ripped-up ones apart by UUID
+        gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
+        live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
+        out.stats["trimmed"] = native_apply.trim_overlaps(board, live)
     return out

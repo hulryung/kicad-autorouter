@@ -20,13 +20,16 @@ import time
 from array import array
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+import os
+
 from . import astar
-from .grid import BLOCKED, Grid
+from .grid import BLOCKED, Grid, jog
 from .problem import Connection, NetInfo, RoutedPath, RoutingProblem
 
 ProgressFn = Callable[[int, int, int, int, str], None]    # done, total, routed, failed, net name
 PathFn = Callable[[RoutedPath], None]
 RemoveFn = Callable[[int], None]                            # path id
+_DEBUG = bool(os.environ.get("AUTOROUTER_DEBUG"))
 RIP_PENALTY = 400                                           # per cell, in cost units (40 straight cells)
 MAX_BLOCKERS = 10
 
@@ -44,6 +47,7 @@ class RouteResult:
         self.failed_detail: List[dict] = []
         self.seconds = 0.0
         self.cancelled = False
+        self.timed_out = False                           # the time limit cut the run short
 
 
 class _Path:
@@ -237,9 +241,35 @@ def _with_pad_entries(grid: Grid, net: NetInfo, cells: List[int], segments):
     return _merge_collinear(out)
 
 
+def _fold_back(segments):
+    """Collapse an excursion: consecutive segments A->B then B->C on one layer
+    with C on the line AB behind B become A->C. A route that ran along a
+    pad's stub lane to the exit cell past the pad and then took the stub back
+    to the pad centre would otherwise double over itself and, once the
+    shared copper is written once, leave the piece past the pad hanging."""
+    out = []
+    for seg in segments:
+        out.append(seg)
+        while len(out) >= 2:
+            a, b = out[-2], out[-1]
+            if a[0] != b[0] or (a[3], a[4]) != (b[1], b[2]):
+                break
+            ux, uy = a[3] - a[1], a[4] - a[2]
+            vx, vy = b[3] - b[1], b[4] - b[2]
+            if ux * vy - uy * vx != 0 or ux * vx + uy * vy >= 0:
+                break                                  # not collinear, or carrying on
+            width = max(a[5] if len(a) > 5 else 0, b[5] if len(b) > 5 else 0)
+            folded = (a[0], a[1], a[2], b[3], b[4]) + ((width,) if len(a) > 5 or len(b) > 5 else ())
+            out.pop(); out.pop()
+            if (folded[1], folded[2]) != (folded[3], folded[4]):
+                out.append(folded)
+    return out
+
+
 def _merge_collinear(segments):
     """Join consecutive segments that continue in the same direction on the
     same layer with the same width (a stub running straight into its route)."""
+    segments = _fold_back(segments)
     merged = []
     for seg in segments:
         if merged:
@@ -406,7 +436,8 @@ class Router:
             kwargs["neck_region"] = region
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, self.opts.allow_vias, via_reach, cap,
-                           self.opts.turn_cost, cancelled, routable=self.routable, **kwargs)
+                           self.opts.turn_cost, cancelled, routable=self.routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
+                           **kwargs)
 
     def _neck_region(self, conn: Connection) -> Set[int]:
         """Cells within neck_length of the connection's fine-pitch exits, on
@@ -627,7 +658,7 @@ class Router:
         anchors = [grid.unpack(c)[1:] for c in list(g_cells)[:1]]
         cells = astar.route(grid, owners, p.via_block, ca.net, s_cells, g_cells, anchors,
                             self.horizontal, via_cost, False, 0, cap, self.opts.turn_cost, cancelled,
-                            also_ok=cb.net, source_costs=s_costs, routable=self.routable)
+                            also_ok=cb.net, source_costs=s_costs, routable=self.routable, via_guard=p.via_guard, lane_guard=p.lane_guard)
         if not cells or len(cells) < 2:
             self.pair_log.append((na.name, 'no coupled path'))
             return False
@@ -775,36 +806,55 @@ class Router:
         reach = int(6_000_000 / grid.pitch)                    # 6 mm
         x0, x1 = max(0, cx - reach), min(grid.w - 1, cx + reach)
         y0, y1 = max(0, cy - reach), min(grid.h - 1, cy + reach)
-        # Real copper of the net within reach (not its clearance zone): other
-        # pads' exits, routed centrelines, fanout and stitching vias.
-        near = int(1_000_000 / grid.pitch)
-        copper: Set[int] = set()
-        for cl in net.clusters:
-            copper |= cl.cells
+        # Real copper of the net within reach (not its clearance zone). Copper
+        # that is already tied to the plane comes first: routed centrelines,
+        # fanout and stitching vias. Other pads' exits (the neighbouring pin
+        # of a QFP, half a millimetre away) are the fallback: a pad-to-pad
+        # link, the way a designer bridges two adjacent power pins.
+        wired: Set[int] = set()
         for path in self.paths.values():
             if path.conn.net == code:
-                copper.update(path.cells)
+                wired.update(path.cells)
                 for x, y in path.path.vias:
                     vx, vy = grid.cell_x(x), grid.cell_y(y)
                     if grid.inside(vx, vy):
-                        copper.add(grid.index(layer, vx, vy))
-        goals: Set[int] = set()
-        for idx in copper:
-            l_, gx, gy = grid.unpack(idx)
-            if l_ != layer or idx == cell:
+                        wired.add(grid.index(layer, vx, vy))
+        own_cluster: Set[int] = set()
+        others: Set[int] = set()
+        for cl in net.clusters:
+            if cell in cl.cells:
+                own_cluster |= cl.cells
+            else:
+                others |= cl.cells
+
+        def in_reach(copper: Set[int]) -> Set[int]:
+            out: Set[int] = set()
+            for idx in copper:
+                l_, gx, gy = grid.unpack(idx)
+                if l_ != layer or idx in own_cluster or abs(gx - cx) + abs(gy - cy) <= 2:
+                    continue
+                if x0 <= gx <= x1 and y0 <= gy <= y1:
+                    out.add(idx)
+            return out
+
+        cells = None
+        self._tie_wired = False
+        for stage, goals in enumerate((in_reach(wired), in_reach(others))):
+            if not goals:
                 continue
-            if x0 <= gx <= x1 and y0 <= gy <= y1 and abs(gx - cx) + abs(gy - cy) > near:
-                goals.add(idx)
-        if not goals:
-            return None
-        anchors = [grid.unpack(g)[1:] for g in list(goals)[:8]]
-        cells = astar.route(grid, owners, p.via_block, code, {cell}, goals, anchors, self.horizontal,
-                            self.opts.via_cost, False, 0, self.opts.max_expansions // 4, self.opts.turn_cost,
-                            cancelled, routable=self.routable)
-        if not cells or len(cells) < 2:
+            self._tie_wired = stage == 0
+            anchors = [grid.unpack(g)[1:] for g in list(goals)[:8]]
+            cells = astar.route(grid, owners, p.via_block, code, {cell}, goals, anchors, self.horizontal,
+                                self.opts.via_cost, False, 0, self.opts.max_expansions // 4, self.opts.turn_cost,
+                                cancelled, routable=self.routable, via_guard=p.via_guard, lane_guard=p.lane_guard)
+            if cells and len(cells) >= 2:
+                break
+            cells = None
+        if not cells:
             return None
         own_cells = set(cells)
         cells = _smooth(grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, code))
+        self._tie_cells = set(cells)
         segments, _ = _simplify(grid, cells)
         segments = _with_pad_entries(grid, net, cells, segments)
         rp = RoutedPath(code, net.rules.width, segments, [], net.rules.via_diameter, net.rules.via_drill,
@@ -831,8 +881,12 @@ class Router:
         norm = math.hypot(dx, dy) or 1.0
         step = (dx / norm, dy / norm)
 
+        run_pts = [None]                          # the exit-to-via run fits() accepted
+
         def fits(vx: int, vy: int) -> bool:
             if not grid.inside(vx, vy) or p.via_block[vy * grid.w + vx]:
+                return False
+            if p.via_guard is not None and p.via_guard[vy * grid.w + vx] not in (0, code):
                 return False
             for ddx in range(-reach, reach + 1):
                 for ddy in range(-reach, reach + 1):
@@ -843,10 +897,17 @@ class Router:
                     for li in range(grid.layers):
                         if own[grid.index(li, vx + ddx, vy + ddy)] not in (0, code):
                             return False
-            for i in grid.segment_cells(layer, gx, gy, grid.nm_x(vx), grid.nm_y(vy), grid.pitch // 2):
-                if own[i] not in (0, code):
-                    return False
-            return True
+            # the run from the exit to the via at 0/45/90 degrees: the jog at
+            # whichever end leaves it free
+            for at_end in (False, True):
+                pts = jog(gx, gy, grid.nm_x(vx), grid.nm_y(vy), at_end=at_end)
+                if all(own[i] in (0, code)
+                       for k in range(len(pts) - 1)
+                       for i in grid.segment_cells(layer, pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1],
+                                                   grid.pitch // 2)):
+                    run_pts[0] = pts
+                    return True
+            return False
 
         candidates = [(ecx + int(round(step[0] * k)), ecy + int(round(step[1] * k))) for k in range(0, 6)]
         radius = max(2, int(1_500_000 / grid.pitch))
@@ -870,13 +931,50 @@ class Router:
         else:
             segments.append((layer, px, py, gx, gy, stub_w))
         if (vxn, vyn) != (gx, gy):
-            segments.append((layer, gx, gy, vxn, vyn, stub_w))
+            pts = run_pts[0] or jog(gx, gy, vxn, vyn)
+            segments += [(layer, pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1], stub_w) for k in range(len(pts) - 1)]
         rp = RoutedPath(code, net.rules.width, _merge_collinear(segments), [(vxn, vyn)],
                         net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid)
         self.next_pid += 1
         fake = Connection(code, 0, 0, 0)
         path = _Path(rp.pid, fake, rp, [cell])
         self._claim(path)                       # vias and stubs become obstacles for later fanouts
+        return rp
+
+    def _fanout_search(self, code: int, cell: int, cancelled, starts: Optional[Set[int]] = None,
+                       goals: Optional[Set[int]] = None) -> Optional[RoutedPath]:
+        """When no via fits next to the pad: a short search from the exit
+        (or from every cell of a tie the pad is on) that may drop a via
+        anywhere within 3 mm where the net's pour lies under it (the via lands
+        on the pour layer, the refilled pour joins it)."""
+        p, grid = self.p, self.grid
+        goals = goals or p.fanout_goals.get(cell)
+        if not goals:
+            return None
+        net = p.nets[code]
+        owners = p.owners[net.rules.key]
+        layer, cx, cy = grid.unpack(cell)
+        goals = {g for g in goals if owners[g] in (0, code)}
+        if not goals:
+            return None
+        anchors = [(cx, cy)]
+        via_reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / grid.pitch))) + 1
+        cells = astar.route(grid, owners, p.via_block, code, starts or {cell}, goals, anchors, self.horizontal,
+                            max(5, self.opts.via_cost // 3), True, via_reach, self.opts.max_expansions // 4,
+                            self.opts.turn_cost, cancelled, routable=self.routable,
+                            via_guard=p.via_guard, lane_guard=p.lane_guard)
+        if not cells or len(cells) < 2:
+            return None
+        segments, vias = _simplify(grid, cells)
+        if not vias:
+            return None                             # it never left the pad's layer
+        segments = [s for s in segments if s[0] == layer]   # the pour takes over after the via
+        segments = _with_pad_entries(grid, net, cells, segments)
+        rp = RoutedPath(code, net.rules.width, segments, vias, net.rules.via_diameter, net.rules.via_drill,
+                        pid=self.next_pid)
+        self.next_pid += 1
+        path = _Path(rp.pid, Connection(code, 0, 0, 0), rp, cells)
+        self._claim(path)
         return rp
 
     def _stitch_via(self, code: int, cx: int, cy: int) -> Optional[RoutedPath]:
@@ -887,6 +985,8 @@ class Router:
         own = p.owners[net.rules.key]
         reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / grid.pitch))) + 1
         if not grid.inside(cx, cy) or p.via_block[cy * grid.w + cx]:
+            return None
+        if p.via_guard is not None and p.via_guard[cy * grid.w + cx] not in (0, code):
             return None
         for ddx in range(-reach, reach + 1):
             for ddy in range(-reach, reach + 1):
@@ -918,12 +1018,33 @@ class Router:
         failed: List[Connection] = []
         done = 0
 
-        def report(name):
+        def report(name, stage=""):
+            # the stage goes in front of the net name so a status line (or the
+            # dialog log) shows which phase of the run is working, not only
+            # the counter that stands still through the rip-up rounds
             if progress:
-                progress(done, total, len(self.paths), len(failed), name)
+                progress(done, total, len(self.paths), len(failed), f"{stage}{name}")
+
+        deadline = started + opts.time_limit_s if opts.time_limit_s and opts.time_limit_s > 0 else None
+
+        def late():
+            if deadline is not None and time.time() > deadline:
+                result.timed_out = True
+                return True
+            return False
+
+        user_cancel = cancelled
+
+        def halted():
+            return bool(user_cancel and user_cancel())
 
         def stop():
-            return bool(cancelled and cancelled())
+            return halted() or late()
+
+        # The searches check this every few thousand expansions: the time
+        # limit then also ends a long rip-up or last-chance search midway,
+        # not only between connections.
+        cancelled = stop
 
         # 1. plain pass; a differential pair's two connections go together
         partners = {}
@@ -933,9 +1054,11 @@ class Router:
         handled = set()
         self.pairs_routed = 0
         for conn in queue:
-            if stop():
-                break
             if id(conn) in handled:
+                continue
+            if stop():
+                if self._find(conn.net, conn.a) != self._find(conn.net, conn.b):
+                    failed.append(conn)               # out of time: left open, reported as such
                 continue
             mates = partners.get(conn.pair, []) if conn.pair else []
             if len(mates) == 2:
@@ -959,9 +1082,10 @@ class Router:
 
         # 2. rip-up rounds
         rounds = opts.rip_rounds if opts.rip_up else 0
-        for _ in range(rounds):
+        for rnd in range(rounds):
             if not failed or stop():
                 break
+            report(f"{len(failed)} open", f"rip-up round {rnd + 1}/{rounds}: ")
             still: List[Connection] = []
             progressed = False
             for conn in failed:
@@ -987,7 +1111,7 @@ class Router:
                 for other in ripped:
                     if not self._try(other, opts.via_cost, opts.max_expansions, on_path, cancelled):
                         still.append(other)
-                report(self.p.nets[conn.net].name)
+                report(self.p.nets[conn.net].name, f"rip-up round {rnd + 1}/{rounds}: ")
             failed = still
             if not progressed:
                 break
@@ -995,26 +1119,52 @@ class Router:
         # 3. last chance with a bigger budget and cheaper vias
         if failed and opts.retry_failed and not stop():
             still = []
+            report(f"{len(failed)} open", "last chance, bigger budget: ")
             for conn in failed:
+                if stop():
+                    still.append(conn)
+                    continue
                 if not self._try(conn, max(5, opts.via_cost // 3), opts.max_expansions * 3, on_path, cancelled):
                     still.append(conn)
-                report(self.p.nets[conn.net].name)
+                report(self.p.nets[conn.net].name, "last chance: ")
             failed = still
 
-        # 4. fanout vias for pour nets, in whatever room is left
+        # 4. fanout vias for pour nets, in whatever room is left (the time
+        # limit does not cut the pour stages: they are bounded and quick)
         fanout_paths: List[RoutedPath] = []
-        if not stop():
-            for code, cell in self.p.fanout:
-                rp = self._fanout_via(code, cell)
-                if rp is not None:
-                    fanout_paths.append(rp)
-                    if on_path:
-                        on_path(rp)
+        fanned: Set[int] = set()                       # primary exit cells of pads that got a via
+        if not halted():
+            for i, (code, cell) in enumerate(self.p.fanout):
+                if halted():
+                    break
+                if i % 10 == 0:
+                    report(f"{i}/{len(self.p.fanout)}", "fanout vias ")
+                for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
+                    rp = self._fanout_via(code, exit_cell)
+                    if rp is not None:
+                        fanout_paths.append(rp)
+                        fanned.add(cell)
+                        if on_path:
+                            on_path(rp)
+                        break
+                else:
+                    rp = self._fanout_search(code, cell, user_cancel)
+                    if _DEBUG:
+                        print(f"[fanout-search] net {self.p.nets[code].name} cell {self.grid.unpack(cell)} goals {len(self.p.fanout_goals.get(cell, ()))} -> {'via' if rp else 'none'}", flush=True)
+                    if rp is not None:
+                        fanout_paths.append(rp)
+                        fanned.add(cell)
+                        if on_path:
+                            on_path(rp)
 
         # 5. stitching vias on the pour nets, wherever they still fit
         stitch_paths: List[RoutedPath] = []
-        if not stop():
+        if not halted():
+            n_spots = sum(len(v) for v in self.p.stitch.values())
             for code, spots in self.p.stitch.items():
+                if halted():
+                    break
+                report(f"{len(stitch_paths)} placed of {n_spots} sites", "stitching vias: ")
                 for cx, cy in spots:
                     rp = self._stitch_via(code, cx, cy)
                     if rp is not None:
@@ -1025,20 +1175,47 @@ class Router:
         # 6. pour-net pads that got no via: a short track to the nearest
         # copper of their net (a via, another pad, a stub) instead
         tied_paths: List[RoutedPath] = []
-        if not stop():
-            with_via = {cell for rp in fanout_paths for cell in self._cells_of_exit(rp)}
+        if not halted():
             for code, cell in self.p.fanout:
-                if cell in with_via:
+                if cell in fanned:
                     continue
-                rp = self._tie_to_net(code, cell, cancelled)
-                if rp is not None:
-                    tied_paths.append(rp)
-                    if on_path:
-                        on_path(rp)
+                if halted():
+                    break
+                report(self.p.nets[code].name, "tying pour pads: ")
+                for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
+                    rp = self._tie_to_net(code, exit_cell, user_cancel)
+                    if _DEBUG:
+                        print(f"[tie] net {self.p.nets[code].name} exit {self.grid.unpack(exit_cell)} -> {'wired' if rp and self._tie_wired else 'pad' if rp else 'none'}", flush=True)
+                    if rp is not None:
+                        tied_paths.append(rp)
+                        if on_path:
+                            on_path(rp)
+                        # a tie to another pad that has no via either leaves an
+                        # island: look for a via spot from anywhere along it
+                        if not self._tie_wired:
+                            tie_cells = set(self._tie_cells)
+                            # within 3 mm of any pad the tie touches
+                            union: Set[int] = set()
+                            for pc, c in self.p.fanout:
+                                if pc == code and (c == cell or c in tie_cells or
+                                                   any(a in tie_cells for a in self.p.fanout_alt.get(c, []))):
+                                    union |= self.p.fanout_goals.get(c, set())
+                            rp2 = self._fanout_search(code, cell, user_cancel, starts=tie_cells, goals=union)
+                            if _DEBUG:
+                                print(f"[tie-island] net {self.p.nets[code].name} cell {self.grid.unpack(cell)} tie cells {len(tie_cells)} union goals {len(union)} -> {'via' if rp2 else 'none'}", flush=True)
+                            if rp2 is not None:
+                                tied_paths.append(rp2)
+                                fanned.add(cell)
+                                if on_path:
+                                    on_path(rp2)
+                        break
         fanout_paths += tied_paths
 
-        result.cancelled = stop()
+        result.cancelled = halted()
         result.failed = [c for c in failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
+        # the same connection may be queued twice (a pair member that failed twice)
+        seen: Set[int] = set()
+        result.failed = [c for c in result.failed if not (id(c) in seen or seen.add(id(c)))]
         result.failed_detail = [self._why_failed(c) for c in result.failed]
         new_paths = [self.paths[pid] for pid in sorted(self.paths) if not self.paths[pid].existing]
         result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths

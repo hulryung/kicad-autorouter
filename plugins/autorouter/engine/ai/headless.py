@@ -14,12 +14,14 @@ def native_options_from(spec_options: dict, base: Optional[NativeOptions] = None
          "stitch_vias": "stitch_vias", "stitch_pitch_mm": "stitch_pitch_mm", "diff_pairs": "diff_pairs",
          "allow_vias": "allow_vias", "routable_layers": "routable_layers", "horizontal_layers": "horizontal_layers",
          "power_pours": "power_pours", "rip_up": "rip_up", "max_expansions": "max_expansions",
-         "track_mode": "track_mode", "move_existing": "shove"}
+         "track_mode": "track_mode", "move_existing": "shove", "plane_nets": "plane_nets"}
     for key, attr in m.items():
         if key in spec_options and spec_options[key] is not None:
             setattr(o, attr, spec_options[key])
     if "skip_nets" in spec_options:
         o.skip_nets = list(spec_options["skip_nets"] or [])
+    if "time_limit_min" in spec_options and spec_options["time_limit_min"] is not None:
+        o.time_limit_s = float(spec_options["time_limit_min"]) * 60.0
     if "track_width_mm" in spec_options and spec_options["track_width_mm"]:
         o.track_width = int(round(float(spec_options["track_width_mm"]) * 1e6))
     return o
@@ -83,6 +85,7 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
                    "routed": job.routed, "failed": job.failed, "ripped_up": job.ripped,
                    "fanout_vias": job.fanout, "coupled_pairs": job.pairs, "stitching_vias": job.stitched,
                    "escalated": job.escalated, "passes": job.passes, "seconds": round(job.seconds, 1),
+                   "timed_out": job.timed_out,
                    "pair_log": [list(x) for x in job.pair_log],
                    "failed_detail": job.failed_detail,
                    "unconnected_after": board.GetConnectivity().GetUnconnectedCount(True)}

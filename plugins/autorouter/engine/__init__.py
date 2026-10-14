@@ -1,6 +1,4 @@
 """
-The routing engine, kept free of pcbnew and wx so it can be unit-tested with a
-plain Python: where the Freerouting jar and a Java runtime come from, how the
-command line is built, how the run is driven, and how its log is turned into
-progress.
+The routing engine, kept free of pcbnew and wx where it can be: the grid
+router (native/), the AI assistant (ai/), options, paths and job folders.
 """

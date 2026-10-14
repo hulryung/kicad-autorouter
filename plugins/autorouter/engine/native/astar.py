@@ -18,6 +18,8 @@ from .grid import BLOCKED, Grid
 # zig-zag of diagonals (18 per cell), while a true 45-degree move is still
 # cheaper than an L (18 vs 25).
 STRAIGHT, DIAGONAL, AGAINST_STRAIGHT = 10, 18, 15
+LANE_PENALTY = 60     # per cell inside another pad's outlet lane (6 straight cells)
+
 # (dx, dy, is_diagonal)
 MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
          (1, 1, True), (1, -1, True), (-1, 1, True), (-1, -1, True))
@@ -29,7 +31,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           max_expansions: int, turn_cost: int = 2,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
-          neck_owners=None, neck_region=None) -> Optional[List[int]]:
+          neck_owners=None, neck_region=None, via_guard=None, lane_guard=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -68,10 +70,17 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
         return False
 
     def extra(idx: int) -> int:
-        """Rip-up penalty for stepping onto another path's cell."""
+        """Rip-up penalty for stepping onto another path's cell, and the
+        price of running through another pad's outlet lane (allowed, but a
+        detour of a few millimetres is preferred)."""
+        cost = 0
+        if lane_guard is not None:
+            g = lane_guard[idx]
+            if g and g != net and g != also_ok:
+                cost += LANE_PENALTY
         if soft and owners[idx] not in (0, net) and routed[idx] != 0:
-            return rip_penalty
-        return 0
+            cost += rip_penalty
+        return cost
 
     # The via barrel reaches via_reach cells beyond the track half-width the
     # owner maps already account for: every cell of that disc must be free of
@@ -83,6 +92,11 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
     def via_ok(cx: int, cy: int) -> bool:
         if via_block[cy * w + cx]:
             return False
+        if via_guard is not None:
+            # the outlet of another net's pad escape: no via barrel there
+            g = via_guard[cy * w + cx]
+            if g and g != net and g != also_ok:
+                return False
         for dx, dy in disc:
             px, py = cx + dx, cy + dy
             if not (0 <= px < w and 0 <= py < grid.h):

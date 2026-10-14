@@ -1,4 +1,4 @@
-"""The board side of a run: DSN out, SES in, and what the dialog needs to know
+"""The board side of a run: job folders and what the dialog needs to know
 about the board. Everything that touches pcbnew lives here, imported lazily so
 the rest of the engine stays importable without KiCad."""
 import re
@@ -16,20 +16,18 @@ KEEP_JOBS = 10
 @dataclass
 class JobFiles:
     directory: Path
-    dsn: Path
-    ses: Path
 
 
 def new_job(board_name: str) -> JobFiles:
-    """A fresh working directory for one run; the DSN and SES stay there
-    afterwards for inspection, and old jobs are pruned."""
+    """A fresh working directory for one run (its log, the AI context and
+    replies stay there for inspection); old jobs are pruned."""
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", board_name or "board").strip("_") or "board"
     jobs = data_dir() / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     directory = jobs / f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}"
     directory.mkdir()
     _prune(jobs)
-    return JobFiles(directory, directory / f"{stem}.dsn", directory / f"{stem}.ses")
+    return JobFiles(directory)
 
 
 def _prune(jobs: Path) -> None:
@@ -39,8 +37,7 @@ def _prune(jobs: Path) -> None:
 
 
 def copper_layers(board) -> List[Tuple[int, str]]:
-    """(layer id, name) for the enabled copper layers, top to bottom: the order
-    KiCad's DSN export uses, which is what Freerouting's layer settings index."""
+    """(layer id, name) for the enabled copper layers, top to bottom."""
     return [(layer, board.GetLayerName(layer)) for layer in board.GetEnabledLayers().CuStack()]
 
 
@@ -63,19 +60,6 @@ def unrouted_count(board) -> int:
         return board.GetConnectivity().GetUnconnectedCount(True)
     except Exception:
         return -1
-
-
-def export_dsn(board, path: Path) -> None:
-    import pcbnew
-    if not pcbnew.ExportSpecctraDSN(board, str(path)) or not path.is_file():
-        raise RuntimeError("KiCad could not export the board to Specctra DSN. "
-                           "Check that the board has a closed outline (Edge.Cuts).")
-
-
-def import_ses(board, path: Path) -> None:
-    import pcbnew
-    if not pcbnew.ImportSpecctraSES(board, str(path)):
-        raise RuntimeError(f"KiCad could not import the routed session {path.name}")
 
 
 _REMOVED = []        # proxies of removed items, kept alive (see BoardActions._forget)

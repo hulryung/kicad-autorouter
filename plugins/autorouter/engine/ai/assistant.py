@@ -26,6 +26,8 @@ What you can do, through "actions":
   remove_existing (bool: strip existing tracks first), power_pours (bool), rip_up (bool), max_expansions (int),
   move_existing (bool: like the interactive router's shove, unlocked tracks already on the board may be
   ripped up and rerouted when a connection finds no room; prefer this over remove_tracks for a blocked net).
+  plane_nets (bool, default true: a net whose copper pour lies under its pads, e.g. a +3V3 plane, gets vias
+  to the pour and no tracks), time_limit_min (number, default 10: the whole route run; 0 = no limit).
 - route: run the built-in router on a scope: "board", "nets" (+ nets), "sheets" (+ sheets) or "selection".
   Existing tracks are kept unless remove_existing is set; only open connections are routed.
   Route hints on the same action: layers (names the route may use), width_mm (fixed width),

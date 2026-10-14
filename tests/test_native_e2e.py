@@ -38,6 +38,38 @@ def kicad_cli():
     return None
 
 
+def doubled_back(segs):
+    """Pairs of same-net, same-layer segments that run over each other in
+    opposite directions: a route that left a pad through its escape stub and
+    came straight back over it (an antenna the designer would never draw)."""
+    out = []
+    by_key = {}
+    for t in segs:
+        by_key.setdefault((t.GetNetCode(), t.GetLayer()), []).append(t)
+    for group in by_key.values():
+        for i, a in enumerate(group):
+            ax, ay = a.GetStart().x, a.GetStart().y
+            adx, ady = a.GetEnd().x - ax, a.GetEnd().y - ay
+            la = (adx * adx + ady * ady) ** 0.5
+            if la < 1:
+                continue
+            for b in group[i + 1:]:
+                bx, by = b.GetStart().x, b.GetStart().y
+                bdx, bdy = b.GetEnd().x - bx, b.GetEnd().y - by
+                lb = (bdx * bdx + bdy * bdy) ** 0.5
+                if lb < 1 or abs(adx * bdy - ady * bdx) > 1000 * la:
+                    continue                                   # not parallel
+                if abs((bx - ax) * ady - (by - ay) * adx) > 1000 * la:
+                    continue                                   # parallel but not collinear
+                # project b onto a's axis: overlap longer than a track width counts
+                t0 = ((bx - ax) * adx + (by - ay) * ady) / la
+                t1 = ((b.GetEnd().x - ax) * adx + (b.GetEnd().y - ay) * ady) / la
+                lo, hi = max(0, min(t0, t1)), min(la, max(t0, t1))
+                if hi - lo > max(a.GetWidth(), b.GetWidth()):
+                    out.append((a.GetNetname(), (ax, ay)))
+    return out
+
+
 def main(argv):
     args = argv[1:]
     board_file = HERE / "fixtures" / "obd2-adapter.kicad_pcb"
@@ -102,6 +134,7 @@ def main(argv):
                            escalate="--no-escalate" not in sys.argv, apply_paths=True)
     print(f"job: {job.routed} routed ({job.escalated} on pass 2), open {job.failed}, {job.fanout} fanout/tie vias, "
           f"{job.stitched} stitching vias, {job.shoved} existing pieces moved, {job.seconds:.0f}s")
+    assert "pour_error" not in job.stats, f"pour pass failed: {job.stats['pour_error']}"
 
     class _R:                      # the statistics below read a router result
         pass
@@ -121,7 +154,8 @@ def main(argv):
     vias = sum(1 for t in board.GetTracks() if t.GetClass() == "PCB_VIA")
     length = sum(t.GetLength() for t in segs) / 1e6
     print(f"artwork: {len(segs)} segments, {vias} vias, {length:.0f} mm, "
-          f"layers {dict(Counter(board.GetLayerName(t.GetLayer()) for t in segs))}")
+          f"layers {dict(Counter(board.GetLayerName(t.GetLayer()) for t in segs))}, "
+          f"doubled back {len(doubled_back(segs))}")
     for name in job.failed[:20]:
         print("   failed:", name)
     items = len(segs) + vias

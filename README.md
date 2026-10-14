@@ -1,19 +1,15 @@
 # KiCad Autorouter
 
 Autoroute the open board without leaving KiCad's PCB editor. One toolbar
-button opens a dialog with two routing engines and an AI assistant:
+button opens a dialog with the router and an AI assistant:
 
-- **Built-in router** (default). Reads pads, existing copper, keepouts, the
+- **Built-in router**. Reads pads, existing copper, keepouts, the
   board outline and the net-class rules through KiCad's PCB API, routes on a
   multi-layer grid with A* and rip-up, and puts each connection's tracks and
   vias on the board **as soon as it is found**. No files, no external
   programs, one undo step. It escapes pads along their axis, necks down at
   fine-pitch pins, routes differential pairs coupled, fans GND/power pads out
   to their planes, stitches pours with vias and refills the zones.
-- **Freerouting**. The classic Java autorouter, driven headless: Specctra DSN
-  out, session back in, pass-by-pass progress in the dialog. The jar and, if
-  needed, a Java runtime are downloaded into the plugin's data folder on
-  first use.
 - **AI assistant**. Hands the board to the OpenAI Codex CLI and carries out
   what it answers: option changes, routing by net, sheet or selection,
   removing or adding tracks and vias, with the DRC fed back each round.
@@ -24,10 +20,7 @@ button opens a dialog with two routing engines and an AI assistant:
 
 - KiCad 9.0 or 10.0 (the SWIG action-plugin API). KiCad 11 drops that API; an
   IPC-API build is on the roadmap.
-- The built-in router needs nothing else.
-- Freerouting needs internet access on first use (about 120 MB: engine 62 MB,
-  JRE 55 MB), or a Java 25+ runtime already on the machine and a copy of
-  `freerouting-2.5.0.jar`.
+- The router needs nothing else.
 - The AI assistant needs the `codex` CLI (`npm i -g @openai/codex`), logged in.
 - macOS (Apple Silicon and Intel), Windows x64, Linux x64/arm64.
 
@@ -67,19 +60,17 @@ Then **Tools → External Plugins → Refresh Plugins** in the PCB editor.
 
 ## Using it
 
-Open a board, click **Autorouter**, pick an engine, click **Route**. Options
+Open a board, click **Autorouter**, click **Route**. Options
 are remembered between runs, and every run is one undo step (Ctrl+Z puts the
 board back exactly as it was).
 
 | Tab | What you set |
 |-----|--------------|
-| **Routing** | The engine. For the built-in router: routing grid pitch, via cost, search budget per connection, nets to leave to the pours (patterns such as `GND,*_PLANE`), **track width** (automatic, net class, the editor's current choice, or any pre-defined size), **via size**, vias on/off, retry pass, **fanout vias** for GND/power pads, **coupled differential pairs**, **GND via stitching** with its pitch, **power pours** (pad vias and coarser stitching), **move existing tracks** (shove: unlocked tracks already on the board may be ripped up and rerouted when a connection finds no room, like the interactive router), and **what to route**: the whole board, the items selected in the editor, or the footprints of chosen schematic sheets. Whether to remove the existing tracks first and whether to refill the zones when done. |
-| **Layers & nets** | Which copper layers may be routed, an optional preferred-direction override per layer, and net classes to leave unrouted. Both engines honour these. |
-| **Freerouting** | Passes, optimizer threads and threshold, via / plane-via / rip-up costs, strategies, JVM heap, extra arguments, SMD fanout, and where Java and the jar come from (leave empty for auto-detection and the managed download). |
+| **Routing** | Four groups. *Search*: routing grid pitch, via cost, search budget per connection, a **time limit** for the whole run (default 10 minutes: what is routed stays, the rest is reported as not routed, pour vias are still placed), nets to leave to the pours (patterns such as `GND,*_PLANE`). *Track and via sizes*: **track width** (automatic, net class, the editor's current choice, or any pre-defined size), **via size**, vias on/off, retry pass, **fanout vias** for GND/power pads, **coupled differential pairs**, **GND via stitching** with its pitch, **power pours** (pad vias and coarser stitching), **nets with a copper pour under their pads** (treated as planes: vias to the pour, no tracks), **move existing tracks** (shove: unlocked tracks already on the board may be ripped up and rerouted when a connection finds no room, like the interactive router), and **what to route**: the whole board, the items selected in the editor, or the footprints of chosen schematic sheets. *Existing tracks*: keep them and route only the unconnected (ratsnest) connections, which is the default every time the dialog opens, or remove all tracks and vias first; and whether to refill the zones when done. |
+| **Layers & nets** | Which copper layers may be routed, an optional preferred-direction override per layer, and net classes to leave unrouted. |
 | **AI assistant** | A request in plain words, the model, the round limit, whether to include the DRC, and the **Review current routing** button for a critique without changes. |
 
 ![Layers and nets](docs/images/tab-layers.png)
-![Freerouting](docs/images/tab-freerouting.png)
 
 ### What the result looks like
 
@@ -104,17 +95,38 @@ Benchmark figures for that board (GND nets excluded), from
 
 | | Original | Built-in router |
 |---|---|---|
-| Open signal connections | 0 | 1 of 104 (2 saved by the finer second pass) |
+| Signal connections (+3V3 is a plane net: vias, no tracks) | – | 76 of 78 routed |
+| Unconnected items after refill (KiCad DRC) | 0 | 2 (the open signals) |
 | DRC violations | 0 | 0 |
-| Track segments | 353 | 552 |
-| Track length | 764 mm | 985 mm |
-| Vias | 46 | 85 (56 of them pad-to-plane fanout) |
-| Stitching vias (GND pours, 4 mm) | – | 161 |
+| Track segments | 353 | 598 |
+| Track length | 764 mm | 801 mm |
+| Vias | 46 | 102 (72 of them pad-to-plane fanout) |
+| Stitching vias (GND pours, 4 mm) | – | 154 |
+| Segments doubling back over a stub | 1 | 0 |
+| Segments off the 0/45/90-degree grid | 0 | 0 |
+| Time | – | 130 s |
 
-With **Move existing tracks** on, the finer second pass may also shove what the
-first pass placed: on the same board it reroutes 3 pieces, saves 5 of the open
-connections and finishes in about a third of the time (126 s against 372 s),
-still with 0 DRC violations.
+The +3V3 net has a plane on an inner layer, so the router treats it like GND:
+every +3V3 pad gets a via to the plane (or a short link to a neighbouring
+pad that has one) and no +3V3 tracks are drawn. Those pad vias go in before
+the signals, as a designer places the decoupling vias first. With that, the
+26 power pads and all GND pads end up connected; two signal connections on
+QFP pins whose both sides are taken stay open (which two varies between
+runs: WORD_LED, CAN2_RX_CAP or CAN2_TX_CAP).
+
+Every segment lies at 0, 45 or 90 degrees, as hand-drawn copper does: the
+stub from a pad centre to its exit cell takes up the sub-grid offset with a
+45-degree jog hidden inside the pad (or at the exit when the lane next to
+the pad is too tight), and the run from an exit to a fanout via is drawn the
+same way. The segment count went up by the jogs.
+
+The last row counts same-net segments running back over each other, a route
+that left a pad through its stub and came straight back: 97 of them before
+the escape side was chosen by the room beyond the pad (the designer takes a
+QFP pin under the body to a via when a part sits right outside the row),
+outlets past each exit were kept clear of neighbours' vias and tracks, and
+shared stubs were written once. The 22 routed pins of the MCU now leave on
+the same side as in the original artwork for 19 of them.
 
 ## KiCad's routing settings
 
@@ -171,7 +183,17 @@ obstacle.
    - **Pad escapes**: SMD pads are left along the pad's long axis to an exit
      point just past the pad end, towards the net's nearest other pad when
      that lane is free; each lane is checked with KiCad's own shape collision
-     tests and lanes are kept clear of each other.
+     tests and lanes are kept clear of each other. When the board past the
+     preferred side is boxed in (a crystal or resistor right outside a QFP
+     row) and the other side is open, the pad leaves the open side, as a
+     designer takes a pin under the body to a via. The first 0.6 mm past an
+     exit is an **outlet**: other nets' vias may not sit on it and their
+     tracks pay a penalty to cross it, so a neighbour cannot wall a pin in.
+     The side chosen when the job starts is kept for the whole job: the
+     pad vias placed first would otherwise make the open side look boxed in
+     on the next pass and send the track out the far end of the pad and
+     back around it. In the second pass a stubborn pad gets exits on both
+     ends and the search picks one.
    - **Fine pitch**: connections that end on fine-pitch pins (neighbours
      closer than width + 2 × clearance) are routed first and at the board's
      narrowest pre-defined width for their whole length.
@@ -189,7 +211,20 @@ obstacle.
    Connections still open after that get a **second pass** on their own: half
    the grid pitch, the board's narrowest pre-defined width, cheaper vias, in a
    run scoped to just those nets, the way a designer finishes the last
-   stubborn connections by hand.
+   stubborn connections by hand. That pass has its own budget (60 s plus
+   20 s per open connection), since the finer grid has four times the
+   cells. The whole job runs under the **time
+   limit**, checked inside each search as well as between connections: a big board whose rip-up rounds would grind for hours instead
+   stops with what it has, reports the rest as not routed, and still places
+   the pour vias.
+0. **Plane nets first**: a net whose copper pour lies under at least half of
+   its pads (a +3V3 inner plane, a local power pour) is a plane net like GND:
+   it gets no tracks, each pad gets a via to the pour, straight off the pad
+   escape where a via fits, else by a short search within 3 mm, else a link
+   to the nearest copper of the net that already has one (two adjacent QFP
+   power pins share a via). These pad vias are placed before the signals are
+   routed, as the decoupling vias are in a hand layout. Off with **Nets with
+   a copper pour under their pads** in the dialog (`plane_nets` for the AI).
 3. **Finish**: pads of unrouted pour nets get **fanout vias** to their planes,
    pours spanning two or more layers get **stitching vias** on a grid, both
    only where a via still fits and only where no via of that net sits already
@@ -198,7 +233,10 @@ obstacle.
    sit in the escape lanes the signals need.
 4. **Apply** (PCB API, main thread): each path becomes `PCB_TRACK` segments and
    through `PCB_VIA`s, added to the open board as it is found; ripped-up paths
-   are removed again. KiCad records the whole run as one undo step.
+   are removed again. Copper the net already has on that layer (a pad stub
+   shared by two routes, a run along an earlier route of the net) is written
+   once: new segments are trimmed against it. KiCad records the whole run as
+   one undo step.
 
 Limits: through vias only; filled zones are not obstacles (they are refilled
 around the new tracks, so pour nets belong under *Nets to leave unrouted*); the
@@ -228,7 +266,7 @@ The model must answer with a JSON object (schema enforced by Codex): a
 
 | Action | What it does |
 |---|---|
-| `set_options` | change routing options for the next route (grid, via cost, skip nets, widths, layers, fanout, stitching, pairs, move_existing, ...) |
+| `set_options` | change routing options for the next route (grid, via cost, skip nets, widths, layers, fanout, stitching, pairs, move_existing, plane_nets, time_limit_min, ...) |
 | `route` | run the built-in router on the board, a list of nets, schematic sheets or the selection, with hints: allowed `layers`, a fixed `width_mm`, `via_cost`, `avoid_mm` rectangles |
 | `remove_tracks`, `remove_items_near` | delete a net's copper, or the tracks/vias around a point |
 | `add_track`, `add_via` | draw copper by hand (polyline in mm, via at a point) |
@@ -269,7 +307,7 @@ score card and the rounds are kept in `review-rounds.json` in the job folder.
 plugins/autorouter/
   __init__.py        registers the action plugin (skipped outside the PCB editor)
   plugin.py          pcbnew.ActionPlugin: the toolbar button (.devreload hook for development)
-  dialog.py          wx dialog: engines, options, scopes, progress, the AI tab
+  dialog.py          wx dialog: options, scopes, progress, the AI tab
   settings.py        settings.json in the data folder
   engine/
     native/          the built-in router
@@ -281,12 +319,8 @@ plugins/autorouter/
       apply.py       RoutedPath -> PCB_TRACK / PCB_VIA on the board
       problem.py     the data model shared by the above
     ai/              the Codex assistant: context.py, codex.py, actions.py, assistant.py, headless.py
-    freerouting.py   Freerouting release pin, jar lookup/download, options -> command line
-    java.py          find a Java >= 25 or install a Temurin JRE into the data folder
-    runner.py        the engine subprocess on a worker thread
-    progress.py      Freerouting log lines -> stage / pass / unrouted / violations
-    session.py       the pcbnew side of Freerouting: DSN export, SES import, zone refill, job folders
-    download.py      download with progress, sha256 check, safe archive extraction
+    options.py       RouteOptions: what the dialog remembers between runs
+    session.py       pcbnew helpers: layers, net classes, zone refill, track removal, job folders
     paths.py         data folder and platform names
 ```
 
@@ -302,14 +336,18 @@ plain Python.
 | Windows | `%LOCALAPPDATA%\kicad-autorouter` |
 | Linux | `$XDG_DATA_HOME/kicad-autorouter` (default `~/.local/share/kicad-autorouter`) |
 
-It holds `freerouting/`, `jre/`, `jobs/` (each run's files: DSN/SES, the AI
-context, prompts and replies; last 10 kept), `logs/` and `settings.json`.
+It holds `jobs/` (each run's files: the run log, the AI context, prompts and
+replies; last 10 kept), `logs/` and `settings.json`.
+A built-in run's `jobs/<time>-<board>/dialog.log` is a timestamped trace of
+the run (board reading, one progress line a second with the stage: routing,
+rip-up round, second pass, fanout, stitching; the outcome), so a run that
+looked stuck can be read afterwards. The **Open data folder** button opens it.
 
 ## Tests
 
 ```bash
-python3 scripts/run-tests.py        # offline: router core on synthetic grids (incl. a coupled pair),
-                                    # command line, progress parser, settings, AI schema and loop (fake codex)
+python3 scripts/run-tests.py        # offline: router core on synthetic grids (incl. a coupled pair, the time limit),
+                                    # settings, AI schema and loop (fake codex)
 # with KiCad's Python the end-to-end tests run too:
 /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 scripts/run-tests.py
 # the built-in router on any board, with KiCad's DRC and artwork statistics:
@@ -330,5 +368,4 @@ KICAD_AUTOROUTER_AI_LIVE=1 <KiCad python3> tests/test_ai_live.py [board] [reques
 
 ## License
 
-MIT for the plugin. Freerouting is GPL-3.0 and is downloaded from its own
-releases at run time; it is not part of this package.
+MIT.

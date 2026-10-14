@@ -25,17 +25,17 @@ def main():
     board = pcbnew.LoadBoard(str(HERE / "fixtures" / "obd2-adapter.kicad_pcb"))
     app = wx.App(False)
     from autorouter.dialog import AutorouterDialog
-    from autorouter.engine.freerouting import RouteOptions
+    from autorouter.engine.options import RouteOptions
 
     dialog = AutorouterDialog(None, board)
     assert dialog.routable.GetCount() == 2 and dialog.skip_classes.GetCount() == 1
     o = dialog._collect_options()
     assert o.routable_layers == [True, True] and o.horizontal_layers is None
     assert o.ignore_net_classes == []
-    dialog._load_options(RouteOptions(max_passes=7, ignore_net_classes=["Default"],
+    dialog._load_options(RouteOptions(native_time_limit_min=7, ignore_net_classes=["Default"],
                                       horizontal_layers=[False, True]))
     o = dialog._collect_options()
-    assert o.max_passes == 7 and o.ignore_net_classes == ["Default"]
+    assert o.native_time_limit_min == 7 and o.ignore_net_classes == ["Default"]
     assert o.horizontal_layers == [False, True]
     dialog._show_progress("x", 0.5)
     assert dialog.gauge.GetValue() == 500

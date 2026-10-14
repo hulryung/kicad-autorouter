@@ -34,7 +34,7 @@ class AutorouterPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = "Autorouter"
         self.category = "Routing"
-        self.description = "Autoroute the board with Freerouting, inside KiCad"
+        self.description = "Autoroute the board inside KiCad (built-in router, AI assistant)"
         self.show_toolbar_button = True
         icon = Path(__file__).parent / "plugin_resources" / "icon-24.png"
         self.icon_file_name = str(icon) if icon.exists() else ""

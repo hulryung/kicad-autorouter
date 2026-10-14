@@ -1,10 +1,9 @@
 """
 KiCad Autorouter plugin.
 
-Routes the open board with the Freerouting engine without leaving the PCB
-editor: the board is exported to Specctra DSN, Freerouting runs headless in
-the background with live progress, and the resulting session is imported
-back as one undoable step.
+Routes the open board without leaving the PCB editor: a grid router on
+KiCad's own board model (PCB API) with live progress, one undo step per run,
+and an AI assistant (Codex CLI) that drives it.
 """
 import os
 

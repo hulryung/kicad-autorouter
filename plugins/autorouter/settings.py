@@ -4,14 +4,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .engine.freerouting import RouteOptions
+from .engine.options import RouteOptions
 from .engine.paths import data_dir
 
 
 @dataclass
 class Settings:
-    java_path: str = ""              # "" = find one automatically
-    jar_path: str = ""               # "" = the managed download
     codex_path: str = ""             # "" = find the codex CLI automatically
     ai_model: str = ""               # "" = codex's configured default
     options: RouteOptions = field(default_factory=RouteOptions)
@@ -26,14 +24,12 @@ class Settings:
             data = json.loads(cls.path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls()
-        return cls(java_path=data.get("java_path", ""), jar_path=data.get("jar_path", ""),
-                   codex_path=data.get("codex_path", ""), ai_model=data.get("ai_model", ""),
+        return cls(codex_path=data.get("codex_path", ""), ai_model=data.get("ai_model", ""),
                    options=RouteOptions.from_dict(data.get("options", {})))
 
     def save(self) -> None:
         path = self.path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"java_path": self.java_path, "jar_path": self.jar_path,
-                   "codex_path": self.codex_path, "ai_model": self.ai_model,
+        payload = {"codex_path": self.codex_path, "ai_model": self.ai_model,
                    "options": self.options.to_dict()}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

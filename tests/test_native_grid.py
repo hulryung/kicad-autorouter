@@ -149,6 +149,23 @@ def pair_case():
     assert abs(a[3] - a[1]) >= 25 * PITCH, ("coupling should start close to the pins", a)
     print("test_native_grid: pair ok")
 
+    # N. Time limit: with none left, the plain pass tries nothing, every
+    # connection is reported open and timed_out is set; cancelled is not.
+    p = make_problem(layers=1)
+    add_net(p, 1, (5, 20), (50, 20))
+    add_net(p, 2, (5, 10), (50, 10))
+    p.options.time_limit_s = 1e-9
+    r = router.run(p)
+    assert r.timed_out and not r.cancelled, (r.timed_out, r.cancelled)
+    assert r.routed == 0 and len(r.failed) == 2, (r.routed, r.failed)
+    # with a real limit the same board routes in full
+    p = make_problem(layers=1)
+    add_net(p, 1, (5, 20), (50, 20))
+    p.options.time_limit_s = 60
+    r = router.run(p)
+    assert r.routed == 1 and not r.timed_out
+    print("test_native_grid: time limit ok")
+
 
 if __name__ == "__main__":
     pair_case()

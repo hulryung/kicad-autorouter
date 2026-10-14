@@ -163,3 +163,19 @@ class Grid:
                 (ax, ay), (bx, by) = ring[i], ring[(i + 1) % n]
                 out.extend(self.segment_cells(layer, ax, ay, bx, by, r))
         return out
+
+
+def jog(ax: int, ay: int, bx: int, by: int, at_end: bool = False):
+    """Points of an octilinear run from A to B: [A, B] when the straight line
+    is already at a multiple of 45 degrees, else [A, J, B] with one 45-degree
+    jog that takes up the smaller offset at the start (or at the end when
+    at_end is set) and an axis-parallel run for the rest."""
+    dx, dy = bx - ax, by - ay
+    if dx == 0 or dy == 0 or abs(dx) == abs(dy):
+        return [(ax, ay), (bx, by)]
+    sx = (dx > 0) - (dx < 0)
+    sy = (dy > 0) - (dy < 0)
+    m = min(abs(dx), abs(dy))
+    if at_end:
+        return [(ax, ay), (bx - sx * m, by - sy * m), (bx, by)]
+    return [(ax, ay), (ax + sx * m, ay + sy * m), (bx, by)]
