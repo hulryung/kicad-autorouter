@@ -837,6 +837,21 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                             lane_guard[idx] = code if cur in (0, code) else -1   # two outlets: nobody's lane
                 if wants_outlet and towards is not None:
                     outlets.append((code, pos.x, pos.y, gx, gy, stub_w))
+                    # The outlet's first exit is also where the pin drops its
+                    # via: keep other nets' centrelines out of that spot on
+                    # the layers the pad is not on, or an inner-layer track
+                    # running across the pin row leaves the pin no via site.
+                    ex, ey, ecx, ecy, gx, gy, _ = chosen[0]
+                    dx, dy = gx - pos.x, gy - pos.y
+                    norm = math.hypot(dx, dy) or 1.0
+                    fx, fy = int(round(gx + dx / norm * OUTLET_NM)), int(round(gy + dy / norm * OUTLET_NM))
+                    r = max(net.rules.clearance, ds.m_MinClearance) + max_width // 2 + safety + half
+                    for li in range(grid.layers):
+                        if li in pl:
+                            continue
+                        for idx in grid.segment_cells(li, gx, gy, fx, fy, r):
+                            cur = lane_guard[idx]
+                            lane_guard[idx] = code if cur in (0, code) else -1
             target_cells = exit_cells
             centre = (chosen[0][2], chosen[0][3])
         else:
