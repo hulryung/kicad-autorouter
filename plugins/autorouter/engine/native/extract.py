@@ -1030,11 +1030,15 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             centre = (chosen[0][2], chosen[0][3])
         else:
             target_cells = own_cells
+            # No escape lane: the route leaves from the cell at the pad
+            # centre, which is seldom on the pad axis. A fine-pitch pin keeps
+            # the neck width there too, or a power track as wide as the pin
+            # sits off-centre and grazes the neighbouring pad.
             for li in pl:
                 if grid.inside(*centre):
-                    net.endpoints[grid.index(li, *centre)] = (pos.x, pos.y, pos.x, pos.y, net.rules.width)
+                    net.endpoints[grid.index(li, *centre)] = (pos.x, pos.y, pos.x, pos.y, stub_w)
         pad_cells.setdefault(code, []).append((pad, target_cells, centre, fp.GetReference() if fp else "",
-                                               bool(chosen) and stub_w < net.rules.width))
+                                               stub_w < net.rules.width))
 
     # Outlet guards: the first 0.6 mm past each exit must stay free of other
     # nets' via barrels (and their holes), or a neighbour's via dropped right

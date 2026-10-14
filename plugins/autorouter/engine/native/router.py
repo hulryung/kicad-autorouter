@@ -220,9 +220,38 @@ def _simplify(grid: Grid, cells: List[int]):
     return segments, vias
 
 
-def _with_pad_entries(grid: Grid, net: NetInfo, cells: List[int], segments):
+def _necked_end(segments, width: int, at_start: bool, neck_nm: int, end):
+    """The first (or last) segment of a path, narrowed to `width` for up to
+    neck_nm from its pad end `end` (layer, x, y) and split there if it is
+    longer. Segments that carry their own width are left alone."""
+    if not segments:
+        return segments
+    seg = segments[0] if at_start else segments[-1]
+    if len(seg) > 5:
+        return segments
+    layer, x1, y1, x2, y2 = seg
+    if not at_start:
+        x1, y1, x2, y2 = x2, y2, x1, y1                  # walk from the pad end
+    if (layer, x1, y1) != end:
+        return segments                                  # the path leaves the pad cell by a via
+    length = math.hypot(x2 - x1, y2 - y1)
+    if length <= neck_nm:
+        pieces = [(layer, x1, y1, x2, y2, width)]
+    else:
+        mx = int(round(x1 + (x2 - x1) * neck_nm / length))
+        my = int(round(y1 + (y2 - y1) * neck_nm / length))
+        pieces = [(layer, x1, y1, mx, my, width), (layer, mx, my, x2, y2)]
+    if at_start:
+        return pieces + list(segments[1:])
+    return list(segments[:-1]) + [(l, bx, by, ax, ay) + tuple(rest) for l, ax, ay, bx, by, *rest in reversed(pieces)]
+
+
+def _with_pad_entries(grid: Grid, net: NetInfo, cells: List[int], segments, neck_nm: int = 0):
     """Extend a cell path at both ends: grid cell -> exit point -> pad centre,
-    when the end cell is a pad endpoint of this net."""
+    when the end cell is a pad endpoint of this net. With neck_nm, a path
+    leaving a fine-pitch pad whose stub is narrower than the net's width keeps
+    the stub's width for that far (the routes of the main passes get this
+    from their neck region; ties and fanout searches have none)."""
     out = list(segments)
     for cell, at_start in ((cells[0], True), (cells[-1], False)):
         entry = net.endpoints.get(cell)
@@ -231,6 +260,8 @@ def _with_pad_entries(grid: Grid, net: NetInfo, cells: List[int], segments):
         ex, ey, px, py, width = entry
         layer, cx, cy = grid.unpack(cell)
         gx, gy = grid.nm_x(cx), grid.nm_y(cy)
+        if neck_nm and width < net.rules.width:
+            out = _necked_end(out, width, at_start, neck_nm, (layer, gx, gy))
         extra = []
         if (gx, gy) != (ex, ey):
             extra.append((layer, gx, gy, ex, ey, width))
@@ -895,7 +926,7 @@ class Router:
         cells = _smooth(grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, code))
         self._tie_cells = set(cells)
         segments, _ = _simplify(grid, cells)
-        segments = _with_pad_entries(grid, net, cells, segments)
+        segments = _with_pad_entries(grid, net, cells, segments, int(self.opts.neck_length_mm * 1_000_000))
         rp = RoutedPath(code, net.rules.width, segments, [], net.rules.via_diameter, net.rules.via_drill,
                         pid=self.next_pid)
         self.next_pid += 1
@@ -1008,7 +1039,7 @@ class Router:
         if not vias:
             return None                             # it never left the pad's layer
         segments = [s for s in segments if s[0] == layer]   # the pour takes over after the via
-        segments = _with_pad_entries(grid, net, cells, segments)
+        segments = _with_pad_entries(grid, net, cells, segments, int(self.opts.neck_length_mm * 1_000_000))
         rp = RoutedPath(code, net.rules.width, segments, vias, net.rules.via_diameter, net.rules.via_drill,
                         pid=self.next_pid)
         self.next_pid += 1
