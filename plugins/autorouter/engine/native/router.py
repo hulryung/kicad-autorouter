@@ -31,6 +31,7 @@ PathFn = Callable[[RoutedPath], None]
 RemoveFn = Callable[[int], None]                            # path id
 _DEBUG = bool(os.environ.get("AUTOROUTER_DEBUG"))
 RIP_PENALTY = 400                                           # per cell, in cost units (40 straight cells)
+HISTORY_STEP = 100                                          # per rip-up, on each contested cell (10 straight cells)
 MAX_BLOCKERS = 10
 
 
@@ -300,6 +301,10 @@ class Router:
         self.paths: Dict[int, _Path] = {}
         self.next_pid = 1
         self.rips: Dict[Tuple[int, int, int], int] = {}        # (net, a, b) -> times ripped
+        # cell -> extra cost, grown on the cells where a rip-up took one net's
+        # route through another's: the next searches of both nets steer clear,
+        # so two connections that keep ripping each other up settle apart
+        self.history = None
         # union-find over each net's initial clusters, joined by surviving paths
         self.parent: Dict[int, List[int]] = {code: list(range(len(n.clusters)))
                                              for code, n in problem.nets.items()}
@@ -437,7 +442,7 @@ class Router:
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, self.opts.allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=self.routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
-                           **kwargs)
+                           history=self.history, **kwargs)
 
     def _neck_region(self, conn: Connection) -> Set[int]:
         """Cells within neck_length of the connection's fine-pitch exits, on
@@ -486,6 +491,30 @@ class Router:
             if pid and pid in self.paths and self.paths[pid].conn.net != conn.net:
                 out.add(pid)
         return out
+
+    def _remember_conflict(self, conn: Connection, cells: List[int], blockers: Set[int]) -> None:
+        """Raise the history cost of the cells where a soft route ran through
+        the paths it is about to rip up: the cells it crossed them on, and
+        both ends of a via whose barrel lands on them."""
+        routed = self.routed[self._key(conn)]
+        grid = self.grid
+        net = self.p.nets[conn.net]
+        width = conn.width or net.rules.width
+        reach = max(0, int(math.ceil((net.rules.via_diameter - width) / 2 / grid.pitch))) + 1
+        if self.history is None:
+            self.history = array("i", [0]) * grid.size
+        hit: Set[int] = {idx for idx in cells if routed[idx] in blockers}
+        for k in range(1, len(cells)):
+            if cells[k] // grid.plane == cells[k - 1] // grid.plane:
+                continue
+            _, cx, cy = grid.unpack(cells[k])
+            if any(routed[grid.index(layer, cx + dx, cy + dy)] in blockers
+                   for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)
+                   if dx * dx + dy * dy <= reach * reach and grid.inside(cx + dx, cy + dy)
+                   for layer in range(grid.layers)):
+                hit.update((cells[k - 1], cells[k]))
+        for idx in hit:
+            self.history[idx] += HISTORY_STEP
 
     def _rippable(self, pid: int, for_conn: Connection) -> bool:
         path = self.paths.get(pid)
@@ -1102,6 +1131,7 @@ class Router:
                 if len(blockers) > MAX_BLOCKERS:
                     still.append(conn)
                     continue
+                self._remember_conflict(conn, cells, set(blockers))
                 ripped = self._rip(blockers, on_remove)
                 result.ripped += len(ripped)
                 if self._try(conn, opts.via_cost, opts.max_expansions * 2, on_path, cancelled):

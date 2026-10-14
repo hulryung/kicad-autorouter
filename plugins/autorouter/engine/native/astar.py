@@ -31,12 +31,15 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           max_expansions: int, turn_cost: int = 2,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
-          neck_owners=None, neck_region=None, via_guard=None, lane_guard=None) -> Optional[List[int]]:
+          neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
+          history=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
     `rippable(pid)`, cells of other paths that may be ripped up are passable
     at rip_penalty per cell: the result then says which paths are in the way.
+    `history` (cell -> extra cost) is what earlier rip-ups learnt about
+    contested cells: a route pays it so two nets stop fighting over one spot.
     """
     w, plane, nlayers = grid.w, grid.plane, grid.layers
     via_step = via_cost * STRAIGHT
@@ -80,6 +83,8 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 cost += LANE_PENALTY
         if soft and owners[idx] not in (0, net) and routed[idx] != 0:
             cost += rip_penalty
+        if history is not None:
+            cost += history[idx]
         return cost
 
     # The via barrel reaches via_reach cells beyond the track half-width the
