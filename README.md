@@ -160,6 +160,23 @@ per condition (their clearances are honoured through the per-item clearance).
 Impedance widths, pairs and length matching are set on the Signal integrity
 tab instead (next section), which can also write such rules.
 
+### Hand-drawn habits
+
+A few things the router does the way a designer would, before and after the
+search:
+
+- **Direct links**: two pads of a connection within 5 mm of each other, on a
+  shared layer, with a clear straight line (or one 45-degree jog) between
+  them, are joined pad to pad first: a resistor facing its LED, a decoupling
+  capacitor beside the IC pin it serves.
+- **Outward exits on two-pin parts**: a chip resistor, capacitor or LED pad
+  may also be left straight out of the part's end, not only off the ends of
+  the pad's long side, so a track does not leave sideways and loop back.
+- **No acute corners**: where a route would turn back by more than 90 degrees
+  (a pad stub up, then a diagonal down and away), the corner is cut with a
+  0/45/90-degree run straight onto the next segment, or past a few small
+  snapping steps, wherever that is clear.
+
 ## Signal integrity: impedance, pairs, length matching, routing order
 
 The **Signal integrity** tab holds what the net classes cannot say. It is
@@ -192,16 +209,34 @@ project.
   per-layer track width and pair gap, maximum uncoupled length, skew per pair,
   and a length window per length group. KiCad's DRC and its length tuner then
   check against the same targets.
-- **Length matching**: groups of nets (a memory byte lane, an address bus,
-  QSPI, RGMII...) with a tolerance and an optional target (default: the
-  longest member). Pairs of an impedance class with a skew are matched to that
-  skew. After routing, the shorter nets get trapezoid meanders with 45-degree
-  corners on their straight runs, as many and as tall as the room beside each
-  run allows (checked against pads, tracks, vias, keepouts and the board
-  edge at the net's clearance), until each is inside the window. Meander
-  spacing and amplitude come from KiCad's tuning pattern defaults (Board
-  Setup > Length-tuning Patterns). The log reports each group's spread before
-  and after.
+- **Pair exceptions**: a pair that cannot or need not run coupled is
+  connected directly instead, and the log says why: ends closer than 3 mm
+  (coupling does not matter over such a short run, e.g. a USB connector to its
+  ESD part), pins in opposite order at the two ends, ends on different layers,
+  or no room. Each line then takes the most direct route it can, with vias
+  three times as costly. If the whole pair is no longer than the allowed
+  uncoupled length (5 mm), its skew is not matched either. "Write to KiCad"
+  adds a rule after the class rules that lifts the coupling, gap (and, for
+  such short pairs, skew) limits for exactly those pairs. Both thresholds are
+  on the Signal integrity tab.
+- **Length matching, with KiCad's length tuner**: groups of nets (a memory
+  byte lane, an address bus, QSPI, RGMII...) with a tolerance and an optional
+  target (default: the longest member). Pairs of an impedance class with a
+  skew are matched to that skew. Lengths are measured the way KiCad's tuner
+  and DRC do, via heights through the stackup included. After routing, the
+  shorter nets get meanders on a straight run with room for them (checked
+  against pads, tracks, vias, keepouts and the board edge at the net's
+  clearance). Each net's meander is then handed to KiCad as a native **tuning
+  pattern** (the object Route > Tune Length makes), with the group's target
+  window and KiCad's pattern settings (Board Setup > Length-tuning Patterns).
+  When the dialog closes, the plugin runs KiCad's **Edit > Update All Tuning
+  Patterns**, so the final meanders are built by KiCad's own engine; drag a
+  pattern's handles or change its target to retune it by hand. Where KiCad
+  finds no room, the pattern shows "too short", and one Ctrl+Z (that update is
+  its own undo step) brings the router's meanders back. Python cannot create
+  tuning patterns directly, so the plugin loads them from a small temporary
+  board file and moves them onto your board. The log reports each group's
+  spread before and after.
 - **Routing order**: nets are sorted into groups and routed group by group,
   most important first: differential pairs, memory (nets on DDR/SDRAM/PSRAM/
   flash parts, found by part value, and DQ/DQS/FMC-style names), high speed

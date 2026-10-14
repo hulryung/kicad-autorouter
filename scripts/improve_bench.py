@@ -74,6 +74,31 @@ def doubled_back(tracks):
     return out
 
 
+def acute_corners(tracks, pads=()):
+    import pcbnew
+    """Corners sharper than 90 degrees: two segments of one net and layer
+    meeting end to end (and nothing else there) that turn back by more than
+    90 degrees, like a pad stub going up and the route coming back down."""
+    ends = defaultdict(list)
+    for t in tracks:
+        for p, q in ((t.GetStart(), t.GetEnd()), (t.GetEnd(), t.GetStart())):
+            ends[(t.GetNetCode(), t.GetLayer(), p.x, p.y)].append((q.x - p.x, q.y - p.y, t))
+    out = []
+    for (code, layer, x, y), legs in ends.items():
+        if len(legs) != 2:
+            continue
+        (ax, ay, a), (bx, by, b) = legs
+        la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+        if la < 1 or lb < 1:
+            continue
+        cos = (ax * bx + ay * by) / (la * lb)         # angle between the two legs at the corner
+        if 0.05 < cos < 0.999:                          # under 87 degrees, not a straight overlap
+            if any(p.GetNetCode() == code and p.HitTest(pcbnew.VECTOR2I(x, y)) for p in pads):
+                continue                                # hidden in pad copper
+            out.append((a.GetNetname(), x / 1e6, y / 1e6))
+    return out
+
+
 def per_net(board):
     """Track length, vias and layers per net."""
     nets = defaultdict(lambda: {"length_mm": 0.0, "vias": 0, "segments": 0})
@@ -156,6 +181,8 @@ def intent_metrics(board, o, job, si_plan) -> dict:
                               "what": f"{name} {t.GetWidth() / 1e6:.3f} mm, want {want / 1e6:.3f}"})
     # 2. pairs: share of each half's length running at the pair spacing beside the other half
     pairs = []
+    from autorouter.engine.native import tuning as _t
+    kicad_len_all = {names[c]: v for c, v in _t.track_lengths(board).items()}
     seen = set()
     routed_names = set(by_net)
     for name in sorted(routed_names):
@@ -189,15 +216,27 @@ def intent_metrics(board, o, job, si_plan) -> dict:
                 pitch = (t.GetWidth() + (gap or 0)) if gap else None
                 if best is not None and (abs(best - pitch) < 30_000 if pitch else best < 3 * t.GetWidth()):
                     coupled += t.GetLength() / n
-        la = sum(t.GetLength() for t in a)
-        lb = sum(t.GetLength() for t in b)
+        la = kicad_len_all.get(name, sum(t.GetLength() for t in a))
+        lb = kicad_len_all.get(other, sum(t.GetLength() for t in b))
+        exc = next((e for e in job.pair_exceptions if name in e["nets"]), None)
         pairs.append({"pair": f"{name} / {other}", "coupled_pct": round(100 * coupled / total, 1) if total else 0.0,
-                      "skew_mm": round(abs(la - lb) / 1e6, 3), "length_mm": round(max(la, lb) / 1e6, 2)})
+                      "skew_mm": round(abs(la - lb) / 1e6, 3), "length_mm": round(max(la, lb) / 1e6, 2),
+                      # connected directly on purpose (coupling impossible or unnecessary), and why
+                      "exception": exc["text"] if exc else None,
+                      "exception_waives_skew": any(e.get("skew_waived") for e in job.pair_exceptions
+                                                   if name in e["nets"])})
     # 3. length groups after tuning
     groups = []
+    from autorouter.engine.native import tuning
+    kicad_len = {names[c]: v for c, v in tuning.track_lengths(board).items()}      # as KiCad measures (vias too)
     tuned = {g["name"]: g for g in job.tuning}
+    waived = {n for e in job.pair_exceptions if e.get("skew_waived") for n in e["nets"]}
     for g in o.length_groups:
-        lens = {n: sum(t.GetLength() for t in by_net.get(n, [])) for n in g["nets"]}
+        if g.get("pair") and set(g["nets"]) & waived:
+            groups.append({"name": g["name"], "pair": True, "waived": "pair connected directly: coupling and "
+                           "skew not needed", "ok": True, "off_by_mm": {}, "where": None})
+            continue
+        lens = {n: kicad_len.get(n, 0) for n in g["nets"]}
         routed = {n: v for n, v in lens.items() if v > 0}
         if not routed:
             continue
@@ -233,6 +272,8 @@ def intent_metrics(board, o, job, si_plan) -> dict:
         "open_by_group": open_by_group,
         "tuning_log": job.tuning_lines,
         "pairs_routed_coupled": job.pairs,
+        "pair_exceptions": [f"{e['nets'][0]} / {e['nets'][1]}: {e['text']}" for e in job.pair_exceptions],
+        "kicad_tuning_patterns": sum(1 for _ in board.Generators()),
         "pair_log": [f"{n}: {why}" for n, why in job.pair_log],
     }
 
@@ -403,7 +444,7 @@ def main():
         names = {c: n.GetNetname() for c, n in board.GetNetsByNetcode().items()}
         lengths = {names[c]: l for c, l in tuning.track_lengths(board).items()}
         saved = pcbnew.LoadBoard(str(routed_path))     # the rules file goes next to the routed copy
-        si.write_drc_rules(saved, si.drc_rules(board, si_cfg, si_plan, lengths))
+        si.write_drc_rules(saved, si.drc_rules(board, si_cfg, si_plan, lengths, job.pair_exceptions))
 
     tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
     vias = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
@@ -444,6 +485,9 @@ def main():
     disagree = {k: {"routed": a, "reference": b} for k, (a, b) in compared.items() if a and a != b}
     off45 = octilinear_off(tracks)
     doubled = doubled_back(tracks)
+    acute = acute_corners(tracks, list(board.GetPads()))
+    for net, x, y in acute[:5]:
+        issues.append({"kind": "acute_corner", "x": x, "y": y, "what": net})
     for t in off45[:5]:
         issues.append({"kind": "off_45", "x": t.GetStart().x / 1e6, "y": t.GetStart().y / 1e6, "what": t.GetNetname()})
 
@@ -471,7 +515,7 @@ def main():
         "dangling": violations.get(("track_dangling", "warning"), 0),
         "segments": len(tracks), "vias": len(vias),
         "length_mm": round(sum(t.GetLength() for t in tracks) / 1e6, 1),
-        "off_45": len(off45), "doubled_back": len(doubled),
+        "off_45": len(off45), "doubled_back": len(doubled), "acute_corners": len(acute),
         "reference": {"segments": len(ref_tracks), "vias": len([t for t in ref.GetTracks() if t.GetClass() == "PCB_VIA"]),
                       "length_mm": round(sum(t.GetLength() for t in ref_tracks) / 1e6, 1)},
         "escape_side_agreement": f"{len(compared) - len(disagree)} of {len(compared)}",
@@ -498,9 +542,11 @@ def main():
             bb = fp.GetBoundingBox(False)
             spots.append((bb.Centre().x / 1e6, bb.Centre().y / 1e6,
                           max(bb.GetWidth(), bb.GetHeight()) / 2e6 + 2.0, f"around {fp.GetReference()}"))
+        asked = []
         for spec in [s for s in args.focus.split(";") if s.strip()]:
             v = [float(x) for x in spec.split(",")]
-            spots.append((v[0], v[1], v[2] if len(v) > 2 else 3.0, "requested close-up"))
+            asked.append((v[0], v[1], v[2] if len(v) > 2 else 3.0, "requested close-up"))
+        spots = asked + spots                      # the close-ups asked for come first
         taken = []
         for x, y, half, what in spots:
             # skip a spot an earlier close-up of at least its size already shows
@@ -519,7 +565,7 @@ def main():
     metrics["images"] = images
     (out / "metrics.json").write_text(json.dumps(metrics, indent=1), encoding="utf-8")
     print(json.dumps({k: metrics[k] for k in ("routed", "open_nets", "unconnected_after", "drc_errors", "rule_errors",
-                                              "dangling",
+                                              "dangling", "acute_corners",
                                               "off_45", "doubled_back", "length_mm", "vias", "route_seconds",
                                               "escape_side_agreement")}), flush=True)
     if intent:

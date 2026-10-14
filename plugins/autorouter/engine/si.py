@@ -78,6 +78,9 @@ class SiConfig:
     route_order: List[str] = field(default_factory=lambda: list(DEFAULT_ORDER))
     group_patterns: Dict[str, List[str]] = field(default_factory=dict)   # extra patterns per group
     tune_lengths: bool = True
+    kicad_patterns: bool = True                  # meanders handed to KiCad's length tuner as tuning patterns
+    pair_min_span_mm: float = 3.0                # pair ends closer than this: connected directly, not coupled
+    pair_uncoupled_max_mm: float = 5.0           # uncoupled length a pair may have (KiCad rule); shorter pairs: no skew
 
     @classmethod
     def from_dict(cls, d: dict) -> "SiConfig":
@@ -92,6 +95,9 @@ class SiConfig:
         cfg.route_order = order + [g for g in DEFAULT_ORDER if g not in order]
         cfg.group_patterns = {k: list(v) for k, v in (d.get("group_patterns") or {}).items()}
         cfg.tune_lengths = bool(d.get("tune_lengths", True))
+        cfg.kicad_patterns = bool(d.get("kicad_patterns", True))
+        cfg.pair_min_span_mm = float(d.get("pair_min_span_mm", 3.0))
+        cfg.pair_uncoupled_max_mm = float(d.get("pair_uncoupled_max_mm", 5.0))
         return cfg
 
     def to_dict(self) -> dict:
@@ -228,6 +234,9 @@ def apply_to_options(options, cfg: SiConfig, si_plan: Optional[SiPlan]):
     o.route_groups = {k: list(v) for k, v in cfg.group_patterns.items()}
     o.impedance = dict(si_plan.impedance) if si_plan else {}
     o.length_groups = list(si_plan.length_groups) if (si_plan and cfg.tune_lengths) else []
+    o.kicad_tuning_patterns = cfg.kicad_patterns
+    o.pair_min_span_mm = cfg.pair_min_span_mm
+    o.pair_uncoupled_max_mm = cfg.pair_uncoupled_max_mm
     return o
 
 
@@ -294,7 +303,8 @@ def _net_condition(nets: List[str]) -> str:
     return " || ".join(f"A.NetName == '{n}'" for n in nets)
 
 
-def drc_rules(board, cfg: SiConfig, si_plan: SiPlan, lengths: Optional[Dict[str, int]] = None) -> str:
+def drc_rules(board, cfg: SiConfig, si_plan: SiPlan, lengths: Optional[Dict[str, int]] = None,
+              pair_exceptions: Optional[List[dict]] = None) -> str:
     """KiCad custom rules for the intent: per-layer track width (and pair
     gap) of each impedance class, the skew of each pair, the length window of
     each length group (targets of "match the longest" groups from lengths)."""
@@ -318,7 +328,7 @@ def drc_rules(board, cfg: SiConfig, si_plan: SiPlan, lengths: Optional[Dict[str,
                 out.append(f'(rule "{zc.name} pair gap {lname}"\n  (layer "{lname}")\n'
                            f"  (condition \"A.NetClass == '{zc.name}' && A.inDiffPair('*')\")\n"
                            f"  (constraint diff_pair_gap (min {_mm(g - tol)}) (opt {_mm(g)}) (max {_mm(g + 3 * tol)}))\n"
-                           f"  (constraint diff_pair_uncoupled (max 5mm)))")
+                           f"  (constraint diff_pair_uncoupled (max {_mm(int(cfg.pair_uncoupled_max_mm * MM))})))")
         if zc.diff_ohm and zc.skew_mm > 0:
             out.append(f'(rule "{zc.name} skew"\n'
                        f"  (condition \"A.NetClass == '{zc.name}' && A.inDiffPair('*')\")\n"
@@ -332,6 +342,17 @@ def drc_rules(board, cfg: SiConfig, si_plan: SiPlan, lengths: Optional[Dict[str,
         tol = g["tolerance"]
         out.append(f'(rule "length {g["name"]}"\n  (condition "{_net_condition(g["nets"])}")\n'
                    f"  (constraint length (min {_mm(target - tol)}) (opt {_mm(target)}) (max {_mm(target + tol)})))")
+    # pairs the router connected directly (coupling impossible or unnecessary):
+    # later rules win in KiCad, so these lift the coupling limit for them, and
+    # the skew limit too where coupling was not needed at all
+    for e in pair_exceptions or []:
+        cond = _net_condition(e["nets"])
+        rule = (f'(rule "pair exception {e["nets"][0].rsplit("/", 1)[-1]}"\n'
+                f'  (condition "{cond}")\n  (constraint diff_pair_uncoupled (max 1000mm))\n'
+                f'  (constraint diff_pair_gap (min 0mm) (max 1000mm))')
+        if e.get("skew_waived"):
+            rule += "\n  (constraint skew (max 1000mm))"
+        out.append(f"# {e['nets'][0]} / {e['nets'][1]}: {e.get('text', e.get('reason', ''))}\n" + rule + ")")
     out.append(END)
     return "\n".join(out) + "\n"
 

@@ -13,8 +13,8 @@ import wx
 
 from .engine import session, si
 from .engine.options import RouteOptions
-from .engine.native import (apply as native_apply, extract as native_extract, pipeline as native_pipeline,
-                            router as native_router)
+from .engine.native import (apply as native_apply, extract as native_extract, kicad_tuning as native_kicad_tuning,
+                            pipeline as native_pipeline, router as native_router)
 from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless, review as ai_review
 from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                                     SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
@@ -442,9 +442,11 @@ class AutorouterDialog(wx.Dialog):
             try:
                 live = [t for t in self._run_added if str(t.m_Uuid.AsString()) not in self._run_removed]
                 native_apply.trim_overlaps(self.board, live)
-                report = native_pipeline.tune_lengths(self.board, o, status=self._status_now)
+                report = native_pipeline.tune_lengths(self.board, o, status=self._status_now,
+                                                      pair_exceptions=job.pair_exceptions)
                 if report is not None:
                     job.tuning, job.tuning_lines = report.groups, report.lines()
+                    self._kicad_update_wanted = bool(report.kicad_patterns)
             except Exception as e:
                 logger.exception("Finishing the assistant's run")
                 self._append_log(f"[plugin] could not finish the run (overlaps, length matching): {e!r}")
@@ -461,6 +463,7 @@ class AutorouterDialog(wx.Dialog):
                        "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
                        "failed_detail": getattr(result, "failed_detail", []), "escalated": escalated,
                        "length_matching": job.tuning_lines, "pair_log": [list(x) for x in job.pair_log],
+                       "pair_exceptions": job.pair_exceptions,
                        "unconnected_after": self.board.GetConnectivity().GetUnconnectedCount(True)}
             outcome["summary"] = (f"{result.routed} routed ({escalated} on the finer second pass), {len(failed)} failed, "
                                   f"{result.fanout} fanout vias, {result.stitched} stitching vias; "
@@ -794,11 +797,17 @@ class AutorouterDialog(wx.Dialog):
             if not result.cancelled and getattr(self, "_native_opts", None) is not None:
                 try:
                     self._show_progress("Length matching...", None)
-                    report = native_pipeline.tune_lengths(self.board, self._native_opts)
+                    self.si_page.pair_exceptions = list(result.pair_exceptions)
+                    for e in result.pair_exceptions:
+                        self._append_log(f"[plugin] pair {e['nets'][0]} / {e['nets'][1]} connected directly: "
+                                         f"{e['text']}")
+                    report = native_pipeline.tune_lengths(self.board, self._native_opts,
+                                                          pair_exceptions=result.pair_exceptions)
                     if report is not None:
                         result.tuning, result.tuning_lines = report.groups, report.lines()
                         for line in report.lines():
                             self._append_log("[plugin] length matching: " + line)
+                        self._kicad_update_wanted = bool(report.kicad_patterns)
                 except Exception as e:
                     logger.exception("Length matching failed")
                     self._append_log(f"[plugin] length matching failed: {e!r}")
@@ -874,6 +883,11 @@ class AutorouterDialog(wx.Dialog):
             self._cancel = True
         self._save_settings()
         self.si_page.save()
+        if getattr(self, "_kicad_update_wanted", False):
+            # KiCad's length tuner rebuilds the meanders as soon as the editor has the board back
+            self._kicad_update_wanted = False
+            if native_kicad_tuning.request_update():
+                logger.info("Asked KiCad to update all tuning patterns")
         self.EndModal(wx.ID_OK if self.applied else wx.ID_CANCEL)
 
     def _set_busy(self, busy: bool):

@@ -93,6 +93,22 @@ class SiPage(wx.Panel):
         zbox.Add(self._buttons(self.zgrid, PRESETS, lambda c: [c.name, ", ".join(c.nets), f"{c.single_ohm:g}",
                                                                 f"{c.diff_ohm:g}", f"{c.gap_mm:g}", f"{c.skew_mm:g}"]),
                  0, wx.EXPAND | wx.ALL, 2)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.StaticText(self, label="Pairs whose ends are closer than"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.pair_span = wx.SpinCtrlDouble(self, min=0.0, max=50.0, inc=0.5, initial=3.0)
+        self.pair_span.SetDigits(1)
+        row.Add(self.pair_span, 0, wx.LEFT | wx.RIGHT, 4)
+        row.Add(wx.StaticText(self, label="mm are connected directly, without coupling; so are pairs that cannot "
+                                          "couple (crossed pins, no room)."), 0, wx.ALIGN_CENTER_VERTICAL)
+        zbox.Add(row, 0, wx.LEFT | wx.RIGHT | wx.TOP, 4)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.StaticText(self, label="Uncoupled length allowed per pair"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.pair_uncoupled = wx.SpinCtrlDouble(self, min=0.0, max=100.0, inc=0.5, initial=5.0)
+        self.pair_uncoupled.SetDigits(1)
+        row.Add(self.pair_uncoupled, 0, wx.LEFT | wx.RIGHT, 4)
+        row.Add(wx.StaticText(self, label="mm (KiCad rule); a directly connected pair no longer than this "
+                                          "needs no skew matching either."), 0, wx.ALIGN_CENTER_VERTICAL)
+        zbox.Add(row, 0, wx.ALL, 4)
         box.Add(zbox, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
 
         # -- length groups
@@ -105,6 +121,14 @@ class SiPage(wx.Panel):
         self.tune = wx.CheckBox(self, label="Match lengths after routing (pairs to their skew, groups to their target)")
         self.tune.SetValue(True)
         lbox.Add(self.tune, 0, wx.ALL, 4)
+        self.kicad_update = wx.CheckBox(self, label="Hand the meanders to KiCad's length tuner "
+                                                    "(tuning patterns, rebuilt by Update All Tuning Patterns)")
+        self.kicad_update.SetToolTip("Each tuned net's meander becomes a KiCad tuning pattern with the group's "
+                                     "target window. When the dialog closes, KiCad's Edit > Update All Tuning "
+                                     "Patterns rebuilds them with its own meander engine; drag a pattern's handles "
+                                     "or change its target to retune it by hand.")
+        self.kicad_update.SetValue(True)
+        lbox.Add(self.kicad_update, 0, wx.LEFT | wx.BOTTOM, 4)
         box.Add(lbox, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
 
         # -- KiCad
@@ -200,6 +224,9 @@ class SiPage(wx.Panel):
             self._add_row(self.lgrid, [g.name, ", ".join(g.nets), f"{g.tolerance_mm:g}", f"{g.target_mm:g}"])
         self._fill_order(cfg.route_order)
         self.tune.SetValue(cfg.tune_lengths)
+        self.kicad_update.SetValue(cfg.kicad_patterns)
+        self.pair_span.SetValue(cfg.pair_min_span_mm)
+        self.pair_uncoupled.SetValue(cfg.pair_uncoupled_max_mm)
         p = si.config_path(self.board)
         self.where.SetLabel(f"Saved with the board: {p.name}" if p else "")
         self.compute()
@@ -207,8 +234,11 @@ class SiPage(wx.Panel):
     def config(self) -> si.SiConfig:
         cfg = si.SiConfig()
         cfg.stackup = self.stackups[max(0, self.stackup.GetSelection())]
-        self.zgrid.SaveEditControlValue()
-        self.lgrid.SaveEditControlValue()
+        for grid in (self.zgrid, self.lgrid):
+            # commit a cell being typed into; with no editor open there is nothing to commit
+            # (committing then writes the editor's stale text into the cursor cell)
+            if grid.IsCellEditControlShown():
+                grid.SaveEditControlValue()
         for r in range(self.zgrid.GetNumberRows()):
             v = [self.zgrid.GetCellValue(r, c) for c in range(len(Z_COLS))]
             if not v[0].strip() or not _patterns(v[1]):
@@ -222,6 +252,9 @@ class SiPage(wx.Panel):
             cfg.length_groups.append(si.LengthGroup(v[0].strip(), _patterns(v[1]), _num(v[2]) or 1.0, _num(v[3])))
         cfg.route_order = list(self._order_keys)
         cfg.tune_lengths = self.tune.GetValue()
+        cfg.kicad_patterns = self.kicad_update.GetValue()
+        cfg.pair_min_span_mm = self.pair_span.GetValue()
+        cfg.pair_uncoupled_max_mm = self.pair_uncoupled.GetValue()
         return cfg
 
     def save(self):
@@ -231,7 +264,8 @@ class SiPage(wx.Panel):
         if p is None:
             return
         if p.exists() or cfg.impedance or cfg.length_groups or cfg.route_order != si.DEFAULT_ORDER \
-                or cfg.stackup != stk.BOARD:
+                or cfg.stackup != stk.BOARD or not cfg.kicad_patterns or cfg.pair_min_span_mm != 3.0 \
+                or cfg.pair_uncoupled_max_mm != 5.0:
             try:
                 si.save(self.board, cfg)
             except OSError as e:
@@ -261,7 +295,8 @@ class SiPage(wx.Panel):
             from .engine.native import tuning
             names = {c: n.GetNetname() for c, n in self.board.GetNetsByNetcode().items()}
             lengths = {names[c]: v for c, v in tuning.track_lengths(self.board).items()}
-            p = si.write_drc_rules(self.board, si.drc_rules(self.board, cfg, plan, lengths))
+            p = si.write_drc_rules(self.board, si.drc_rules(self.board, cfg, plan, lengths,
+                                                            getattr(self, "pair_exceptions", None)))
             self.save()
             self.log(f"[plugin] DRC rules written to {p.name if p else '(board not saved yet)'}; "
                      "save the board to keep the net classes")

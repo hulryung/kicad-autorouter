@@ -33,6 +33,19 @@ _DEBUG = bool(os.environ.get("AUTOROUTER_DEBUG"))
 RIP_PENALTY = 400                                           # per cell, in cost units (40 straight cells)
 HISTORY_STEP = 100                                          # per rip-up, on each contested cell (10 straight cells)
 MAX_BLOCKERS = 10
+# Why a differential pair is connected directly instead of as a coupled run.
+PAIR_EXCEPTIONS = {
+    "short": "ends too close together: coupling is not needed",
+    "joined": "already connected through other copper",
+    "no_exits": "a pad has no exit to start a coupled run from",
+    "layers": "the ends leave on different layers",
+    "no_map": "no clearance map for the pair width",
+    "no_start": "no room to start or end side by side",
+    "no_path": "no room for a coupled run",
+    "cross": "the pins are in opposite order at the two ends (the lines would cross)",
+    "pinch": "the two lines would come too close at a corner",
+}
+PAIR_UNNECESSARY = ("short", "joined")          # no skew tuning or coupling rules for these either
 PROTECTED_GROUPS = ("pairs", "memory", "high_speed")          # routing groups lower groups may not rip up
 
 
@@ -50,6 +63,8 @@ class RouteResult:
         self.seconds = 0.0
         self.cancelled = False
         self.timed_out = False                           # the time limit cut the run short
+        self.pair_exceptions: List[dict] = []            # pairs connected directly instead of coupled, and why
+        self.direct_links = 0                            # connections joined pad to pad before the search
 
 
 class _Path:
@@ -297,6 +312,93 @@ def _fold_back(segments):
             if (folded[1], folded[2]) != (folded[3], folded[4]):
                 out.append(folded)
     return out
+
+
+OCTI = [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+
+
+def _cut_acute(grid: Grid, segments, free) -> list:
+    """No corner sharper than 90 degrees: where a route turns back on itself
+    (a pad stub straight up, then a diagonal down and away), the corner is
+    cut: from the point before it, a 0/45/90-degree run straight onto the
+    next segment, where that run is clear. A designer never leaves an acute
+    corner; it also traps etchant and pinches clearance."""
+    segs = list(segments)
+    changed = True
+    rounds = 0
+    while changed and rounds < 8:
+        changed = False
+        rounds += 1
+        for i in range(len(segs) - 1):
+            s1, s2 = segs[i], segs[i + 1]
+            if s1[0] != s2[0] or (s1[3], s1[4]) != (s2[1], s2[2]):
+                continue
+            ax, ay, bx, by, cx, cy = s1[1], s1[2], s1[3], s1[4], s2[3], s2[4]
+            u1 = (bx - ax, by - ay)
+            u2 = (cx - bx, cy - by)
+            if u1[0] * u2[0] + u1[1] * u2[1] >= 0:
+                continue                                   # 90 degrees or wider
+            l2 = math.hypot(*u2)
+            if l2 == 0:
+                continue
+            best = None
+            for dx, dy in OCTI:
+                # A + s*d == B + t*u2/|u2|, solve for s, t
+                ex, ey = u2[0] / l2, u2[1] / l2
+                det = dx * (-ey) - dy * (-ex)
+                if abs(det) < 1e-9:
+                    continue
+                rx, ry = bx - ax, by - ay
+                sv = (rx * (-ey) - ry * (-ex)) / det
+                tv = (dx * ry - dy * rx) / det
+                if sv <= 0 or tv <= 0 or tv > l2:
+                    continue
+                qx, qy = int(round(bx + ex * tv)), int(round(by + ey * tv))
+                if best is not None and tv >= best[0]:
+                    continue
+                cells = grid.segment_cells(s1[0], ax, ay, qx, qy, grid.pitch // 2)
+                if all(free(c) for c in cells):
+                    best = (tv, qx, qy)
+            if best is None:
+                # skip ahead instead: from A straight (or with one 45-degree
+                # jog) to the end of one of the next few segments, which takes
+                # out the little snapping steps a route turns back after
+                done = False
+                for k in range(1, 4):
+                    if i + k >= len(segs):
+                        break
+                    sk = segs[i + k]
+                    prev = segs[i + k - 1]
+                    if sk[0] != s1[0] or (prev[3], prev[4]) != (sk[1], sk[2]):
+                        break
+                    dx_, dy_ = sk[3], sk[4]
+                    for at_end in (False, True):
+                        pts = jog(ax, ay, dx_, dy_, at_end)
+                        if any((pts[j], pts[j + 1]) == (pts[j + 1], pts[j]) for j in range(len(pts) - 1)):
+                            continue
+                        clear = all(free(c) for j in range(len(pts) - 1)
+                                    for c in grid.segment_cells(s1[0], *pts[j], *pts[j + 1], grid.pitch // 2))
+                        if not clear:
+                            continue
+                        w1 = s1[5:] if len(s1) > 5 else ()
+                        segs[i:i + k + 1] = [(s1[0], pts[j][0], pts[j][1], pts[j + 1][0], pts[j + 1][1]) + w1
+                                             for j in range(len(pts) - 1) if pts[j] != pts[j + 1]]
+                        done = True
+                        break
+                    if done:
+                        break
+                if done:
+                    changed = True
+                    break
+                continue
+            _, qx, qy = best
+            w1 = s1[5:] if len(s1) > 5 else ()
+            new1 = (s1[0], ax, ay, qx, qy) + w1
+            new2 = (s2[0], qx, qy, cx, cy) + (s2[5:] if len(s2) > 5 else ())
+            segs[i:i + 2] = [new1] + ([new2] if (qx, qy) != (cx, cy) else [])
+            changed = True
+            break
+    return segs
 
 
 def _merge_collinear(segments):
@@ -595,6 +697,8 @@ class Router:
         else:
             segments, vias = _simplify(self.grid, cells)
         segments = _with_pad_entries(self.grid, net, cells, segments)
+        if self.opts.cut_acute:
+            segments = _cut_acute(self.grid, segments, free)
         if net.layer_widths:
             # controlled impedance: each layer's own width (neck segments keep theirs)
             segments = [sg if len(sg) > 5 or net.layer_widths.get(sg[0], width) == width
@@ -645,6 +749,118 @@ class Router:
                 return c
         return next(iter(cells), None)
 
+    def _direct(self, conn: Connection, on_path) -> bool:
+        """Two pads of a connection close together with nothing in between
+        (a resistor facing its LED, a capacitor beside the IC pin it
+        decouples): joined by a straight track, or one with a single 45-degree
+        jog, from pad to pad on a layer both pads have, the way a designer
+        draws it, instead of leaving each pad along its escape and meeting
+        round the back. Tried at the full width, then at the neck width."""
+        grid, p = self.grid, self.p
+        net = p.nets[conn.net]
+        if conn.pair or self._find(conn.net, conn.a) == self._find(conn.net, conn.b):
+            return False
+        ca, cb = net.clusters[conn.a], net.clusters[conn.b]
+        limit = self.opts.direct_max_mm * 1_000_000 / grid.pitch
+        widths = [conn.width or net.rules.width]
+        if conn.neck and conn.neck < widths[0]:
+            widths.append(conn.neck)
+        def pads(cluster):
+            # pad centres (nm) per layer, from the escape records of the
+            # cluster's exit cells (the cluster's anchors are those exit cells)
+            out = {}
+            for idx in cluster.cells:
+                e = net.endpoints.get(idx)
+                if e is not None:
+                    layer = grid.unpack(idx)[0]
+                    out.setdefault((layer, e[2], e[3]), None)
+            return list(out)
+
+        pa, pb = pads(ca), pads(cb)
+        best = None
+        for (la, ax, ay) in pa:
+            for (lb, bx, by) in pb:
+                if la != lb or not self.routable[la]:
+                    continue                             # both pads on the same layer
+                layer = la
+                d = max(abs(ax - bx), abs(ay - by)) / grid.pitch
+                if d == 0 or d > limit:
+                    continue
+                if True:
+                    for w in widths:
+                        owners = p.owners.get((w, net.rules.clearance))
+                        if owners is None:
+                            continue
+                        for at_end in (False, True):
+                            pts = jog(ax, ay, bx, by, at_end)
+                            cells = []
+                            ok = True
+                            for i in range(len(pts) - 1):
+                                run = grid.segment_cells(layer, *pts[i], *pts[i + 1], grid.pitch // 2)
+                                for idx in run:
+                                    g = p.lane_guard[idx] if p.lane_guard is not None else 0
+                                    if owners[idx] not in (0, net.code) or (g and g != net.code):
+                                        ok = False
+                                        break
+                                if not ok:
+                                    break
+                                cells += run
+                            if not ok:
+                                continue
+                            length = sum(math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+                                         for i in range(len(pts) - 1))
+                            cand = (length, -w, layer, pts, cells, w)
+                            if best is None or cand[:2] < best[:2]:
+                                best = cand
+                            break                        # the first jog that fits will do
+                        if best is not None and best[5] == w:
+                            break                        # full width fits: no need for the neck
+        if best is None:
+            return False
+        _, _, layer, pts, cells, w = best
+        lw = net.layer_widths.get(layer, w) if net.layer_widths else w
+        segments = [(layer, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]) + ((lw,) if lw != w else ())
+                    for i in range(len(pts) - 1)]
+        rp = RoutedPath(net.code, w, segments, [], net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid)
+        self.next_pid += 1
+        path = _Path(rp.pid, conn, rp, cells)
+        self.paths[rp.pid] = path
+        self._claim(path)
+        self.parent[conn.net][self._find(conn.net, conn.a)] = self._find(conn.net, conn.b)
+        if on_path:
+            on_path(rp)
+        return True
+
+    def _pair_fail(self, name: str, code: str, text: str) -> None:
+        """Why a pair could not be routed coupled (the router then routes it as an exception)."""
+        self.pair_log = getattr(self, "pair_log", [])
+        self.pair_log.append((name, text))
+        self._pair_why = code
+
+    def _route_exception(self, ca: Connection, cb: Connection, via_cost: int, cap: int, on_path, cancelled,
+                         failed: List[Connection]) -> None:
+        """A pair that cannot or need not run coupled: each line is connected
+        directly, as a designer would draw a short or awkward pair by hand,
+        staying on its layer where it can (vias cost several times more, then
+        the normal cost if that finds nothing)."""
+        why = getattr(self, "_pair_why", "") or "no_path"
+        na, nb = self.p.nets[ca.net], self.p.nets[cb.net]
+        if not any(e["nets"] == [na.name, nb.name] and e["reason"] == why for e in self.pair_exceptions):
+            # exempt_skew: coupling was not needed here; whether the skew is
+            # waived too depends on the whole pair being short (decided after routing)
+            self.pair_exceptions.append({"nets": [na.name, nb.name], "reason": why,
+                                         "text": PAIR_EXCEPTIONS.get(why, why),
+                                         "exempt_skew": why in PAIR_UNNECESSARY})
+        factor = max(1, self.opts.pair_direct_via_factor)
+        for c in (ca, cb):
+            if self.opts.direct_links and self._direct(c, on_path):
+                continue
+            if self._try(c, via_cost * factor, cap, on_path, cancelled):
+                continue
+            if factor > 1 and self._try(c, via_cost, cap, on_path, cancelled):
+                continue
+            failed.append(c)
+
     def _try_pair(self, ca: Connection, cb: Connection, via_cost: int, cap: int, on_path, cancelled) -> bool:
         """Route two connections of a differential pair as one coupled track:
         a centreline as wide as both tracks and their gap is searched, then
@@ -654,8 +870,9 @@ class Router:
         p, grid = self.p, self.grid
         na, nb = p.nets[ca.net], p.nets[cb.net]
         self.pair_log = getattr(self, 'pair_log', [])
+        self._pair_why = ""
         if self._find(ca.net, ca.a) == self._find(ca.net, ca.b) or self._find(cb.net, cb.a) == self._find(cb.net, cb.b):
-            self.pair_log.append((na.name, 'already joined'))
+            self._pair_fail(na.name, 'joined', 'already joined')
             return False
         # match the ends: B's clusters that share footprints with A's
         a1, a2 = na.clusters[ca.a], na.clusters[ca.b]
@@ -668,27 +885,27 @@ class Router:
         ea1, ea2 = self._exit_of(ca.net, ca.a), self._exit_of(ca.net, ca.b)
         eb1, eb2 = self._exit_of(cb.net, cb_a), self._exit_of(cb.net, cb_b)
         if None in (ea1, ea2, eb1, eb2):
-            self.pair_log.append((na.name, 'no exits'))
+            self._pair_fail(na.name, 'no_exits', 'no exits')
             return False
         la, xa1, ya1 = grid.unpack(ea1)
         lb, xb1, yb1 = grid.unpack(eb1)
         la2, xa2, ya2 = grid.unpack(ea2)
         lb2, xb2, yb2 = grid.unpack(eb2)
         if la != lb or la2 != lb2:
-            self.pair_log.append((na.name, 'exits on different layers'))
+            self._pair_fail(na.name, 'layers', 'exits on different layers')
             return False
         w, gap = na.pair_width or na.rules.width, na.pair_gap
         W = 2 * w + gap
         key = (W, na.rules.clearance)
         owners = p.owners.get(key)
         if owners is None:
-            self.pair_log.append((na.name, 'no owner map for pair width'))
+            self._pair_fail(na.name, 'no_map', 'no owner map for pair width')
             return False
         d = (w + gap) / 2.0
 
         span = math.hypot(xa2 - xa1, ya2 - ya1)          # cells between the two ends
-        if span * grid.pitch < 3_000_000:
-            self.pair_log.append((na.name, 'ends closer than 3 mm: routed separately'))
+        if span * grid.pitch < self.opts.pair_min_span_mm * 1_000_000:
+            self._pair_fail(na.name, 'short', f'ends closer than {self.opts.pair_min_span_mm:g} mm')
             return False
         walk = max(1, min(int(4_000_000 / grid.pitch), int(span * 0.45)))
 
@@ -717,7 +934,7 @@ class Router:
         s_list = usable(starts(xa1, ya1, xb1, yb1, la, ca.net, ea1))
         g_list = usable(starts(xa2, ya2, xb2, yb2, la2, ca.net, ea2))
         if not s_list or not g_list:
-            self.pair_log.append((na.name, f'no coupled start/goal (starts {len(s_list)}, goals {len(g_list)})'))
+            self._pair_fail(na.name, 'no_start', f'no coupled start/goal (starts {len(s_list)}, goals {len(g_list)})')
             return False
         # couple as early as possible: starting further out costs extra, and
         # only the nearest usable goal rows are offered
@@ -730,7 +947,7 @@ class Router:
                             self.horizontal, via_cost, False, 0, cap, self.opts.turn_cost, cancelled,
                             also_ok=cb.net, source_costs=s_costs, routable=self.routable, via_guard=p.via_guard, lane_guard=p.lane_guard)
         if not cells or len(cells) < 2:
-            self.pair_log.append((na.name, 'no coupled path'))
+            self._pair_fail(na.name, 'no_path', 'no coupled path')
             return False
         own_cells = set(cells)
         cells = _smooth(grid, cells, lambda idx: idx in own_cells or owners[idx] in (0, ca.net, cb.net))
@@ -748,7 +965,7 @@ class Router:
         sa = side_of(grid.nm_x(xa1), grid.nm_y(ya1), 0)
         sa_end = side_of(grid.nm_x(xa2), grid.nm_y(ya2), len(points) - 2)
         if sa != sa_end:
-            self.pair_log.append((na.name, 'pair would cross'))
+            self._pair_fail(na.name, 'cross', 'pair would cross')
             return False
         paths = []
         for net, conn, side, e1, e2, cl_a, cl_b in ((na, ca, sa, ea1, ea2, ca.a, ca.b),
@@ -800,7 +1017,7 @@ class Router:
         for sa_ in paths[0][0].segments:
             for sb_ in paths[1][0].segments:
                 if _segment_distance(sa_[1:5], sb_[1:5]) < need:
-                    self.pair_log.append((na.name, 'halves would pinch: routed separately'))
+                    self._pair_fail(na.name, 'pinch', 'halves would pinch: routed separately')
                     self.next_pid -= 2
                     return False
         for rp, conn, cl_a, cl_b in paths:
@@ -927,6 +1144,8 @@ class Router:
         self._tie_cells = set(cells)
         segments, _ = _simplify(grid, cells)
         segments = _with_pad_entries(grid, net, cells, segments, int(self.opts.neck_length_mm * 1_000_000))
+        if self.opts.cut_acute:
+            segments = _cut_acute(grid, segments, lambda idx: idx in own_cells or owners[idx] in (0, code))
         rp = RoutedPath(code, net.rules.width, segments, [], net.rules.via_diameter, net.rules.via_drill,
                         pid=self.next_pid)
         self.next_pid += 1
@@ -1003,6 +1222,8 @@ class Router:
         if (vxn, vyn) != (gx, gy):
             pts = run_pts[0] or jog(gx, gy, vxn, vyn)
             segments += [(layer, pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1], stub_w) for k in range(len(pts) - 1)]
+        if self.opts.cut_acute:
+            segments = _cut_acute(grid, segments, lambda idx: own[idx] in (0, code))
         rp = RoutedPath(code, net.rules.width, _merge_collinear(segments), [(vxn, vyn)],
                         net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid)
         self.next_pid += 1
@@ -1040,6 +1261,9 @@ class Router:
             return None                             # it never left the pad's layer
         segments = [s for s in segments if s[0] == layer]   # the pour takes over after the via
         segments = _with_pad_entries(grid, net, cells, segments, int(self.opts.neck_length_mm * 1_000_000))
+        if self.opts.cut_acute:
+            own_cells = set(cells)
+            segments = _cut_acute(grid, segments, lambda idx: idx in own_cells or owners[idx] in (0, code))
         rp = RoutedPath(code, net.rules.width, segments, vias, net.rules.via_diameter, net.rules.via_drill,
                         pid=self.next_pid)
         self.next_pid += 1
@@ -1118,6 +1342,17 @@ class Router:
         # not only between connections.
         cancelled = stop
 
+        # 0. pads close together with a clear line between them: a direct track
+        self.direct_links = 0
+        if opts.direct_links:
+            for conn in sorted(queue, key=lambda c: c.estimate):
+                if stop():
+                    break
+                if self._direct(conn, on_path):
+                    self.direct_links += 1
+                    done += 1
+            report(f"{self.direct_links} pads joined directly", "direct links: ")
+
         # 1. plain pass; a differential pair's two connections go together
         partners = {}
         for conn in queue:
@@ -1125,6 +1360,7 @@ class Router:
                 partners.setdefault(conn.pair, []).append(conn)
         handled = set()
         self.pairs_routed = 0
+        self.pair_exceptions: List[dict] = []
         for conn in queue:
             if id(conn) in handled:
                 continue
@@ -1141,10 +1377,9 @@ class Router:
                     done += 2
                     report(self.p.nets[ca.net].name)
                     continue
-                for c in (ca, cb):                 # fall back to separate routes
-                    if not self._try(c, opts.via_cost, opts.max_expansions, on_path, cancelled):
-                        failed.append(c)
-                    done += 1
+                # an exception: coupling impossible or unnecessary, connect each line directly
+                self._route_exception(ca, cb, opts.via_cost, opts.max_expansions, on_path, cancelled, failed)
+                done += 2
                 report(self.p.nets[ca.net].name)
                 continue
             if not self._try(conn, opts.via_cost, opts.max_expansions, on_path, cancelled):
@@ -1297,6 +1532,8 @@ class Router:
         result.shoved = self.shoved
         result.fanout = len(fanout_paths)
         result.pairs = getattr(self, "pairs_routed", 0)
+        result.pair_exceptions = list(getattr(self, "pair_exceptions", []))
+        result.direct_links = getattr(self, "direct_links", 0)
         result.pair_log = getattr(self, "pair_log", [])
         result.seconds = time.time() - started
         return result

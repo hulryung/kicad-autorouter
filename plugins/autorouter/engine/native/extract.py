@@ -146,7 +146,7 @@ def tight_pads(fp, limit: int) -> Set[str]:
 
 def pad_escape(pad, fp, rules: NetRules, pitch: int,
                towards: Optional[Tuple[int, int]] = None,
-               then: Optional[Tuple[int, int]] = None) -> Optional[List[Tuple[int, int]]]:
+               then: Optional[Tuple[int, int]] = None, outward: bool = False) -> Optional[List[Tuple[int, int]]]:
     """Where a track may leave an SMD pad: points on the pad's long axis, just
     far enough past either pad end that the track is clear of the neighbouring
     pads (clearance + half width + one cell). The side facing `towards` (the
@@ -154,8 +154,11 @@ def pad_escape(pad, fp, rules: NetRules, pitch: int,
     from the footprint centre. When `towards` sits beside the pad rather than
     off one of its ends (a USB-C receptacle's A6 next to B6), it says nothing
     about the side and `then` (the nearest pad of the net on another
-    footprint) decides instead. None for through-hole pads, which can be
-    entered from any side."""
+    footprint) decides instead. With outward (a two-pin part: resistor,
+    capacitor, LED), the side of the pad facing away from the part is an
+    exit too: that is how a designer leaves a chip resistor, straight out of
+    its end, rather than off the corners of the pad. None for through-hole
+    pads, which can be entered from any side."""
     if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN):
         return None
     size = pad.GetSize()
@@ -174,10 +177,19 @@ def pad_escape(pad, fp, rules: NetRules, pitch: int,
     if towards is not None and then is not None \
             and abs(axis[0] * (towards[0] - pos.x) + axis[1] * (towards[1] - pos.y)) <= pitch:
         towards = then
+    dirs = [(axis[0], axis[1], reach), (-axis[0], -axis[1], reach)]
+    if outward:
+        # the short axis, on the side away from the part's centre
+        nx, ny = -axis[1], axis[0]
+        if nx * (pos.x - centre.x) + ny * (pos.y - centre.y) < 0:
+            nx, ny = -nx, -ny
+        short = min(sx, sy) / 2
+        if abs(nx * (pos.x - centre.x) + ny * (pos.y - centre.y)) > short / 2:
+            dirs.append((nx, ny, short + rules.clearance + rules.width / 2 + pitch))
     options = []
-    for sign in (1, -1):
-        ex = pos.x + sign * axis[0] * reach
-        ey = pos.y + sign * axis[1] * reach
+    for ux, uy, r in dirs:
+        ex = pos.x + ux * r
+        ey = pos.y + uy * r
         if towards is not None:
             score = -((ex - towards[0]) ** 2 + (ey - towards[1]) ** 2)   # nearer the target first
         else:
@@ -869,7 +881,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         ref = fp.GetReference() if fp else ""
         abroad = [q for q, r in zip(positions_by_net[code], refs_by_net[code]) if r != ref]
         then = min(abroad, key=lambda q: (q[0] - pos.x) ** 2 + (q[1] - pos.y) ** 2) if abroad else None
-        escapes = pad_escape(pad, fp, net.rules, pitch, towards, then)
+        two_pin = options.outward_exits and fp is not None and sum(1 for _ in fp.Pads()) <= 2
+        escapes = pad_escape(pad, fp, net.rules, pitch, towards, then, outward=two_pin)
         if escapes and fp is not None and options.neck_down:
             key = fp.GetReference()
             if key not in tight_by_fp:
@@ -879,7 +892,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 stub_w = neck_width(board, net.rules)
         pad_key = (fp.GetReference() if fp else "", pad.GetNumber())
         remembered = options.escape_sides.get(pad_key)
-        if escapes and len(escapes) == 2 and remembered is not None:
+        if escapes and len(escapes) >= 2 and remembered is not None:
             # an earlier pass of this job chose the side before its vias went
             # in; keep it, so those vias do not flip the choice
             escapes.sort(key=lambda e: (e[0] - remembered[0]) ** 2 + (e[1] - remembered[1]) ** 2)

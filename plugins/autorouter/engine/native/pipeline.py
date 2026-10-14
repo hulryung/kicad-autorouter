@@ -37,6 +37,7 @@ class JobResult:
     timed_out: bool = False                                # the time limit cut a pass short
     tuning: List[dict] = field(default_factory=list)       # length groups: target, lengths before/after
     tuning_lines: List[str] = field(default_factory=list)
+    pair_exceptions: List[dict] = field(default_factory=list)   # pairs connected directly, and why
 
 
 def fine_options(options: NativeOptions, failed_nets: List[str], board) -> NativeOptions:
@@ -156,6 +157,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.cancelled = result.cancelled
     out.timed_out = result.timed_out
     out.failed = sorted({problem.nets[c.net].name for c in result.failed})
+    out.pair_exceptions = list(getattr(result, "pair_exceptions", []))
 
     # the finer pass needs room in the time limit (its board read alone takes a while)
     time_for_more = not limit or remaining() > 60.0
@@ -219,20 +221,44 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
         out.stats["trimmed"] = native_apply.trim_overlaps(board, live)
     if apply_paths and not (cancelled and cancelled()):
-        report = tune_lengths(board, options, status)
+        report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
             out.tuning, out.tuning_lines = report.groups, report.lines()
     return out
 
 
-def tune_lengths(board, options: NativeOptions, status=None):
+def waived_skew(board, options: NativeOptions, pair_exceptions) -> set:
+    """Nets of pairs whose skew does not matter: the router waived their
+    coupling as unnecessary and the whole pair is no longer than the
+    uncoupled length allowed (a pair's few millimetres between a connector
+    and its ESD part). Marks those exceptions with "skew_waived"."""
+    out = set()
+    by_name = {n.GetNetname(): c for c, n in board.GetNetsByNetcode().items() if c > 0}
+    lengths = native_tuning.track_lengths(board)
+    limit = options.pair_uncoupled_max_mm * 1_000_000
+    for e in pair_exceptions or []:
+        longest = max(lengths.get(by_name.get(n, -1), 0) for n in e["nets"])
+        e["skew_waived"] = bool(e.get("exempt_skew") and longest <= limit)
+        if e["skew_waived"]:
+            out |= set(e["nets"])
+    return out
+
+
+def tune_lengths(board, options: NativeOptions, status=None, pair_exceptions=None):
     """Length matching after routing (and after the overlap merge): the
-    options' length groups get meanders. None when there is nothing to tune.
-    Main thread only (it edits the board)."""
+    options' length groups get meanders, wrapped in KiCad tuning patterns.
+    A pair whose coupling the router waived as unnecessary (ends too close)
+    is not skew-tuned either. None when there is nothing to tune. Main thread
+    only (it edits the board)."""
     if not options.tune_lengths or not options.length_groups:
         return None
+    waived = waived_skew(board, options, pair_exceptions)
+    groups = [g for g in options.length_groups if not (g.get("pair") and set(g["nets"]) & waived)]
+    if not groups:
+        return None
     try:
-        report = native_tuning.tune(board, options.length_groups, status=status, removed_sink=_REMOVED)
+        report = native_tuning.tune(board, groups, status=status, removed_sink=_REMOVED,
+                                    kicad_patterns=options.kicad_tuning_patterns)
     except Exception as e:
         if status:
             status(f"Length matching failed: {e!r}")

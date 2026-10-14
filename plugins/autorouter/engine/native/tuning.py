@@ -23,6 +23,8 @@ class TuneReport:
     groups: List[dict] = field(default_factory=list)     # per group: name, target, before/after per net
     added: List[object] = field(default_factory=list)    # board items created
     removed: int = 0
+    patterns: List[dict] = field(default_factory=list)   # one per tuned net: what a KiCad tuning pattern needs
+    kicad_patterns: int = 0                              # how many became KiCad tuning patterns on the board
 
     def lines(self) -> List[str]:
         out = []
@@ -31,7 +33,23 @@ class TuneReport:
             out.append(f"{g['name']}: target {mm(g['target'])} mm +- {mm(g['tolerance'])}: "
                        f"spread {mm(g['spread_before'])} -> {mm(g['spread_after'])} mm"
                        + ("" if g["ok"] else f" (still off: {', '.join(g['short'])})"))
+        if self.kicad_patterns:
+            out.append(f"{self.kicad_patterns} meander(s) are KiCad tuning patterns: KiCad's length tuner "
+                       "rebuilds them (Edit > Update All Tuning Patterns); where it finds no room a pattern "
+                       "shows 'too short', and Ctrl+Z after that update brings the router's meanders back")
         return out
+
+
+def kicad_corner_percent(board) -> int:
+    """KiCad's corner size for tuning patterns (Board Setup > Length-tuning Patterns)."""
+    import json
+    from pathlib import Path
+    try:
+        pro = Path(board.GetFileName()).with_suffix(".kicad_pro")
+        d = json.loads(pro.read_text(encoding="utf-8"))["board"]["design_settings"]["tuning_pattern_settings"]
+        return int(d["single_track_defaults"]["corner_radius_percentage"])
+    except Exception:
+        return 80
 
 
 def kicad_pattern_defaults(board, amin_nm: int, amax_nm: int) -> Tuple[int, int, int]:
@@ -52,16 +70,67 @@ def kicad_pattern_defaults(board, amin_nm: int, amax_nm: int) -> Tuple[int, int,
     return spacing, amin_nm, amax_nm
 
 
-def track_lengths(board, codes=None) -> Dict[int, int]:
-    """Net code -> length of its tracks (nm)."""
+def layer_heights(board) -> Dict[int, Tuple[float, float]]:
+    """KiCad layer id -> (top, bottom) of that copper in the stackup, nm from
+    the top surface. From the board's stackup when it has one, else the board
+    thickness shared evenly."""
+    from .. import stackup as stk
+    ids = list(board.GetEnabledLayers().CuStack())[:board.GetCopperLayerCount()]
+    st = stk.board_stackup(board)
+    out: Dict[int, Tuple[float, float]] = {}
+    if st is not None and st.layers == len(ids):
+        z = 0.0
+        for i, lid in enumerate(ids):
+            t = st.copper_mm[i] * 1e6
+            out[lid] = (z, z + t)
+            z += t + (st.dielectrics[i].thickness_mm * 1e6 if i < len(st.dielectrics) else 0)
+        return out
+    total = float(board.GetDesignSettings().GetBoardThickness())
+    step = total / max(1, len(ids) - 1)
+    for i, lid in enumerate(ids):
+        out[lid] = (i * step, i * step)
+    return out
+
+
+def track_lengths(board, codes=None, vias: bool = True) -> Dict[int, int]:
+    """Net code -> its length the way KiCad's length tuner and DRC measure it
+    (nm): the tracks, plus each via's height through the stackup between the
+    outermost copper layers the net uses there."""
     out: Dict[int, int] = {}
+    ends: Dict[Tuple[int, int, int], set] = {}
+    via_list = []
     for t in board.GetTracks():
-        if t.GetClass() not in ("PCB_TRACK", "PCB_ARC"):
-            continue
         c = t.GetNetCode()
         if c <= 0 or (codes is not None and c not in codes):
             continue
+        if t.GetClass() == "PCB_VIA":
+            via_list.append(t)
+            continue
+        if t.GetClass() not in ("PCB_TRACK", "PCB_ARC"):
+            continue
         out[c] = out.get(c, 0) + int(t.GetLength())
+        if vias:
+            for p in (t.GetStart(), t.GetEnd()):
+                ends.setdefault((c, p.x, p.y), set()).add(t.GetLayer())
+    if vias and via_list:
+        heights = layer_heights(board)
+        pads: Dict[int, list] = {}
+        for pad in board.GetPads():
+            if pad.GetNetCode() > 0:
+                pads.setdefault(pad.GetNetCode(), []).append(pad)
+        for v in via_list:
+            c = v.GetNetCode()
+            p = v.GetPosition()
+            used = set(ends.get((c, p.x, p.y), set()))
+            for pad in pads.get(c, []):
+                if pad.HitTest(p):
+                    used |= {l for l in pad.GetLayerSet().CuStack() if l in heights}
+            used = [l for l in used if l in heights]
+            if len(used) < 2:
+                continue
+            top = min(heights[l][0] for l in used)
+            bottom = max(heights[l][1] for l in used)
+            out[c] = out.get(c, 0) + int(bottom - top)
     return out
 
 
@@ -304,8 +373,16 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
     w = max(t.GetWidth() for t in tracks)
     p = float(max(spacing, w + clr))
     slots: List[_Slot] = []
+    per_track: List[List[_Slot]] = []
     for t in tracks:
-        slots += _slots(room, t, p, float(amin), float(amax), clr, avoid_net)
+        found = _slots(room, t, p, float(amin), float(amax), clr, avoid_net)
+        per_track.append(found)
+        slots += found
+        if sum(_extra(sl.amax, p)[0] for sl in found) >= need:
+            # one straight run holds it all: keep the meander in one place (one
+            # KiCad tuning pattern per net, the way the length tuner makes them)
+            slots = found
+            break
         if sum(_extra(sl.amax, p)[0] for sl in slots) >= need * 1.5:
             break                                    # enough room found; no need to survey the rest
     if not slots:
@@ -352,22 +429,35 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
         by_track.setdefault(id(sl.track), (sl.track, []))[1].append((sl.x0, sl.side, a))
     new, removed = [], []
     added = 0.0
+    pieces = []
     for track, bumps in by_track.values():
         before = track.GetLength()
+        s_, e_ = track.GetStart(), track.GetEnd()
+        base = (track.GetLayer(), s_.x, s_.y, e_.x, e_.y, track.GetWidth())
         items = _rebuild(board, room, track, bumps, p)
-        added += sum(i.GetLength() for i in items) - before
+        gained = sum(i.GetLength() for i in items) - before
+        added += gained
         new += items
         removed.append(track)
+        pieces.append({"base": base, "items": items, "gained": gained, "spacing": int(p),
+                       "amplitudes": [a for _, _, a in bumps]})
+    lengthen.last_pieces = pieces
     return added, new, removed
 
 
 def tune(board, groups: List[dict], status: Optional[Callable[[str], None]] = None,
          spacing_nm: int = 0, amin_nm: int = 200_000, amax_nm: int = 1_000_000,
-         removed_sink: Optional[list] = None) -> TuneReport:
+         removed_sink: Optional[list] = None, kicad_patterns: bool = True,
+         skip_nets: Optional[set] = None) -> TuneReport:
     """Bring each group's nets to its target length (the longest member, or
     the group's own target) within its tolerance. groups: [{"name", "nets":
     [net names], "tolerance": nm, "target": nm or 0}]. Meander spacing and
-    amplitudes default to KiCad's tuning pattern defaults."""
+    amplitudes default to KiCad's tuning pattern defaults. With kicad_patterns
+    each tuned net's meander is wrapped in a KiCad tuning pattern (base line,
+    target length window, spacing and amplitudes), so KiCad's length tuner owns
+    it: it shows the pattern's handles and "Edit > Update All Tuning Patterns"
+    rebuilds it with KiCad's own meander engine. skip_nets: names not tuned
+    (pairs whose coupling was waived as unnecessary)."""
     say = status or (lambda t: None)
     report = TuneReport()
     if not spacing_nm:
@@ -391,6 +481,8 @@ def tune(board, groups: List[dict], status: Optional[Callable[[str], None]] = No
         if g.get("pair") and len(codes) == 2:
             partner = {codes[0]: codes[1], codes[1]: codes[0]}
         for c in routed:
+            if skip_nets and board.FindNet(c).GetNetname() in skip_nets:
+                continue
             need = target - lengths[c]
             if need <= (tol if g.get("target") else tol / 2):
                 continue                      # within the window (or longer: meanders cannot shorten)
@@ -400,8 +492,17 @@ def tune(board, groups: List[dict], status: Optional[Callable[[str], None]] = No
                 clr = max(clr, int(ds.m_NetSettings.GetEffectiveNetClass(net.GetNetname()).GetClearance()))
             except Exception:
                 pass
+            lengthen.last_pieces = []
             added, new, removed = lengthen(board, room, c, need, clr, spacing_nm, amin_nm, amax_nm,
                                            avoid_net=partner.get(c, 0))
+            if lengthen.last_pieces:
+                # the largest meander becomes a KiCad tuning pattern for this net
+                main = max(lengthen.last_pieces, key=lambda pc: pc["gained"])
+                report.patterns.append({"net": net.GetNetname(), "base": main["base"],
+                                        "members": [str(i.m_Uuid.AsString()) for i in main["items"]],
+                                        "target": target, "tolerance": tol, "spacing": main["spacing"],
+                                        "amin": amin_nm, "amax": max([amax_nm] + main["amplitudes"]),
+                                        "length": lengths[c] + added, "corner": kicad_corner_percent(board)})
             report.added += new
             report.removed += len(removed)
             if removed_sink is not None:
@@ -417,4 +518,10 @@ def tune(board, groups: List[dict], status: Optional[Callable[[str], None]] = No
                               "after": {board.FindNet(c).GetNetname(): after.get(c, 0) for c in routed},
                               "spread_before": max(vals_b) - min(vals_b), "spread_after": max(vals_a) - min(vals_a),
                               "ok": not short, "short": short})
+    if kicad_patterns and report.patterns:
+        from . import kicad_tuning
+        try:
+            report.kicad_patterns = kicad_tuning.attach(board, report.patterns)
+        except Exception as e:
+            say(f"Could not make KiCad tuning patterns: {e!r}")
     return report

@@ -177,6 +177,9 @@ controlled track length at the right width per layer, each pair's coupled share 
 group's spread before/after tuning, and open nets per routing group. The intent is also written into
 KiCad's DRC rules, so "rule_errors" and the drc entries diff_pair_gap_out_of_range, skew_out_of_range,
 length_out_of_range, track_width are intent violations (judged under the intent criteria, not "drc").
+Pairs listed under "pair_exceptions" were connected directly on purpose (ends too close for coupling to
+matter, crossed pins, no room): judge whether that exception was reasonable and the direct route clean,
+not that they are uncoupled. Meanders are handed to KiCad as tuning patterns ("kicad_tuning_patterns").
 Look at the meanders and pairs in the images too: even bumps, no bumps squeezed against other copper,
 pairs running side by side at a constant gap."""
 
@@ -207,7 +210,8 @@ def penalty(m, base_seconds):
     agree, total = (int(x) for x in m["escape_side_agreement"].split(" of "))
     own_vias = m["vias"] - m.get("fanout_vias", 0) - m.get("stitching_vias", 0)
     p = (1000 * (m.get("unconnected_after") or 0) + 300 * m.get("drc_errors", 0) + 40 * m.get("dangling", 0)
-         + 20 * m.get("off_45", 0) + 20 * m.get("doubled_back", 0) + 5 * (total - agree)
+         + 20 * m.get("off_45", 0) + 20 * m.get("doubled_back", 0) + 20 * m.get("acute_corners", 0)
+         + 5 * (total - agree)
          + 0.05 * m["length_mm"] + 0.5 * max(0, own_vias))
     p += 60 * m.get("rule_errors", 0)
     it = m.get("intent") or {}
@@ -215,7 +219,8 @@ def penalty(m, base_seconds):
         if it.get("impedance_width_ok_pct") is not None:
             p += 3 * (100 - it["impedance_width_ok_pct"])
         for pr in it.get("pairs", []):
-            p += 1.0 * (100 - pr["coupled_pct"])
+            if not pr.get("exception"):           # a pair connected directly on purpose is not penalised
+                p += 1.0 * (100 - pr["coupled_pct"])
         for g in it.get("length_groups", []):
             if not g["ok"]:
                 p += 150 + 50 * min(10.0, sum(abs(v) for v in g["off_by_mm"].values()))
@@ -230,6 +235,7 @@ def penalty(m, base_seconds):
 
 def figures(m):
     f = {k: m.get(k) for k in ("routed", "unconnected_after", "drc_errors", "rule_errors", "dangling", "off_45",
+                               "acute_corners",
                                "doubled_back", "length_mm", "vias", "route_seconds", "escape_side_agreement")}
     it = m.get("intent") or {}
     if it:
