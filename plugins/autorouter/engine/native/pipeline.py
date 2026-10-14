@@ -168,8 +168,15 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         fine = fine_options(options, out.failed, board)
         # the finer grid is four times the cells: a stubborn connection could
         # search for minutes there, so the pass gets its own budget
-        budget = 60.0 + 20.0 * len(out.failed)
-        fine.time_limit_s = min(budget, max(1.0, remaining())) if limit else budget
+        budget = options.fine_budget_s
+        if budget is None:
+            budget = 60.0 + 20.0 * len(out.failed)
+        if budget and limit:
+            fine.time_limit_s = min(budget, max(1.0, remaining()))
+        elif limit:
+            fine.time_limit_s = max(1.0, remaining())
+        else:
+            fine.time_limit_s = budget or 0
         try:
             problem2, result2 = one_pass(fine)
         except Exception as e:
