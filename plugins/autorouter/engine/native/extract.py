@@ -145,12 +145,16 @@ def tight_pads(fp, limit: int) -> Set[str]:
 
 
 def pad_escape(pad, fp, rules: NetRules, pitch: int,
-               towards: Optional[Tuple[int, int]] = None) -> Optional[List[Tuple[int, int]]]:
+               towards: Optional[Tuple[int, int]] = None,
+               then: Optional[Tuple[int, int]] = None) -> Optional[List[Tuple[int, int]]]:
     """Where a track may leave an SMD pad: points on the pad's long axis, just
     far enough past either pad end that the track is clear of the neighbouring
     pads (clearance + half width + one cell). The side facing `towards` (the
     nearest other pad of the net) comes first, else the side pointing away
-    from the footprint centre. None for through-hole pads, which can be
+    from the footprint centre. When `towards` sits beside the pad rather than
+    off one of its ends (a USB-C receptacle's A6 next to B6), it says nothing
+    about the side and `then` (the nearest pad of the net on another
+    footprint) decides instead. None for through-hole pads, which can be
     entered from any side."""
     if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN):
         return None
@@ -167,6 +171,9 @@ def pad_escape(pad, fp, rules: NetRules, pitch: int,
     reach = half + rules.clearance + rules.width / 2 + pitch
     pos = pad.GetPosition()
     centre = fp.GetPosition() if fp is not None else pos
+    if towards is not None and then is not None \
+            and abs(axis[0] * (towards[0] - pos.x) + axis[1] * (towards[1] - pos.y)) <= pitch:
+        towards = then
     options = []
     for sign in (1, -1):
         ex = pos.x + sign * axis[0] * reach
@@ -200,6 +207,107 @@ def pair_partner(name: str, names: Set[str]) -> Optional[str]:
                 if other in names and other != name:
                     return other
     return None
+
+
+def _pick_pair_ends(nets: Dict[int, NetInfo], connections: List[Connection]) -> None:
+    """Choose which pads a differential pair's run between two footprints
+    lands on. A USB-C receptacle has each line twice (A6/B6 for D+, A7/B7
+    for D-), and the spanning tree picks whichever is nearest per net on its
+    own: the two ends can come out 1.5 mm apart with the other pins between
+    them, or swapped so the pair would have to cross. A designer takes the
+    two adjacent pins that keep the pair's sides the same at both ends and
+    bridges the duplicates at the connector; so here the cross-footprint
+    connection of each net is moved to the pins that are closest to the
+    partner's without crossing, where the spanning tree allows it."""
+
+    def anchor(code, ci):
+        return nets[code].clusters[ci].anchors[0]
+
+    def dist(p, q):
+        dx, dy = abs(p[0] - q[0]), abs(p[1] - q[1])
+        return max(dx, dy) + min(dx, dy) // 2
+
+    def crosses(p1, p2, q1, q2):
+        def orient(a, b, c):
+            v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+            return (v > 0) - (v < 0)
+        return (orient(p1, p2, q1) * orient(p1, p2, q2) < 0
+                and orient(q1, q2, p1) * orient(q1, q2, p2) < 0)
+
+    def side_of(code, conn_list, ca, end_a, end_b):
+        """Is a tree still spanning with `ca` replaced by (end_a, end_b)?"""
+        k = len(nets[code].clusters)
+        parent = list(range(k))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        for c in conn_list:
+            if c is not ca:
+                parent[find(c.a)] = find(c.b)
+        return find(end_a) == find(ca.a) and find(end_b) == find(ca.b) and find(end_a) != find(end_b)
+
+    by_net: Dict[int, List[Connection]] = {}
+    for c in connections:
+        by_net.setdefault(c.net, []).append(c)
+    for code_a in sorted(by_net):
+        net_a = nets[code_a]
+        code_b = net_a.partner
+        if not code_b or code_b < code_a or code_b not in by_net:
+            continue
+        net_b = nets[code_b]
+        for ca in by_net[code_a]:
+            ra1, ra2 = net_a.clusters[ca.a].refs, net_a.clusters[ca.b].refs
+            if not ra1 or not ra2 or ra1 & ra2:
+                continue                                   # a bridge within one footprint
+            cb, flip = None, False
+            for c in by_net[code_b]:
+                rb1, rb2 = net_b.clusters[c.a].refs, net_b.clusters[c.b].refs
+                if rb1 & rb2:
+                    continue
+                if ra1 & rb1 and ra2 & rb2:
+                    cb, flip = c, False
+                    break
+                if ra1 & rb2 and ra2 & rb1:
+                    cb, flip = c, True
+                    break
+            if cb is None:
+                continue
+            b1, b2 = (cb.b, cb.a) if flip else (cb.a, cb.b)
+            # candidate pads at each end: the net's clusters on the shared footprints
+            fp1 = ra1 & net_b.clusters[b1].refs
+            fp2 = ra2 & net_b.clusters[b2].refs
+            cand_a1 = [ca.a] + [i for i, cl in enumerate(net_a.clusters) if i != ca.a and cl.refs & fp1]
+            cand_a2 = [ca.b] + [i for i, cl in enumerate(net_a.clusters) if i != ca.b and cl.refs & fp2]
+            cand_b1 = [b1] + [i for i, cl in enumerate(net_b.clusters) if i != b1 and cl.refs & fp1]
+            cand_b2 = [b2] + [i for i, cl in enumerate(net_b.clusters) if i != b2 and cl.refs & fp2]
+            if len(cand_a1) * len(cand_a2) * len(cand_b1) * len(cand_b2) == 1:
+                continue
+            best = None
+            for a1 in cand_a1:
+                for a2 in cand_a2:
+                    if (a1, a2) != (ca.a, ca.b) and not side_of(code_a, by_net[code_a], ca, a1, a2):
+                        continue
+                    for x1 in cand_b1:
+                        for x2 in cand_b2:
+                            if (x1, x2) != (b1, b2) and not side_of(code_b, by_net[code_b], cb, x1, x2):
+                                continue
+                            pa1, pa2 = anchor(code_a, a1), anchor(code_a, a2)
+                            pb1, pb2 = anchor(code_b, x1), anchor(code_b, x2)
+                            score = (crosses(pa1, pa2, pb1, pb2),
+                                     dist(pa1, pb1) + dist(pa2, pb2),
+                                     dist(pa1, pa2) + dist(pb1, pb2))
+                            if best is None or score < best[0]:
+                                best = (score, a1, a2, x1, x2)
+            _, a1, a2, x1, x2 = best
+            for conn, net, e1, e2 in ((ca, net_a, a1, a2), (cb, net_b, *((x2, x1) if flip else (x1, x2)))):
+                if (e1, e2) == (conn.a, conn.b):
+                    continue
+                conn.a, conn.b = e1, e2
+                conn.estimate = dist(net.clusters[e1].anchors[0], net.clusters[e2].anchors[0])
+                conn.priority = 0 if (net.clusters[e1].tight or net.clusters[e2].tight) else 1
 
 
 def _room_beyond(grid, own, layer: int, code: int, px: int, py: int, ex: int, ey: int, pitch: int,
@@ -732,8 +840,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     lane_guard = array("i", [0]) * grid.size
     max_width = max([n.rules.width for n in nets.values()] or [0])
     positions_by_net: Dict[int, List[Tuple[int, int]]] = {}
+    refs_by_net: Dict[int, List[str]] = {}
     for pad, code, pl, pos, own_cells, centre in pending:
         positions_by_net.setdefault(code, []).append((pos.x, pos.y))
+        fp = footprint_of(pad)
+        refs_by_net.setdefault(code, []).append(fp.GetReference() if fp else "")
     board_conn = board.GetConnectivity()
 
     def _already_wired(pad) -> bool:
@@ -755,7 +866,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         stub_w = net.rules.width
         others = [q for q in positions_by_net[code] if q != (pos.x, pos.y)]
         towards = min(others, key=lambda q: (q[0] - pos.x) ** 2 + (q[1] - pos.y) ** 2) if others else None
-        escapes = pad_escape(pad, fp, net.rules, pitch, towards)
+        ref = fp.GetReference() if fp else ""
+        abroad = [q for q, r in zip(positions_by_net[code], refs_by_net[code]) if r != ref]
+        then = min(abroad, key=lambda q: (q[0] - pos.x) ** 2 + (q[1] - pos.y) ** 2) if abroad else None
+        escapes = pad_escape(pad, fp, net.rules, pitch, towards, then)
         if escapes and fp is not None and options.neck_down:
             key = fp.GetReference()
             if key not in tight_by_fp:
@@ -1166,6 +1280,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 dm = dist(net.clusters[j], net.clusters[m])
                 if dm < best_edge[m][0]:
                     best_edge[m] = (dm, j)
+
+    _pick_pair_ends(nets, connections)
 
     # Pair up the two connections of a differential pair that join the same
     # two footprints; the router treats such a pair as one coupled route.
