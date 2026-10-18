@@ -55,6 +55,9 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.stitch_vias = False
     fine.rip_rounds = max(fine.rip_rounds, 12)
     fine.rip_limit = max(fine.rip_limit, 8)
+    # the first pass's tracks are board copper now: let this pass rip up the
+    # ones that wall a stubborn connection in and reroute them (shove mode)
+    fine.shove = options.fine_shove
     # the stubborn ones go at the neck width for their whole length
     sizes = native_extract.board_sizes(board)
     narrow = [w for w in sizes["track_widths"] if w >= sizes["min_track_width"]]
@@ -98,6 +101,9 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             # caller does it itself when it places paths live)
             if apply_paths:
                 for item in movable.pop(pid, []):
+                    if native_router._DEBUG:
+                        print(f"[remove] pid {pid} {item.GetClass()} {item.GetNetname()} at "
+                              f"{item.GetPosition().x / 1e6:.2f},{item.GetPosition().y / 1e6:.2f}", flush=True)
                     try:
                         board.Remove(item)
                         item.thisown = 0
@@ -140,6 +146,9 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             # the sides the pads were left by, decided before those vias existed
             options = copy.copy(options)
             options.escape_sides = dict(problem0.escape_sides)
+            # those vias are the job's own: a signal pass may rip one up that
+            # walls in a connection, and the pour pass drops it again if room is left
+            options.movable_uuids = [str(item.m_Uuid.AsString()) for item in added]
     first = copy.deepcopy(options)
     if pours_later:
         first.fanout_vias = False
@@ -163,6 +172,11 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.failed = sorted({problem.nets[c.net].name for c in result.failed})
     out.pair_exceptions = list(getattr(result, "pair_exceptions", []))
     out.stats["budget_cuts"] = getattr(result, "budget_cuts", 0)
+    if apply_paths and options.movable_uuids:
+        # the plane vias as they stand now (ripped ones gone, restored ones in)
+        gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
+        options = copy.copy(options)
+        options.movable_uuids = [u for u in (str(item.m_Uuid.AsString()) for item in added) if u not in gone]
 
     # the finer pass needs room in the time limit (its board read alone takes a while)
     time_for_more = not limit or remaining() > 60.0
@@ -212,6 +226,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         pours = copy.deepcopy(options)
         pours.pours_only = True                       # same scope, no signal routing
         pours.time_limit_s = 0                        # the pour stages are bounded; always finish them
+        pours.movable_uuids = []                      # nothing is ripped up here: the vias are fixed copper again
         try:
             problem3, result3 = one_pass(pours)
         except Exception as e:

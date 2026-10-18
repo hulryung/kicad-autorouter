@@ -81,6 +81,7 @@ class _Path:
         self.via_cells: List[int] = []
         self.joins: List[Tuple[int, int]] = [(conn.a, conn.b)]  # cluster pairs this path connects
         self.existing = False                                   # copper that was on the board already
+        self.pad_exits: List[List[int]] = []                    # existing piece: exit cells per pad it touches
         self.paired = paired                                   # half of a coupled pair: never ripped up
 
 
@@ -451,13 +452,24 @@ class Router:
         # shove mode: the board's own tracks enter as paths that rip-up may
         # take out of the way; their connections are rerouted like any other
         self.shoved = 0
+        # (net, exit cell) of plane-net pads whose via a rip-up took out: they
+        # get a via again after the rip-up rounds, like the fanout list
+        self.restore: List[Tuple[int, int]] = []
+        self._rip_planes = False          # the second tier of a rip-up search: plane vias may go too
+        self.restore_possible = False     # ...there are such vias on the board
+        # new paths get ids above every board piece's, even one that is not
+        # entered below: the pipeline removes board items by path id
+        self.next_pid = max([self.next_pid] + [ex.path.pid + 1 for ex in problem.existing])
         for ex in problem.existing:
             net = problem.nets.get(ex.path.net)
             if net is None or not net.clusters:
                 continue
+            if not net.route:
+                self.restore_possible = True
             c = max(ex.cluster, 0)
             path = _Path(ex.path.pid, Connection(ex.path.net, c, c, 0, rank=net.rank), ex.path, list(ex.cells))
             path.joins = list(ex.joins)
+            path.pad_exits = [list(e) for e in ex.pad_exits]
             path.existing = True
             self.paths[path.pid] = path
             self._claim(path)
@@ -662,6 +674,9 @@ class Router:
             return False
         if path.conn.net == for_conn.net:
             return True                       # own net's copper is never in the way
+        if path.existing and not self.p.nets[path.conn.net].route:
+            # a plane net's pad via (this job's own): only when nothing else helps
+            return self._rip_planes
         # a less important group does not push a pair, memory or high-speed
         # route off its line (those were routed first for a reason)
         if self.opts.protect_groups and path.conn.rank < for_conn.rank \
@@ -713,20 +728,80 @@ class Router:
                         net.rules.via_drill, pid=self.next_pid)
         self.next_pid += 1
         path = _Path(rp.pid, conn, rp, cells)
+        # The clusters the path really joins: the pads its ends touch. A
+        # search may end on any pad of the far component, not on the
+        # connection's own cluster (three pads joined by one ripped-up piece
+        # come back as two connections, and the second may land on the first's
+        # pad); the union must follow the copper, or ripping up the other
+        # route later leaves a pad open that the union still counts as joined.
+        a, b = self._end_clusters(conn, cells)
+        path.joins = [(a, b)]
         self.paths[rp.pid] = path
         self._claim(path)
-        self.parent[conn.net][self._find(conn.net, conn.a)] = self._find(conn.net, conn.b)
+        self.parent[conn.net][self._find(conn.net, a)] = self._find(conn.net, b)
         if on_path:
             on_path(rp)
         return path
 
+    def _dependents(self, pids: List[int]) -> List[int]:
+        """The paths to rip up with these: a later route of the same net may
+        have ended on one of them (a T-joint onto its track or via) instead
+        of on a pad; taken out from under it, it would hang in the air while
+        the union still counted it as joined. Those go too, transitively,
+        and are rerouted with the rest."""
+        out = list(pids)
+        seen = set(out)
+        cluster_cells: Dict[int, Set[int]] = {}
+        k = 0
+        while k < len(out):
+            path = self.paths.get(out[k])
+            k += 1
+            if path is None:
+                continue
+            code = path.conn.net
+            if code not in cluster_cells:
+                cluster_cells[code] = set().union(*(cl.cells for cl in self.p.nets[code].clusters))
+            on_pads = cluster_cells[code]
+            cells = set(path.cells)
+            for pid, other in self.paths.items():
+                if pid in seen or other.conn.net != code or other.paired or other.existing or not other.cells:
+                    continue
+                if any(end in cells and end not in on_pads for end in (other.cells[0], other.cells[-1])):
+                    seen.add(pid)
+                    out.append(pid)
+        return out
+
+    def _end_clusters(self, conn: Connection, cells: List[int]) -> Tuple[int, int]:
+        """The cluster at each end of a cell path: the pad the end lies on,
+        or, for an end on another route's copper, the connection's cluster
+        on that side (the one in the other end's component it is not)."""
+        net = self.p.nets[conn.net]
+        ends = [next((j for j, cl in enumerate(net.clusters) if cell in cl.cells), None)
+                for cell in (cells[0], cells[-1])]
+        if ends[0] is None and ends[1] is None:
+            return conn.a, conn.b
+        if ends[0] is not None and ends[1] is not None:
+            return ends[0], ends[1]
+        known = ends[0] if ends[0] is not None else ends[1]
+        other = conn.b if self._find(conn.net, conn.a) == self._find(conn.net, known) else conn.a
+        return known, other
+
     def _rip(self, pids: List[int], on_remove) -> List[Connection]:
         conns = []
-        for pid in pids:
+        for pid in self._dependents(list(pids)):
             path = self.paths.pop(pid, None)
             if path is None:
                 continue
-            if path.existing:
+            if _DEBUG:
+                print(f"[rip] pid {pid} {self.p.nets[path.conn.net].name} existing={path.existing} vias={[(x/1e6, y/1e6) for x, y in path.path.vias]}", flush=True)
+            if path.existing and not self.p.nets[path.conn.net].route:
+                # a plane net's pad via from an earlier pass of this job: the
+                # pad gets its via back after the rip-up rounds, from its exits
+                self.shoved += 1
+                for exits in path.pad_exits:
+                    if exits and (path.conn.net, exits[0]) not in self.restore:
+                        self.restore.append((path.conn.net, exits[0]))
+            elif path.existing:
                 # a board piece may have joined several clusters: each join
                 # becomes a connection to route again
                 self.shoved += 1
@@ -2260,10 +2335,26 @@ class Router:
                     continue
                 attempt = budget(2)
                 cells = self._search(conn, opts.via_cost, opts.max_expansions * 2, True, attempt)
+                if not cells and self.restore_possible and not stop():
+                    # walled in by the plane nets' pad vias (a decoupling via in
+                    # the only corridor): a designer moves the via, so may the
+                    # router, once no route through signal tracks alone exists
+                    self._rip_planes = True
+                    try:
+                        cells = self._search(conn, opts.via_cost, opts.max_expansions * 2, True, attempt)
+                    finally:
+                        self._rip_planes = False
                 if not cells:
+                    if _DEBUG:
+                        print(f"[rip-up {rnd + 1}] {self.p.nets[conn.net].name}: no soft path "
+                              f"(expansions {astar.LAST['expansions']}, capped {astar.LAST['capped']})", flush=True)
                     still.append(conn)
                     continue
                 blockers = sorted(self._blockers(conn, cells))
+                if _DEBUG:
+                    names = [f"{self.p.nets[self.paths[b].conn.net].name}{'*' if self.paths[b].existing else ''}"
+                             for b in blockers]
+                    print(f"[rip-up {rnd + 1}] {self.p.nets[conn.net].name}: {len(cells)} cells through {names}", flush=True)
                 if len(blockers) > MAX_BLOCKERS:
                     still.append(conn)
                     continue
@@ -2276,7 +2367,11 @@ class Router:
                     still.append(conn)
                 for other in ripped:
                     # each one ripped up gets its own time to find its way back
-                    if not self._try(other, opts.via_cost, opts.max_expansions, on_path, budget()):
+                    joined = self._find(other.net, other.a) == self._find(other.net, other.b)
+                    ok = self._try(other, opts.via_cost, opts.max_expansions, on_path, budget())
+                    if _DEBUG:
+                        print(f"[reroute] {self.p.nets[other.net].name} {other.a}-{other.b} joined-before={joined} -> {ok}", flush=True)
+                    if not ok:
                         still.append(other)
                 report(self.p.nets[conn.net].name, f"rip-up round {rnd + 1}/{rounds}: ")
             failed = still
@@ -2300,14 +2395,18 @@ class Router:
         # limit does not cut the pour stages: they are bounded and quick)
         fanout_paths: List[RoutedPath] = []
         fanned: Set[int] = set()                       # primary exit cells of pads that got a via
+        # the pads a rip-up took the via from come after the fanout list
+        wanted = list(self.p.fanout) + [rc for rc in self.restore if rc not in self.p.fanout]
         if not halted():
-            for i, (code, cell) in enumerate(self.p.fanout):
+            for i, (code, cell) in enumerate(wanted):
                 if halted():
                     break
                 if i % 10 == 0:
-                    report(f"{i}/{len(self.p.fanout)}", "fanout vias ")
+                    report(f"{i}/{len(wanted)}", "fanout vias ")
                 for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
                     rp = self._fanout_via(code, exit_cell)
+                    if _DEBUG and (code, cell) in self.restore:
+                        print(f"[restore-via] net {self.p.nets[code].name} exit {self.grid.unpack(exit_cell)} -> {rp.vias if rp else None}", flush=True)
                     if rp is not None:
                         fanout_paths.append(rp)
                         fanned.add(cell)
@@ -2343,7 +2442,7 @@ class Router:
         # copper of their net (a via, another pad, a stub) instead
         tied_paths: List[RoutedPath] = []
         if not halted():
-            for code, cell in self.p.fanout:
+            for code, cell in wanted:
                 if cell in fanned:
                     continue
                 if halted():
@@ -2376,6 +2475,28 @@ class Router:
                                 if on_path:
                                     on_path(rp2)
                         break
+                else:
+                    if (code, cell) in self.restore:
+                        # a pad whose via a rip-up took: the route that needed
+                        # the room may sit on its exit now, so the via search
+                        # may also leave from the pad copper itself
+                        starts = set()
+                        for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
+                            layer = exit_cell // self.grid.plane
+                            _, _, px, py, _ = self.p.nets[code].endpoints[exit_cell]
+                            pcx, pcy = self.grid.cell_x(px), self.grid.cell_y(py)
+                            if self.grid.inside(pcx, pcy):
+                                starts.add(self.grid.index(layer, pcx, pcy))
+                        rp = self._fanout_search(code, cell, user_cancel, starts=starts) if starts else None
+                        if _DEBUG:
+                            print(f"[restore] net {self.p.nets[code].name} exit {self.grid.unpack(cell)} from pad copper "
+                                  f"{[self.grid.unpack(s) for s in starts]} goals {len(self.p.fanout_goals.get(cell, ()))} "
+                                  f"-> {'via' if rp else 'none'}", flush=True)
+                        if rp is not None:
+                            tied_paths.append(rp)
+                            fanned.add(cell)
+                            if on_path:
+                                on_path(rp)
         fanout_paths += tied_paths
 
         result.cancelled = halted()
@@ -2384,6 +2505,9 @@ class Router:
         seen: Set[int] = set()
         result.failed = [c for c in result.failed if not (id(c) in seen or seen.add(id(c)))]
         result.failed_detail = [self._why_failed(c) for c in result.failed]
+        if _DEBUG:
+            for d in result.failed_detail:
+                print(f"[failed] {d}", flush=True)
         new_paths = [self.paths[pid] for pid in sorted(self.paths) if not self.paths[pid].existing]
         result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths
         result.stitched = len(stitch_paths)

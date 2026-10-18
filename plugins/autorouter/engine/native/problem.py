@@ -91,6 +91,7 @@ class ExistingPath:
     cluster: int                     # one cluster it touches (-1: a dangling piece)
     cells: List[int]                 # centreline cells, where a route may end on it
     items: list                      # the pcbnew items, for removal on rip-up
+    pad_exits: List[List[int]] = field(default_factory=list)   # per pad it touches: the pad's exit cells
 
 
 SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS = "board", "selection", "sheets"
@@ -126,6 +127,10 @@ class NativeOptions:
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
     pours_only: bool = False          # the pipeline's last pass: fanout/stitch, no signal routing
     shove: bool = False             # existing (unlocked) tracks of routable nets may be ripped up and rerouted
+    # UUIDs of tracks and vias an earlier pass of the same job dropped (the plane
+    # nets' pad vias): the signal passes may rip them up when one walls in a
+    # connection's only corridor; the pour pass places them again where room is left
+    movable_uuids: List[str] = field(default_factory=list)
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
     track_mode: str = SIZE_AUTO
@@ -146,6 +151,7 @@ class NativeOptions:
     rip_up: bool = True                # rip up and reroute paths that block a failed connection
     rip_rounds: int = 8                # how many rip-up rounds over the failed connections
     rip_limit: int = 5                 # how often one connection may be ripped up
+    fine_shove: bool = True            # the finer second pass may rip up and reroute the first pass's tracks
     skip_nets: List[str] = field(default_factory=list)       # names or fnmatch patterns
     ignore_net_classes: List[str] = field(default_factory=list)
     routable_layers: Optional[List[bool]] = None             # over the board's copper stack

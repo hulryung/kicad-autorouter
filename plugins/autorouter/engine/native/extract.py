@@ -604,11 +604,18 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # (a +3V3 layer, a local power pour): its pads get vias to the pour and
     # no tracks are drawn, the way a designer uses a plane.
     plane_codes = _plane_nets(board, layer_of) if options.plane_nets else set()
+    # the plane nets' pad vias an earlier pass of this job dropped: movable
+    # pieces (a signal walled in by one may rip it up; the pour pass puts it
+    # back), so their nets stay in the model even in a pass without pours
+    job_items: Set[str] = set(options.movable_uuids)
+    job_codes: Set[int] = set()
+    if job_items:
+        job_codes = {t.GetNetCode() for t in board.GetTracks() if str(t.m_Uuid.AsString()) in job_items}
     for code, net in board.GetNetsByNetcode().items():
         if code <= 0:
             continue
         skipped = _skip_net(net, options) or code in plane_codes
-        if skipped and not (options.fanout_vias and code in zone_layers):
+        if skipped and not (options.fanout_vias and code in zone_layers) and code not in job_codes:
             continue
         nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options, hints), route=not skipped)
     # Controlled impedance: the width each layer needs for the net's target.
@@ -846,6 +853,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             else:
                 movable.setdefault(code, []).append(item)
                 is_movable = True
+        elif job_items and code in nets and not nets[code].route and cls in ("PCB_TRACK", "PCB_VIA") \
+                and str(item.m_Uuid.AsString()) in job_items:
+            movable.setdefault(code, []).append(item)
+            is_movable = True
         if cls == "PCB_VIA":
             vl = [layer_of[l] for l in item.GetLayerSet().CuStack() if l in layer_of]
             hole = item.GetDrillValue() // 2
@@ -933,9 +944,21 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         except Exception:
             return False
 
+    def _touched_by_job(pad) -> bool:
+        """Is the pad joined to a track or via an earlier pass of this job dropped?"""
+        try:
+            return any(str(item.m_Uuid.AsString()) in job_items for item in board_conn.GetConnectedItems(pad))
+        except Exception:
+            return False
+
     for pad, code, pl, pos, own_cells, centre in pending:
         fp = footprint_of(pad)
         net = nets[code]
+        if not net.route and not options.fanout_vias and not (job_items and _touched_by_job(pad)):
+            # a plane net in the model only for its movable vias: a pad with
+            # none of them gets no escape lane (those exist for the via alone)
+            pad_cells.setdefault(code, []).append((pad, own_cells, centre, fp.GetReference() if fp else "", False))
+            continue
         own = owners[net.rules.key]
         wants_outlet = net.route and not _already_wired(pad)
         stub_w = net.rules.width
@@ -1057,8 +1080,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 continue
             chosen.append((ex, ey, ecx, ecy, gx, gy, stub_shapes))
             # plane-net pads keep both exits: the fanout via goes to whichever
-            # side still has room for it once the signals are routed
-            if not (options.dual_escapes or (not net.route and code in zone_layers)):
+            # side still has room for it once the signals are routed (in a
+            # pass without pours a pad is here for its movable via alone: one
+            # exit, the via's side, so the other lane stays open for signals)
+            if not (options.dual_escapes or (not net.route and code in zone_layers and options.fanout_vias)):
                 break
         if chosen:
             half = stub_w // 2
@@ -1185,6 +1210,47 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     for zone in board.Zones():
         if not zone.GetIsRuleArea() and zone.GetNetCode() in nets:
             plane_zones.setdefault(zone.GetNetCode(), []).append(zone)
+
+    def _pad_exits(code: int, pos) -> List[int]:
+        """The pad's exit cells (its stub ends), the pad centre cell when it has no stub."""
+        net = nets[code]
+        mine = [i for i, e in net.endpoints.items() if e[2] == pos.x and e[3] == pos.y]
+        return [i for i in mine if (net.endpoints[i][0], net.endpoints[i][1]) != (pos.x, pos.y)] or mine
+
+    def _plane_goals(code: int, pos, pl) -> Set[int]:
+        """Cells on the net's pour (another layer) within 3 mm of the pad:
+        where a search may end with a via when no spot next to the pad fits one."""
+        goals: Set[int] = set()
+        r = int(3_000_000 / pitch)
+        cx0, cy0 = grid.cell_x(pos.x), grid.cell_y(pos.y)
+        for z in plane_zones.get(code, ()):
+            zl = {layer_of[l] for l in z.GetLayerSet().CuStack() if l in layer_of} - set(pl)
+            if not zl:
+                continue
+            for cy in range(max(0, cy0 - r), min(grid.h - 1, cy0 + r) + 1):
+                for cx in range(max(0, cx0 - r), min(grid.w - 1, cx0 + r) + 1):
+                    if (cx - cx0) ** 2 + (cy - cy0) ** 2 > r * r:
+                        continue
+                    if _zone_covers(z, grid.nm_x(cx), grid.nm_y(cy), -600_000):
+                        for li in zl:
+                            goals.add(grid.index(li, cx, cy))
+        return goals
+
+    if job_items and not options.fanout_vias and zone_layers:
+        # pads whose via from an earlier pass may be ripped up in this one:
+        # the router drops the via again right after, from these exits
+        for pad, code, pl, pos, own_cells, centre in pending:
+            if code not in nets or nets[code].route or code not in zone_layers or not _touched_by_job(pad):
+                continue
+            exits = _pad_exits(code, pos)
+            if not exits:
+                continue
+            if len(exits) > 1:
+                fanout_alt[exits[0]] = exits[1:]
+            goals = _plane_goals(code, pos, pl)
+            if goals:
+                for e in exits:
+                    fanout_goals[e] = goals
     if options.fanout_vias and zone_layers:
         for pad, code, pl, pos, own_cells, centre in pending:
             if code not in zone_layers or code not in nets:
@@ -1207,29 +1273,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 continue                          # the pour does not come under this pad
             if options.fanout_only_unconnected and _pour_reaches(pad):
                 continue                          # the pour on its own layer already connects it
-            net = nets[code]
-            mine = [i for i, e in net.endpoints.items() if e[2] == pos.x and e[3] == pos.y]
-            exits = [i for i in mine if (net.endpoints[i][0], net.endpoints[i][1]) != (pos.x, pos.y)] or mine
+            exits = _pad_exits(code, pos)
             if exits:                             # no stub: the via is sought around the pad itself
                 fanout.append((code, exits[0]))
                 if len(exits) > 1:
                     fanout_alt[exits[0]] = exits[1:]
-                # cells on the pour (another layer) within 3 mm: where a search
-                # may end with a via when no spot next to the pad fits one
-                goals: Set[int] = set()
-                r = int(3_000_000 / pitch)
-                cx0, cy0 = grid.cell_x(pos.x), grid.cell_y(pos.y)
-                for z in plane_zones.get(code, ()):
-                    zl = {layer_of[l] for l in z.GetLayerSet().CuStack() if l in layer_of} - set(pl)
-                    if not zl:
-                        continue
-                    for cy in range(max(0, cy0 - r), min(grid.h - 1, cy0 + r) + 1):
-                        for cx in range(max(0, cx0 - r), min(grid.w - 1, cx0 + r) + 1):
-                            if (cx - cx0) ** 2 + (cy - cy0) ** 2 > r * r:
-                                continue
-                            if _zone_covers(z, grid.nm_x(cx), grid.nm_y(cy), -600_000):
-                                for li in zl:
-                                    goals.add(grid.index(li, cx, cy))
+                goals = _plane_goals(code, pos, pl)
                 if goals:
                     fanout_goals[exits[0]] = goals
 
@@ -1287,12 +1336,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             return i
 
         pieces = []
-        if options.shove:
+        if code in movable and not net.route:
+            # this job's own pad vias on a plane net: pieces to rip up, each
+            # knowing only the pads it touches (the plane joins the pads: no
+            # connections to reroute, and no zone to pull every pad in)
+            pieces = _movable_pieces(pads, movable[code], [], layer_of)
+        elif options.shove:
             # pads joined by copper the router may not move: zones, locked tracks
             for i, j in _fixed_links(board, pads, fixed_tracks.get(code, []), zones_by_net.get(code, [])):
                 parent[find(i)] = find(j)
             pieces = _movable_pieces(pads, movable.get(code, []), zones_by_net.get(code, []), layer_of)
-        else:
+        if not options.shove:
             index_of = {id(pad): i for i, (pad, _, _, _, _) in enumerate(entries)}
             for i, (pad, _, _, _, _) in enumerate(entries):
                 try:
@@ -1335,8 +1389,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             for x, y in piece["vias"]:
                 for li in range(grid.layers):
                     cells += grid.disc_cells(li, x, y, rp.via_diameter // 2)
+            pad_exits = [_pad_exits(code, pads[i].GetPosition()) for i in sorted(piece["pads"])]
             existing.append(ExistingPath(rp, list(zip(touched, touched[1:])), touched[0] if touched else -1,
-                                         cells, piece["items"]))
+                                         cells, piece["items"], [e for e in pad_exits if e]))
         if len(net.clusters) < 2 or not net.route:
             continue
         # Minimum spanning tree over clusters by nearest anchor distance (Prim).
