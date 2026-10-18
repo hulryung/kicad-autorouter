@@ -932,6 +932,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         fp = footprint_of(pad)
         refs_by_net.setdefault(code, []).append(fp.GetReference() if fp else "")
     board_conn = board.GetConnectivity()
+    # A differential pair leaves a part side by side: the side its partner's
+    # pin on the same footprint was given (the first of the two decides by
+    # room), per (footprint, net): unit direction from the pad to its exit.
+    # Chosen one pin at a time by local room, the two pins of a pair can be
+    # sent opposite ways (one under the body, one out), and the coupled run
+    # then has no common side to start from.
+    pair_sides: Dict[Tuple[str, int], Tuple[float, float]] = {}
 
     def _already_wired(pad) -> bool:
         """Is the pad joined to tracks or vias on the board already? Its exit
@@ -978,10 +985,24 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 stub_w = neck_width(board, net.rules)
         pad_key = (fp.GetReference() if fp else "", pad.GetNumber())
         remembered = options.escape_sides.get(pad_key)
+        partner_side = pair_sides.get((ref, net.partner)) if (net.partner and ref and escapes) else None
+        if partner_side is not None:
+            # the escape running the partner's way, if this pad has one
+            def _along(e):
+                dx, dy = e[0] - pos.x, e[1] - pos.y
+                norm = math.hypot(dx, dy) or 1.0
+                return (dx * partner_side[0] + dy * partner_side[1]) / norm
+            if max(_along(e) for e in escapes) < 0.7:
+                partner_side = None
         if escapes and len(escapes) >= 2 and remembered is not None:
             # an earlier pass of this job chose the side before its vias went
             # in; keep it, so those vias do not flip the choice
             escapes.sort(key=lambda e: (e[0] - remembered[0]) ** 2 + (e[1] - remembered[1]) ** 2)
+        elif escapes and len(escapes) >= 2 and partner_side is not None:
+            escapes.sort(key=lambda e: -_along(e))
+            if _DEBUG:
+                print(f"[escape] {net.name} {ref}.{pad.GetNumber()} leaves with its pair partner: "
+                      f"({escapes[0][0] / 1e6:.2f},{escapes[0][1] / 1e6:.2f})", flush=True)
         elif escapes and len(escapes) == 2:
             # The side the nearest pad of the net points to comes first, but
             # not when the lane beyond it is boxed in (a crystal or resistor
@@ -1004,6 +1025,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 escapes.reverse()
         if escapes:
             problem_escape_sides[pad_key] = escapes[0]
+            if net.partner and ref and (ref, code) not in pair_sides:
+                dx, dy = escapes[0][0] - pos.x, escapes[0][1] - pos.y
+                norm = math.hypot(dx, dy) or 1.0
+                pair_sides[(ref, code)] = (dx / norm, dy / norm)
         exit_cells: Set[int] = set()
         chosen: List[Tuple[int, int, int, int, int, int, list]] = []
         for ex, ey in (escapes or []):
