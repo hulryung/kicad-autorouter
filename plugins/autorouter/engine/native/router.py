@@ -685,9 +685,43 @@ class Router:
         key = (path.conn.net, path.conn.a, path.conn.b)
         return self.rips.get(key, 0) < self.opts.rip_limit
 
+    def _trim_to_pads(self, conn: Connection, cells: List[int]) -> List[int]:
+        """A search runs between pad exits, and a pad's stub (centre to exit)
+        is written with the route that ends there. A route that reaches its
+        far pad from the other side (the under-row bridge joining a USB-C
+        connector's doubled pins) would run on over the pad's own copper to
+        the exit, doubling the stub: copper KiCad's length tuner and skew
+        rule count twice, and a loop a designer never leaves. Such a route
+        ends where it first enters the far pad's copper (and starts where it
+        last leaves its own), the way the designer lands on the pad's edge."""
+        net = self.p.nets[conn.net]
+        copper_of: Dict[int, Set[int]] = {}
+        for j, cl in enumerate(net.clusters):
+            if cl.copper:
+                copper_of.setdefault(self._find(conn.net, j), set()).update(cl.copper)
+        if not copper_of or len(cells) < 3:
+            return cells
+        root_a, root_b = self._find(conn.net, conn.a), self._find(conn.net, conn.b)
+        a_cells, _ = self._component(conn.net, conn.a)
+        start_root, end_root = (root_a, root_b) if cells[0] in a_cells else (root_b, root_a)
+        end_copper = copper_of.get(end_root, set())
+        if end_copper and cells[-1] not in end_copper:
+            for k, c in enumerate(cells):
+                if c in end_copper:
+                    cells = cells[:k + 1]
+                    break
+        start_copper = copper_of.get(start_root, set())
+        if start_copper and cells[0] not in start_copper:
+            for k in range(len(cells) - 1, 0, -1):
+                if cells[k] in start_copper:
+                    cells = cells[k:]
+                    break
+        return cells
+
     def _commit(self, conn: Connection, cells: List[int], on_path) -> _Path:
         net = self.p.nets[conn.net]
         owners = self.p.owners[self._key(conn)]
+        cells = self._trim_to_pads(conn, cells)
         own_cells = set(cells)
         region = self._neck_region(conn)
         neck_owners = self.p.owners.get((conn.neck, net.rules.clearance), owners) if region else owners
@@ -760,7 +794,7 @@ class Router:
                 continue
             code = path.conn.net
             if code not in cluster_cells:
-                cluster_cells[code] = set().union(*(cl.cells for cl in self.p.nets[code].clusters))
+                cluster_cells[code] = set().union(*(cl.cells | cl.copper for cl in self.p.nets[code].clusters))
             on_pads = cluster_cells[code]
             cells = set(path.cells)
             for pid, other in self.paths.items():
@@ -776,7 +810,7 @@ class Router:
         or, for an end on another route's copper, the connection's cluster
         on that side (the one in the other end's component it is not)."""
         net = self.p.nets[conn.net]
-        ends = [next((j for j, cl in enumerate(net.clusters) if cell in cl.cells), None)
+        ends = [next((j for j, cl in enumerate(net.clusters) if cell in cl.cells or cell in cl.copper), None)
                 for cell in (cells[0], cells[-1])]
         if ends[0] is None and ends[1] is None:
             return conn.a, conn.b

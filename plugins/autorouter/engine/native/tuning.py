@@ -302,12 +302,144 @@ class _Slot:
     x0: float              # along the run, start of the bump's first leg
     side: int
     amax: float            # largest amplitude that fits
+    k: int = 0             # the slot's step along the run (slots are one pitch apart)
 
 
-def _runs(board, code: int):
-    """The net's straight segments (tracks only), longest first."""
-    segs = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == code]
-    return sorted(segs, key=lambda t: -t.GetLength())
+def _conflicts(a: _Slot, b: _Slot) -> bool:
+    """Two bumps on one run need two pitches between them, unless they are
+    next to each other on opposite sides: then they share the leg between
+    them (the S of a meander), the way KiCad's tuner alternates its bumps."""
+    if a.track is not b.track:
+        return False
+    gap = abs(a.k - b.k)
+    return gap < 2 and not (gap == 1 and a.side != b.side)
+
+
+def _added(bumps: List[Tuple[object, float, int, float]], p: float) -> float:
+    """The length bumps [(track, x0, side, amplitude)] add: each bump's own,
+    plus the corners a shared leg between two neighbours does away with."""
+    total = 0.0
+    by_track: Dict[int, List[Tuple[float, int, float]]] = {}
+    for track, x0, side, a in bumps:
+        total += _extra(a, p)[0]
+        by_track.setdefault(id(track), []).append((x0, side, a))
+    for items in by_track.values():
+        items.sort()
+        for (x1, s1, a1), (x2, s2, a2) in zip(items, items[1:]):
+            if s1 != s2 and abs((x2 - x1) - p) < 1.0:
+                for a in (a1, a2):
+                    c = _extra(a, p)[1]
+                    total += (FILLET_LOSS if _rounded(c) else CHAMFER_LOSS) * c / 4
+    return total
+
+
+def _pick(slots: List[_Slot], need: float, p: float) -> List[_Slot]:
+    """The fewest bumps for `need`: the tallest slots first, skipping any
+    that would overlap one already taken."""
+    chosen: List[_Slot] = []
+    for sl in sorted(slots, key=lambda sl: (-sl.amax, sl.k, -sl.side)):
+        if any(_conflicts(sl, c) for c in chosen):
+            continue
+        chosen.append(sl)
+        if _added([(c.track, c.x0, c.side, c.amax) for c in chosen], p) >= need:
+            break
+    return chosen
+
+
+class _Run:
+    """One straight run of a net: a track, or a chain of tracks of one
+    width on one layer that carry straight on through their joints (a route
+    the router split where its pad neck ends, or where an earlier piece was
+    joined on). Looks like a PCB_TRACK to the slot search; replaced whole."""
+
+    def __init__(self, members: List[object], start: Tuple[int, int], end: Tuple[int, int]):
+        self.members = members
+        self.start, self.end = pcbnew.VECTOR2I(*start), pcbnew.VECTOR2I(*end)
+
+    def GetStart(self):
+        return self.start
+
+    def GetEnd(self):
+        return self.end
+
+    def GetWidth(self):
+        return self.members[0].GetWidth()
+
+    def GetLayer(self):
+        return self.members[0].GetLayer()
+
+    def GetNetCode(self):
+        return self.members[0].GetNetCode()
+
+    def GetLength(self):
+        return math.hypot(self.end.x - self.start.x, self.end.y - self.start.y)
+
+
+def _runs(board, code: int) -> List[_Run]:
+    """The net's straight runs, longest first: its tracks, with the ones that
+    meet end to end in a straight line (nothing else at the joint) as one."""
+    segs = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == code
+            and t.GetLength() > 0]
+    # what the net has at each point: a joint with a third track, a via or an
+    # arc on it, or a pad under it, is a real corner or junction, not a split
+    at_point: Dict[Tuple[int, int], int] = {}
+    for t in board.GetTracks():
+        if t.GetNetCode() != code:
+            continue
+        pts = [t.GetPosition()] if t.GetClass() == "PCB_VIA" else [t.GetStart(), t.GetEnd()]
+        for p in pts:
+            at_point[(p.x, p.y)] = at_point.get((p.x, p.y), 0) + (3 if t.GetClass() != "PCB_TRACK" else 1)
+    pads = [pad for pad in board.GetPads() if pad.GetNetCode() == code]
+    ends_at: Dict[Tuple[int, int, int], List[object]] = {}
+    for t in segs:
+        for p in (t.GetStart(), t.GetEnd()):
+            ends_at.setdefault((t.GetLayer(), p.x, p.y), []).append(t)
+
+    def oriented(t, forward: bool) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        s, e = t.GetStart(), t.GetEnd()
+        return ((s.x, s.y), (e.x, e.y)) if forward else ((e.x, e.y), (s.x, s.y))
+
+    def joint_ok(j: Tuple[int, int]) -> bool:
+        return at_point.get(j, 0) == 2 and not any(pad.HitTest(pcbnew.VECTOR2I(*j)) for pad in pads)
+
+    def straight(a, b) -> bool:
+        (ux, uy) = (a[1][0] - a[0][0], a[1][1] - a[0][1])
+        (vx, vy) = (b[1][0] - b[0][0], b[1][1] - b[0][1])
+        return ux * vy - uy * vx == 0 and ux * vx + uy * vy > 0
+
+    def beyond(t, forward: bool):
+        """The one track carrying straight on past this oriented track's end."""
+        s, e = oriented(t, forward)
+        if not joint_ok(e):
+            return None
+        for u in ends_at.get((t.GetLayer(), e[0], e[1]), []):
+            if u is t or _uid(u) == _uid(t) or u.GetWidth() != t.GetWidth():
+                continue
+            uf = (u.GetStart().x, u.GetStart().y) == e
+            if straight((s, e), oriented(u, uf)):
+                return u, uf
+        return None
+
+    runs: List[_Run] = []
+    seen = set()
+    for t in segs:
+        if _uid(t) in seen:
+            continue
+        chain = [(t, True)]
+        seen.add(_uid(t))
+        nxt = beyond(t, True)
+        while nxt is not None and _uid(nxt[0]) not in seen:
+            chain.append(nxt)
+            seen.add(_uid(nxt[0]))
+            nxt = beyond(*nxt)
+        prv = beyond(t, False)
+        while prv is not None and _uid(prv[0]) not in seen:
+            u, uf = prv
+            chain.insert(0, (u, not uf))
+            seen.add(_uid(u))
+            prv = beyond(u, uf)
+        runs.append(_Run([m for m, _ in chain], oriented(*chain[0])[0], oriented(*chain[-1])[1]))
+    return sorted(runs, key=lambda r: -r.GetLength())
 
 
 def _slots(room: _Room, track, p: float, amin: float, amax_cap: float, clr: int, avoid_net: int) -> List[_Slot]:
@@ -324,28 +456,26 @@ def _slots(room: _Room, track, p: float, amin: float, amax_cap: float, clr: int,
     x0 = margin + p / 4
     lid = track.GetLayer()
     code = track.GetNetCode()
+    k = 0
     while x0 + p + p / 4 <= length - margin:
-        best = None
         for side in (1, -1):
             nx, ny = -uy * side, ux * side
             lo, hi = 0.0, amax_cap
             # the tallest amplitude whose bump is clear (bisection, 6 steps)
             if not room.clear(lid, _bump(ax, ay, ux, uy, nx, ny, x0, p, amin, _extra(amin, p)[1]), w, code, clr,
-                              skip=(track,)):
+                              skip=tuple(track.members)):
                 continue
             lo = amin
             for _ in range(6):
                 mid = (lo + hi) / 2
                 if room.clear(lid, _bump(ax, ay, ux, uy, nx, ny, x0, p, mid, _extra(mid, p)[1]), w, code, clr,
-                              skip=(track,)):
+                              skip=tuple(track.members)):
                     lo = mid
                 else:
                     hi = mid
-            if best is None or lo > best.amax:
-                best = _Slot(track, x0, side, lo)
-        if best is not None:
-            out.append(best)
-        x0 += 2 * p
+            out.append(_Slot(track, x0, side, lo, k))
+        x0 += p
+        k += 1
     return out
 
 
@@ -358,15 +488,26 @@ def _rebuild(board, room: _Room, track, bumps: List[Tuple[float, int, float]], p
     ux, uy = (bx - ax) / length, (by - ay) / length
     # the path as lines (point) and fillets (start, middle, end)
     steps: List[tuple] = [(ax, ay)]
+    corners: List[List[list]] = []            # per bump: its four corners, each a list of steps
+    prev = None
     for x0, side, a in sorted(bumps):
         nx, ny = -uy * side, ux * side
         c = _extra(a, p)[1]
         q = _bump(ax, ay, ux, uy, nx, ny, x0, p, a, c)
         if _rounded(c):
-            for k in range(0, len(q), 3):
-                steps += [q[k], (q[k + 1], q[k + 2])]
+            mine = [[q[k], (q[k + 1], q[k + 2])] for k in range(0, len(q), 3)]
         else:
-            steps += q
+            mine = [[q[k], q[k + 1]] for k in range(0, len(q), 2)]
+        if prev is not None and prev[1] != side and abs((x0 - prev[0]) - p) < 1.0:
+            # next to the last bump on the other side: one straight leg
+            # between them, no corners back onto the baseline
+            corners[-1].pop()
+            mine.pop(0)
+        corners.append(mine)
+        prev = (x0, side)
+    for mine in corners:
+        for corner in mine:
+            steps += corner
     steps.append((bx, by))
     new = []
     at = steps[0]
@@ -391,8 +532,9 @@ def _rebuild(board, room: _Room, track, bumps: List[Tuple[float, int, float]], p
         board.Add(t)
         room.remember(t)
         new.append(t)
-    room.forget(track)
-    board.Remove(track)
+    for member in track.members:
+        room.forget(member)
+        board.Remove(member)
     return new
 
 
@@ -404,35 +546,45 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
     if not tracks:
         return 0.0, [], []
     w = max(t.GetWidth() for t in tracks)
-    p = float(max(spacing, w + clr))
-    slots: List[_Slot] = []
-    per_track: List[List[_Slot]] = []
-    for t in tracks:
-        found = _slots(room, t, p, float(amin), float(amax), clr, avoid_net)
-        per_track.append(found)
-        slots += found
-        if sum(_extra(sl.amax, p)[0] for sl in found) >= need:
-            # one straight run holds it all: keep the meander in one place (one
-            # KiCad tuning pattern per net, the way the length tuner makes them)
-            slots = found
+    # KiCad's pattern spacing first; a net with no room at that pitch (a thin
+    # pair track between a connector and its ESD part, with a via beside its
+    # only run) gets the tightest pitch the clearance allows, the way the
+    # designer narrows the tuner's spacing where the room is short
+    pitches = [float(max(spacing, w + clr))]
+    if w + clr < pitches[0]:
+        pitches.append(float(w + clr))
+    best: Tuple[float, List[_Slot], float] = (0.0, [], pitches[0])     # (length it can add, slots, pitch)
+    for p in pitches:
+        slots: List[_Slot] = []
+        def capacity(some: List[_Slot]) -> float:
+            picked = _pick(some, float("inf"), p)
+            return _added([(c.track, c.x0, c.side, c.amax) for c in picked], p)
+
+        for t in tracks:
+            found = _slots(room, t, p, float(amin), float(amax), clr, avoid_net)
+            slots += found
+            if capacity(found) >= need:
+                # one straight run holds it all: keep the meander in one place (one
+                # KiCad tuning pattern per net, the way the length tuner makes them)
+                slots = found
+                break
+            if capacity(slots) >= need * 1.5:
+                break                                # enough room found; no need to survey the rest
+        can = capacity(slots)
+        if can > best[0]:
+            best = (can, slots, p)
+        if can >= need:
             break
-        if sum(_extra(sl.amax, p)[0] for sl in slots) >= need * 1.5:
-            break                                    # enough room found; no need to survey the rest
+    _, slots, p = best
     if not slots:
         return 0.0, [], []
     # the fewest bumps: the tallest slots first, then all of them scaled down
     # by one factor so the total comes out at `need`
-    slots.sort(key=lambda sl: -sl.amax)
-    chosen, total = [], 0.0
-    for sl in slots:
-        chosen.append(sl)
-        total += _extra(sl.amax, p)[0]
-        if total >= need:
-            break
-    # neighbouring slots on one track overlap when on opposite sides only if
-    # they share a leg: slots are 2p apart, a bump is p wide, so they never do
+    chosen = _pick(slots, need, p)
+    total = _added([(c.track, c.x0, c.side, c.amax) for c in chosen], p)
+
     def extra_at(t):
-        return sum(_extra(amin + t * (sl.amax - amin), p)[0] for sl in chosen)
+        return _added([(sl.track, sl.x0, sl.side, amin + t * (sl.amax - amin)) for sl in chosen], p)
     # fewer bumps while even the lowest ones overshoot
     while len(chosen) > 1 and extra_at(0.0) > need:
         chosen.pop()
@@ -471,7 +623,7 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
         gained = sum(i.GetLength() for i in items) - before
         added += gained
         new += items
-        removed.append(track)
+        removed += track.members
         pieces.append({"base": base, "items": items, "gained": gained, "spacing": int(p),
                        "amplitudes": [a for _, _, a in bumps]})
     lengthen.last_pieces = pieces

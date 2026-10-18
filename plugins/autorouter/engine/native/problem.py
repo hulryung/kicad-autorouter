@@ -31,6 +31,7 @@ class NetRules:
 class Cluster:
     """Copper of one net that is already connected together."""
     cells: Set[int] = field(default_factory=set)          # grid indices (all layers)
+    copper: Set[int] = field(default_factory=set)         # cells inside the pads' copper, on their layers
     anchors: List[Tuple[int, int]] = field(default_factory=list)   # (cx, cy) pad centres, for the heuristic
     refs: Set[str] = field(default_factory=set)           # footprints whose pads are in here
     tight: bool = False                                   # holds a necked-down (fine-pitch) escape

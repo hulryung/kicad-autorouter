@@ -764,6 +764,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     pad_cells: Dict[int, List[Tuple[object, Set[int], Tuple[int, int], str]]] = {}
     tight_by_fp: Dict[int, Set[str]] = {}
     pending = []
+    pad_copper: Dict[Tuple[int, int, int], Set[int]] = {}   # (net, pad x, pad y) -> cells inside its copper
     # Every piece of copper as a KiCad shape, in 2 mm buckets per layer, for
     # exact collision tests when planning pad escapes.
     BUCKET = 2_000_000
@@ -831,6 +832,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                         via_block[idx] = 1
         if code in nets:
             pending.append((pad, code, pl, pos, own_cells, centre))
+            pad_copper.setdefault((code, pos.x, pos.y), set()).update(own_cells)
 
     # Existing tracks and vias.
     say("Rasterizing existing tracks...")
@@ -1397,6 +1399,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 groups[root] = Cluster()
             cl = groups[root]
             cl.cells.update(cells)
+            pos = pad.GetPosition()
+            cl.copper.update(pad_copper.get((code, pos.x, pos.y), ()))
             cl.anchors.append(centre)
             if ref:
                 cl.refs.add(ref)
