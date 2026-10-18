@@ -48,6 +48,9 @@ PAIR_EXCEPTIONS = {
     "pinch": "the two lines would come too close at a corner",
     "blocked": "the coupled lines' pad entries would run into other copper",
 }
+PAIR_VIA_SPAN_NM = 8_000_000   # a coupled run shorter than this stays on one layer (two via pairs are not worth it)
+PAIR_VIA_STRETCH_NM = 2_000_000  # a coupled stretch between two via pairs is at least this long
+PAIR_BUDGET = 8          # a pair's share of the per-connection time: two lines, several runs tried (layers, swaps)
 PAIR_UNNECESSARY = ("short", "joined")          # no skew tuning or coupling rules for these either
 PROTECTED_GROUPS = ("pairs", "memory", "high_speed")          # routing groups lower groups may not rip up
 
@@ -808,10 +811,16 @@ class Router:
                             for i in range(len(pts) - 1):
                                 run = grid.segment_cells(layer, *pts[i], *pts[i + 1], grid.pitch // 2)
                                 for idx in run:
-                                    g = p.lane_guard[idx] if p.lane_guard is not None else 0
-                                    if owners[idx] not in (0, net.code) or (g and g != net.code):
+                                    if owners[idx] not in (0, net.code):
                                         ok = False
                                         break
+                                # the whole width of the track stays out of other pads' outlet lanes
+                                if ok and p.lane_guard is not None:
+                                    for idx in grid.segment_cells(layer, *pts[i], *pts[i + 1], max(grid.pitch // 2, w // 2)):
+                                        g = p.lane_guard[idx]
+                                        if g and g != net.code:
+                                            ok = False
+                                            break
                                 if not ok:
                                     break
                                 cells += run
@@ -1061,7 +1070,10 @@ class Router:
         def usable(cands):
             return [(k, c) for k, c in cands if owners[c] in (0, ca.net, cb.net)]
 
-        s_list = usable(starts(xa1, ya1, xb1, yb1, la, ca.net, ea1))
+        s_all = starts(xa1, ya1, xb1, yb1, la, ca.net, ea1)
+        s_list = usable(s_all)
+        # the stretch the coupled run may start on: no via within a lead of it
+        lead_from = (min(s_all)[1], max(s_all)[1]) if s_all else None
         g_list = usable(starts(xa2, ya2, xb2, yb2, la2, ca.net, ea2))
         if not s_list or not g_list:
             self._pair_fail(na.name, 'no_start', f'no coupled start/goal (starts {len(s_list)}, goals {len(g_list)})')
@@ -1079,203 +1091,20 @@ class Router:
         s_cells = set(s_costs)
         anchors = [grid.unpack(c)[1:] for c in list(g_cells)[:1]]
         guard = self._wide_lane_guard(int(math.ceil(d / grid.pitch)))
-        cells = astar.route(grid, owners, p.via_block, ca.net, s_cells, g_cells, anchors,
-                            self.horizontal, via_cost, False, 0, cap, self.opts.turn_cost, cancelled,
-                            also_ok=cb.net, source_costs=s_costs, routable=self.routable, via_guard=p.via_guard,
-                            lane_guard=guard)
-        if not cells or len(cells) < 2:
-            self._pair_fail(na.name, 'no_path', 'no coupled path')
-            return False
-        own_cells = set(cells)
-        # straightening keeps out of other pins' outlets as the search did
-        cells = _smooth(grid, cells, lambda idx: idx in own_cells or (
-            owners[idx] in (0, ca.net, cb.net) and (guard is None or guard[idx] in (0, ca.net, cb.net))))
-        segments, _ = _simplify(grid, cells)
-        if not segments:
-            return False
-        points = [(segments[0][1], segments[0][2])] + [(sg[3], sg[4]) for sg in segments]
-        layer = segments[0][0]
-        # which side of the centreline each net runs on, decided at the start
-        # and checked at the end (a twist would need a crossing)
-        # The direction is the run's over its first (last) millimetre, not
-        # its first segment alone: a one-cell jog where the run leaves the
-        # midpoint between the pins would otherwise decide the side at random.
-        def heading(pts, reach):
-            x0, y0 = pts[0]
-            left = reach
-            for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
-                seg = math.hypot(x2 - x1, y2 - y1)
-                if seg >= left:
-                    f = left / seg
-                    return x1 + (x2 - x1) * f - x0, y1 + (y2 - y1) * f - y0
-                left -= seg
-            return pts[-1][0] - x0, pts[-1][1] - y0
-
-        reach = max(1_000_000, 4 * grid.pitch)
-
-        def side_at(px, py, at_end):
-            pts = points[::-1] if at_end else points
-            ux, uy = heading(pts, reach)
-            if at_end:
-                ux, uy = -ux, -uy                      # the direction of travel, arriving
-            vx, vy = px - pts[0][0], py - pts[0][1]
-            # which side of the run a line is on: its pin against the partner's
-            return ux * vy - uy * vx
-
-        def side(xa, ya, xb, yb, at_end):
-            da = side_at(grid.nm_x(xa), grid.nm_y(ya), at_end)
-            db = side_at(grid.nm_x(xb), grid.nm_y(yb), at_end)
-            return 1 if da - db > 0 else -1
-        # which side each line runs on: a first guess from the run's heading,
-        # then the other; a side is right when the two finished tracks (pad
-        # entries included) neither cross nor come within clearance: that
-        # is what a crossing pair really is, whatever the run's direction
-        first = side(xa1, ya1, xb1, yb1, False)
-        need = na.rules.clearance + w
+        # A coupled run may change layers: the two lines flare apart to a via
+        # each, side by side across the run, and close up again beyond (a
+        # pair's way through a pin row it cannot cross on its own layer).
+        # dv is the vias' distance from the centreline, flare the 45-degree
+        # step out to it.
+        vr = na.rules.via_diameter / 2.0
+        dv = max(d, vr + na.rules.clearance / 2.0, (na.rules.via_drill + p.hole_to_hole) / 2.0) + grid.pitch / 2.0
+        flare = dv - d
+        via_reach = int(math.ceil((dv + vr - W / 2.0) / grid.pitch)) + 1
 
         def owner_map(width):
             """The clearance map for a track this wide (or the nearest narrower)."""
             keys = [k for k in p.owners if k[1] == na.rules.clearance and k[0] <= width]
             return p.owners[max(keys)] if keys else None
-
-        clear_cache = {}
-
-        def seg_clear(seg, code):
-            """A track piece keeps clear of every net but its own: the
-            partner's pins and its tracks on other stretches of the pair are
-            copper like any other (only the centreline was searched)."""
-            key_ = (seg, code)
-            ok = clear_cache.get(key_)
-            if ok is None:
-                lay, x1, y1, x2, y2, ww = seg
-                om = owner_map(ww)
-                ok = True
-                if om is not None:
-                    for idx in grid.segment_cells(lay, x1, y1, x2, y2, grid.pitch // 2):
-                        o = om[idx]
-                        if o != 0 and o != code:
-                            if _DEBUG:
-                                who = p.nets[o].name if o in p.nets else o
-                                print(f"[pair-blocked] {p.nets[code].name} seg {seg} hits {who}", flush=True)
-                            ok = False
-                            break
-                clear_cache[key_] = ok
-            return ok
-
-        def apart(segs_a, segs_b):
-            return min((_segment_distance(a[1:5], b[1:5]) for a in segs_a for b in segs_b), default=need)
-
-        def trim(poly, t):
-            """The polyline with its first t nanometres cut off."""
-            left = t
-            for i in range(len(poly) - 1):
-                (x1, y1), (x2, y2) = poly[i], poly[i + 1]
-                seg = math.hypot(x2 - x1, y2 - y1)
-                if seg > left:
-                    f = left / seg
-                    q = (int(round(x1 + (x2 - x1) * f)), int(round(y1 + (y2 - y1) * f)))
-                    return [q] + poly[i + 1:]
-                left -= seg
-            return None
-
-        def run_length(poly):
-            return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(poly, poly[1:]))
-
-        def octilinear(ax, ay, bx, by):
-            return ax == bx or ay == by or abs(abs(bx - ax) - abs(by - ay)) <= 2
-
-        def entries(net, end_cell, join_to):
-            """Ways from a pin's exit onto the coupled run, best first: on
-            along the escape then a 45-degree step (a designer's dog-leg),
-            the 45 first then straight, the two other octilinear bends, and
-            last a single slanted step. Each starts at the pad."""
-            ex, ey, px, py, sw = net.endpoints.get(end_cell, (None,) * 5)
-            l_, cx, cy = grid.unpack(end_cell)
-            gx, gy = grid.nm_x(cx), grid.nm_y(cy)
-            pad = []
-            if ex is not None:
-                if (ex, ey) != (px, py) and (ex, ey) != (gx, gy):
-                    pad += [(layer, px, py, ex, ey, sw), (layer, ex, ey, gx, gy, sw)]
-                elif (px, py) != (gx, gy):
-                    pad.append((layer, px, py, gx, gy, sw))
-            # the step onto the run stays at the pin's escape width (necked at fine pitch)
-            ew = min(w, sw) if (ex is not None and sw) else w
-            jx, jy = join_to
-            if (gx, gy) == (jx, jy):
-                return [pad]
-            out, seen = [], set()
-
-            def add(bends):
-                pts = [(gx, gy)] + [b for b in bends if b not in ((gx, gy), (jx, jy))] + [(jx, jy)]
-                key_ = tuple(pts)
-                if key_ in seen:
-                    return
-                seen.add(key_)
-                out.append(pad + [(layer, a[0], a[1], b[0], b[1], ew) for a, b in zip(pts, pts[1:])])
-
-            if ex is not None and (gx, gy) != (px, py):
-                ux, uy = gx - px, gy - py
-            else:
-                ux, uy = jx - gx, jy - gy
-            norm = math.hypot(ux, uy) or 1.0
-            ux, uy = ux / norm, uy / norm
-            along = (jx - gx) * ux + (jy - gy) * uy
-            perp = math.hypot((jx - gx) - along * ux, (jy - gy) - along * uy)
-            straight = along - perp
-            if straight > grid.pitch:
-                add([(int(round(gx + ux * straight)), int(round(gy + uy * straight)))])
-            dx, dy = jx - gx, jy - gy
-            sx, sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
-            m = min(abs(dx), abs(dy))
-            if octilinear(gx, gy, jx, jy):
-                add([])
-            else:
-                # diagonal first, then straight on; and straight first, then the diagonal
-                add([(gx + sx * m, gy + sy * m)])
-                add([(jx - sx * m, jy - sy * m)])
-                add([])
-            return out
-
-        # a via swap: where the pins are in opposite order at the two ends,
-        # one line drops through a via, crosses under its partner at 45
-        # degrees on another layer and comes back up on the other side; the
-        # partner steps across on the run's layer. e keeps the vias clear
-        # of the partner line, and swap_half is half the stretch it takes.
-        vr = na.rules.via_diameter / 2.0
-        need_v = vr + na.rules.clearance + w / 2.0
-        e_sw = max(need_v - 2 * d, need_v / math.sqrt(2) - d, 0) + grid.pitch / 2
-        swap_half = d + 2 * e_sw
-
-        def point_at(s_):
-            """The centreline point s_ nm along it, and the direction there."""
-            for (x1, y1), (x2, y2) in zip(points, points[1:]):
-                seg = math.hypot(x2 - x1, y2 - y1)
-                if seg and s_ <= seg:
-                    ux, uy = (x2 - x1) / seg, (y2 - y1) / seg
-                    return x1 + ux * s_, y1 + uy * s_, ux, uy
-                s_ -= seg
-            return None
-
-        def swap_spots():
-            """Where a swap fits: the middle of a straight stretch of the run
-            long enough for it, nearest the ends first (a designer swaps
-            next to the part whose pins are the other way round)."""
-            total = run_length(points)
-            out, s0 = [], 0.0
-            margin = 2 * grid.pitch
-            lead = 1_000_000                           # clear of the pad entries: they need the run's ends
-            for (x1, y1), (x2, y2) in zip(points, points[1:]):
-                seg = math.hypot(x2 - x1, y2 - y1)
-                s_ = s0 + swap_half + margin
-                while s_ <= s0 + seg - swap_half - margin:
-                    if lead <= s_ - swap_half and s_ + swap_half <= total - lead:
-                        out.append(s_)
-                    s_ += 250_000
-                s0 += seg
-            out.sort(key=lambda v: min(v, total - v))
-            if _DEBUG:
-                print(f"[pair-swap] {na.name}: run {total / 1e6:.2f} mm, spots {[round(v / 1e6, 2) for v in out[:12]]}", flush=True)
-            return out[:12]
 
         def via_ok(x, y, code):
             cx, cy = grid.cell_x(x), grid.cell_y(y)
@@ -1298,249 +1127,705 @@ class Router:
                             return False
             return True
 
-        def swap_runs(sa, hopper, s_c):
-            got = point_at(s_c)
-            if got is None:
+        def unit(a, b):
+            ux, uy = b[0] - a[0], b[1] - a[1]
+            n_ = math.hypot(ux, uy) or 1.0
+            return ux / n_, uy / n_
+
+        def trim(poly, t):
+            """The polyline with its first t nanometres cut off."""
+            left = t
+            for i in range(len(poly) - 1):
+                (x1, y1), (x2, y2) = poly[i], poly[i + 1]
+                seg = math.hypot(x2 - x1, y2 - y1)
+                if seg > left:
+                    f = left / seg
+                    q = (int(round(x1 + (x2 - x1) * f)), int(round(y1 + (y2 - y1) * f)))
+                    return [q] + poly[i + 1:]
+                left -= seg
+            return None
+
+        lead_nm = 1_000_000 + flare                 # a straight lead before a via pair
+
+        def station():
+            """Where a run can turn about beyond the far end's pins: the
+            first spot out along the pins' escape, past the lead, where the
+            via pair fits either side of the escape axis and the lead back
+            to the pins is free. (sx, sy) nm and its cell, with the on-axis
+            goal point the lead runs to; None when nothing fits."""
+            ex, ey, px, py, _ = p.nets[ca.net].endpoints.get(ea2, (None,) * 5)
+            if ex is None:
                 return None
-            cx_, cy_, ux, uy = got
-            nx, ny = -uy, ux                           # side +1, as _offset_polyline has it
-
-            def at(al, lat):
-                return (int(round(cx_ + ux * al + nx * lat)), int(round(cy_ + uy * al + ny * lat)))
-            before = trim(points[::-1], total_c - (s_c - swap_half))
-            after = trim(points, s_c + swap_half)
-            if not before or not after:
+            gx, gy = grid.nm_x(xa2), grid.nm_y(ya2)
+            if (gx, gy) == (px, py):
                 return None
-            before = before[::-1]
-            runs_s, runs_e, middle, vias = {}, {}, {}, {}
-            for code, s_ in ((ca.net, sa), (cb.net, -sa)):
-                b_off = _offset_polyline(before, d, s_)
-                a_off = _offset_polyline(after, d, -s_)
-                if code == hopper:
-                    v1 = at(-d - e_sw, s_ * (d + e_sw))
-                    v2 = at(d + e_sw, -s_ * (d + e_sw))
-                    if not (via_ok(*v1, code) and via_ok(*v2, code)):
-                        return None
-                    under = None
-                    others = [l for l in range(grid.layers) if l != layer and self.routable[l]]
-                    # an outer layer first: a plane's layer is best left whole
-                    others.sort(key=lambda l: (0 if l in (0, grid.layers - 1) else 1, -abs(l - layer)))
-                    for l in others:
-                        sg = (l, v1[0], v1[1], v2[0], v2[1], w)
-                        if seg_clear(sg, code):
-                            under = sg
-                            break
-                    if under is None:
-                        return None
-                    runs_s[code] = b_off + [v1]
-                    runs_e[code] = [v2] + a_off
-                    middle[code] = [under]
-                    vias[code] = [v1, v2]
-                else:
-                    full = b_off + [at(-d, s_ * d), at(d, -s_ * d)] + a_off
-                    runs_s[code] = runs_e[code] = full
-            return runs_s, runs_e, middle, vias
+            ux, uy = unit((px, py), (gx, gy))
+            mx, my = (grid.nm_x(xa2) + grid.nm_x(xb2)) / 2.0, (grid.nm_y(ya2) + grid.nm_y(yb2)) / 2.0
+            ax_, ay_ = mx + ux * kmin * grid.pitch, my + uy * kmin * grid.pitch
+            om = owner_map(W)
+            approach = max(500_000, flare + 2 * grid.pitch)   # straight in to the station on the via layer
+            others = [l_ for l_ in range(grid.layers) if l_ != la2 and self.routable[l_]]
 
-        total_c = run_length(points)
-
-        def acute(segs):
-            """A line that doubles back (a corner sharper than 90 degrees)."""
-            for a, b in zip(segs, segs[1:]):
-                if a[0] != b[0] or (a[3], a[4]) != (b[1], b[2]):
-                    continue
-                ux, uy, vx, vy = a[3] - a[1], a[4] - a[2], b[3] - b[1], b[4] - b[2]
-                if ux * vx + uy * vy < -0.01 * math.hypot(ux, uy) * math.hypot(vx, vy):
-                    return True
-            return False
-
-        def build(sa, swap=None):
-            """Both lines for one choice of sides, or None. Each end gets its
-            pad entries chosen together: the first shapes, joined to the run
-            where it begins or a little further along it, that keep clear of
-            other copper and of the partner line. With a swap (the line
-            that hops, where along the run) the lines change sides there."""
-            runs_s, runs_e, middle, vias = {}, {}, {}, {}
-            total = run_length(points)
-            room = {True: total, False: total}
-            room_keep = grid.pitch
-            if swap is None:
-                for net, code, side_ in ((na, ca.net, sa), (nb, cb.net, -sa)):
-                    runs_s[code] = runs_e[code] = _offset_polyline(points, d, side_)
-            else:
-                got = swap_runs(sa, *swap)
-                if got is None:
-                    return None, "blocked"
-                runs_s, runs_e, middle, vias = got
-                room = {True: swap[1] - swap_half, False: total - swap[1] - swap_half}
-                room_keep = 500_000                    # the run leads into the swap straight
-            step = max(grid.pitch * 2, 250_000)
-            trims = {end: [k * step for k in range(0, 7)
-                           if k == 0 or (k * step < total * 0.3 and k * step < room[end] - room_keep)]
-                     for end in (True, False)}
-            ends = {}
-            for at_start, (a_cell, b_cell) in ((True, (ea1, eb1)), (False, (ea2, eb2))):
-                best = None
-                options = {}
-                for net, code, cell in ((na, ca.net, a_cell), (nb, cb.net, b_cell)):
-                    run = runs_s[code] if at_start else runs_e[code][::-1]
-                    opts = []
-                    for ti, t in enumerate(trims[at_start]):
-                        rest = trim(run, t) if t else run
-                        if rest is None or len(rest) < 2:
-                            continue
-                        for si_, ent in enumerate(entries(net, cell, rest[0])):
-                            if all(seg_clear(sg, code) for sg in ent):
-                                # an entry that meets the run at an acute angle (doubling back
-                                # onto it) only if nothing else will do
-                                bent = 0
-                                if ent:
-                                    l_ = ent[-1]
-                                    ux, uy = l_[3] - l_[1], l_[4] - l_[2]
-                                    vx, vy = rest[1][0] - rest[0][0], rest[1][1] - rest[0][1]
-                                    if ux * vx + uy * vy < -0.01 * math.hypot(ux, uy) * math.hypot(vx, vy):
-                                        bent = 30
-                                opts.append((ti * 3 + si_ + bent, t, ent))
-                    options[code] = opts
-                near_cache = {}
-
-                def near(code, t):
-                    """The first stretch of a line's coupled run from this end."""
-                    got = near_cache.get((code, t))
-                    if got is None:
-                        run = runs_s[code] if at_start else runs_e[code][::-1]
-                        run = (trim(run, t) if t else run) or []
-                        got = [(layer, a[0], a[1], b[0], b[1], w) for a, b in list(zip(run, run[1:]))[:3]]
-                        near_cache[(code, t)] = got
-                    return got
-                widest = None
-                for ca_cost, ta, ent_a in options[ca.net]:
-                    for cb_cost, tb, ent_b in options[cb.net]:
-                        cost = ca_cost + cb_cost + 2 * abs(ta - tb) / step
-                        if best is not None and cost >= best[0]:
-                            continue
-                        g_ = min(apart(ent_a, ent_b), apart(ent_a, near(cb.net, tb)), apart(ent_b, near(ca.net, ta)))
-                        widest = g_ if widest is None else max(widest, g_)
-                        if g_ < need:
-                            continue
-                        best = (cost, ta, ent_a, tb, ent_b)
-                if best is None:
-                    if _DEBUG:
-                        print(f"[pair-end] {na.name} {'start' if at_start else 'end'} side {sa}: "
-                              f"options {len(options[ca.net])}/{len(options[cb.net])} widest {widest}", flush=True)
-                    if not options[ca.net] or not options[cb.net]:
-                        return None, "blocked"
-                    return None, ("cross" if widest is not None and widest <= 0 else "close")
-                ends[at_start] = best
-            paths = []
-            for net, conn, e_key, cl_a, cl_b in ((na, ca, 0, ca.a, ca.b), (nb, cb, 1, cb_a, cb_b)):
-                s_end, g_end = ends[True], ends[False]
-                ts, ent_s = s_end[1 + 2 * e_key], s_end[2 + 2 * e_key]
-                tg, ent_g = g_end[1 + 2 * e_key], g_end[2 + 2 * e_key]
-                def piece(run):
-                    return [(layer, run[i][0], run[i][1], run[i + 1][0], run[i + 1][1], w) for i in range(len(run) - 1)]
-                rs, re_ = runs_s[conn.net], runs_e[conn.net]
-                if rs is re_:
-                    run = rs
-                    if ts:
-                        run = trim(run, ts)
-                    if tg and run:
-                        run = trim(run[::-1], tg)
-                        run = run[::-1] if run else None
-                    if not run or len(run) < 2:
-                        return None, "close"
-                    core = piece(run)
-                else:
-                    # the line that hops: its run to the first via, the
-                    # crossing underneath, its run on from the second
-                    head = trim(rs, ts) if ts else rs
-                    tail = trim(re_[::-1], tg) if tg else re_[::-1]
-                    if not head or not tail or len(head) < 2 or len(tail) < 2:
-                        return None, "close"
-                    core = piece(head) + middle[conn.net] + piece(tail[::-1])
-                if not all(seg_clear(sg, conn.net) for sg in core):
-                    return None, "blocked"
-                back = [(l, x2, y2, x1, y1, ww) for l, x1, y1, x2, y2, ww in reversed(ent_g)]
-                segs = ent_s + core + back
-                if swap is not None and acute(core):
-                    if _DEBUG:
-                        print(f"[pair-swap] {net.name} {swap}: doubles back", flush=True)
-                    return None, "close"
-                rp = RoutedPath(net.code, w, _merge_collinear(segs), list(vias.get(conn.net, [])),
-                                net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid + len(paths))
-                paths.append((rp, conn, cl_a, cl_b))
-            return paths, ""
-
-        def pair_apart(ra, rb):
-            """How far apart two finished lines are, as a track-to-track
-            centre distance: segments on one layer, and each line's vias
-            against the other's segments on any layer."""
-            g_ = min((_segment_distance(a[1:5], b[1:5]) for a in ra.segments for b in rb.segments
-                      if a[0] == b[0]), default=need)
-            for r1, r2 in ((ra, rb), (rb, ra)):
-                for vx, vy in r1.vias:
-                    for b in r2.segments:
-                        dv = _segment_distance((vx, vy, vx, vy), b[1:5]) - vr + w / 2.0
-                        g_ = min(g_, dv)
-            return g_
-
-        paths, closest, blocked = None, None, False
-        attempts = [(sa, None) for sa in (first, -first)]
-        swaps = []
-        if self.opts.pair_via_swap and getattr(self, '_allow_swap', True):
-            spots = swap_spots()
-            swaps = [(sa, (hop, s_)) for s_ in spots for sa in (first, -first) for hop in (ca.net, cb.net)]
-        swapped, plain = False, None
-        for n_try, (sa, swap) in enumerate(attempts + swaps):
-            if swap is not None:
-                # only when coupling failed for crossing (or pinching) lines,
-                # never for a run walled in by other copper
-                if n_try == len(attempts):
-                    if closest is None:
-                        break
-                    plain = (closest, blocked)
-                if cancelled is not None and cancelled():
+            def free(l_, x1, y1, x2, y2):
+                return om is None or all(om[i] in (0, ca.net, cb.net)
+                                         for i in grid.segment_cells(l_, int(x1), int(y1), int(x2), int(y2), grid.pitch // 2))
+            for t in range(0, 13):
+                dist = lead_nm + t * 250_000
+                sx, sy = ax_ + ux * dist, ay_ + uy * dist
+                scx, scy = grid.cell_x(sx), grid.cell_y(sy)
+                if not grid.inside(scx, scy):
                     break
-            cand, why = build(sa, swap)
-            if _DEBUG and swap is not None and cand is None:
-                print(f"[pair-swap] {na.name} side {sa} {swap}: {why}", flush=True)
-            if cand is None:
-                blocked = blocked or why == "blocked"
-                if why == "cross":
-                    closest = 0 if closest is None else max(closest, 0)
-                elif why == "close":
-                    closest = 1 if closest is None else max(closest, 1)
-                continue
-            gap_ = pair_apart(cand[0][0], cand[1][0])
-            if _DEBUG and gap_ < need:
-                print(f"[pair-halves] {na.name} side {sa} swap {swap}: halves {gap_:.0f} apart, need {need}", flush=True)
-            if gap_ >= need:
-                paths = cand
-                swapped = swap is not None
-                break
-            closest = gap_ if closest is None else max(closest, gap_)
-        if paths is None:
-            if plain is not None:
-                closest, blocked = plain           # why the plain run failed, not the swaps
-            # the halves cross (touch) both ways round, or only come too close
-            if closest is not None and closest <= 0:
-                self._pair_fail(na.name, 'cross', 'pair would cross')
-            elif blocked:
-                self._pair_fail(na.name, 'blocked', 'entries would run into other copper')
+                sx, sy = grid.nm_x(scx), grid.nm_y(scy)
+                if not free(la2, sx, sy, ax_, ay_):
+                    continue
+                v1 = (int(round(sx - uy * dv)), int(round(sy + ux * dv)))
+                v2 = (int(round(sx + uy * dv)), int(round(sy - ux * dv)))
+                if not all(via_ok(x, y, ca.net) or via_ok(x, y, cb.net) for x, y in (v1, v2)):
+                    continue
+                # the approach comes from the pins' side: the run passes under the pins and turns about
+                acx, acy = grid.cell_x(sx - ux * approach), grid.cell_y(sy - uy * approach)
+                if not grid.inside(acx, acy):
+                    continue
+                apx, apy = grid.nm_x(acx), grid.nm_y(acy)
+                layers = [l_ for l_ in others if free(l_, apx, apy, sx, sy)]
+                if layers:
+                    return sx, sy, scx, scy, int(round(ax_)), int(round(ay_)), acx, acy, layers
+            return None
+
+        def attempt(allow, factor=1, about=False):
+            """The coupled run on one layer (allow False) or with layer
+            changes at `factor` times the via cost; routes the pair and
+            returns True, or says why not. `about`: the run ends with a turn
+            about through a via pair beyond the far end's pins (the pins
+            are the other way round there): the station is chosen first and
+            the search aims at it on another layer."""
+            pair_via_cost = via_cost * factor
+            goals_, anchors_, tail = g_cells, anchors, None
+            if about:
+                st = station()
+                if st is None:
+                    if _DEBUG:
+                        print(f"[pair-via] {na.name}: no room to turn about beyond the far pins", flush=True)
+                    self._pair_fail(na.name, 'no_path', 'no room to turn about beyond the pins')
+                    return False
+                sx, sy, scx, scy, gx_, gy_, acx, acy, layers = st
+                goals_ = {grid.index(l_, acx, acy) for l_ in layers}
+                anchors_ = [(acx, acy)]
+                tail = ((grid.nm_x(acx), grid.nm_y(acy)), (int(sx), int(sy)), (gx_, gy_))
+            # with layer changes the search has every layer to look through
+            pair_cap = cap * (3 if allow else 1)
+            def via_runs(side_):
+                """One line of a run with layer changes: its first stretch up to
+                its first via, the middle stretches with their vias, its last
+                stretch from its last via; and the vias. None where a stretch is
+                too short to flare out and back. Where the run turns about at
+                a via pair (down before a part's pin rows, straight back up
+                beyond them to come into the pins from the far side) each line
+                keeps its own side of the board, which is the other side of
+                the direction of travel: that is how a pair whose pins are the
+                other way round at one part comes in without crossing."""
+                sides, vs = [side_], []
+                for k in range(len(pieces) - 1):
+                    pts_in, pts_out = pieces[k][1], pieces[k + 1][1]
+                    jx, jy = pts_in[-1]
+                    ux, uy = unit(pts_in[-2], pts_in[-1])
+                    vx, vy = unit(pts_out[0], pts_out[1])
+                    about = ux * vx + uy * vy < -0.7                # turning about (more than 135 degrees)
+                    if about:
+                        nx, ny, n_ = vy, -vx, 1.0                  # square to the stretch going back
+                    elif ux * vx + uy * vy < 0.999:
+                        return None                                # a via pair sits on a straight run, not at a bend
+                    else:
+                        nx, ny, n_ = -uy, ux, 1.0
+                    sd = sides[-1]
+                    vs.append((int(round(jx + nx / n_ * sd * dv)), int(round(jy + ny / n_ * sd * dv))))
+                    sides.append(-sd if about else sd)
+                polys = [_offset_polyline(pts, d, sd) for (_, pts), sd in zip(pieces, sides)]
+                heads = []
+                for k, poly in enumerate(polys):
+                    if 0 < k < len(polys) - 1 and sum(math.hypot(q[0] - o[0], q[1] - o[1]) for o, q in zip(poly, poly[1:])) \
+                            < PAIR_VIA_STRETCH_NM:
+                        return None                                # two via pairs within a few mm: not worth it
+                    if k > 0:
+                        poly = trim(poly, flare)
+                    if poly and k < len(polys) - 1:
+                        poly = trim(poly[::-1], flare)
+                        poly = poly[::-1] if poly else None
+                    if not poly or len(poly) < 2:
+                        return None
+                    heads.append(poly)
+                mid = []
+                for k in range(1, len(pieces) - 1):
+                    lay = pieces[k][0]
+                    pts = [vs[k - 1]] + heads[k] + [vs[k]]
+                    mid += [(lay, a[0], a[1], b[0], b[1], w) for a, b in zip(pts, pts[1:])]
+                return heads[0] + [vs[0]], [vs[-1]] + heads[-1], mid, vs
+
+            cells = astar.route(grid, owners, p.via_block, ca.net, s_cells, goals_, anchors_,
+                                self.horizontal, pair_via_cost, allow, via_reach, pair_cap, self.opts.turn_cost, cancelled,
+                                also_ok=cb.net, source_costs=s_costs, routable=self.routable, via_guard=p.via_guard,
+                                lane_guard=guard, via_lead=int(math.ceil(lead_nm / grid.pitch)),
+                                lead_from=lead_from)
+            if not cells or len(cells) < 2:
+                if _DEBUG:
+                    print(f"[pair-path] {na.name} vias {allow}: no path after {astar.LAST['expansions']} expansions"
+                          f"{' (cap)' if astar.LAST['capped'] else ''}, {len(s_cells)} starts, {len(g_cells)} goals", flush=True)
+                self._pair_fail(na.name, 'no_path', 'no coupled path')
+                return False
+            own_cells = set(cells)
+            # straightening keeps out of other pins' outlets as the search did
+            cells = _smooth(grid, cells, lambda idx: idx in own_cells or (
+                owners[idx] in (0, ca.net, cb.net) and (guard is None or guard[idx] in (0, ca.net, cb.net))))
+            segments, _ = _simplify(grid, cells)
+            if not segments:
+                return False
+            # the run's stretches, one layer each; a layer change between two is a via pair
+            pieces = []
+            for sg in segments:
+                a_, b_ = (sg[1], sg[2]), (sg[3], sg[4])
+                if pieces and pieces[-1][0] == sg[0]:
+                    pieces[-1][1].append(b_)
+                else:
+                    pieces.append((sg[0], [a_, b_]))
+            if tail is not None:
+                # the chosen station: straight in on the layer the search arrived on,
+                # the via pair, and the lead back to the pins on their layer
+                ap_, st_, g_ = tail
+                if pieces[-1][1][-1] != ap_:
+                    pieces[-1][1].append(ap_)
+                pieces[-1][1].append(st_)
+                pieces.append((la2, [st_, g_]))
+            candidates = [pieces]
+            if len(pieces) > 1:
+                # a short first or last stretch runs straight along the pad's
+                # escape, so the via pair sits square before the pins and the
+                # lines come in straight (the search may have come up a little
+                # to one side); the stretches as found stay as the fallback
+                pieces = [(l_, list(pts)) for l_, pts in pieces]
+                candidates.insert(0, pieces)
+                for at_start in (True, False):
+                    lay, pts = pieces[0] if at_start else pieces[-1]
+                    length = sum(math.hypot(q[0] - o[0], q[1] - o[1]) for o, q in zip(pts, pts[1:]))
+                    if length > 2_500_000:
+                        continue
+                    cell = ea1 if at_start else ea2
+                    ex, ey, px, py, _ = p.nets[ca.net].endpoints.get(cell, (None,) * 5)
+                    l_, cx_, cy_ = grid.unpack(cell)
+                    if ex is None or (grid.nm_x(cx_), grid.nm_y(cy_)) == (px, py):
+                        continue
+                    ux, uy = unit((px, py), (grid.nm_x(cx_), grid.nm_y(cy_)))
+                    anchor = pts[0] if at_start else pts[-1]
+                    far = (int(round(anchor[0] + ux * length)), int(round(anchor[1] + uy * length)))
+                    # straight through the station on the other layer too, then
+                    # an octilinear jog back onto the path the search found
+                    on = max(500_000, flare + 2 * grid.pitch)
+                    beyond = (int(round(far[0] + ux * on)), int(round(far[1] + uy * on)))
+                    if at_start:
+                        nxt = pieces[1][1]
+                        rest = nxt[2:] if len(nxt) > 2 else []
+                        pieces[0] = (lay, [anchor, far])
+                        pieces[1] = (pieces[1][0], [far] + jog(*beyond, *nxt[1], at_end=False) + rest)
+                    else:
+                        prv = pieces[-2][1]
+                        rest = prv[:-2] if len(prv) > 2 else []
+                        pieces[-1] = (lay, [far, anchor])
+                        pieces[-2] = (pieces[-2][0], rest + jog(*prv[-2], *beyond, at_end=True) + [far])
+            via_cache = {}
+            on = max(500_000, flare + 2 * grid.pitch)
+            for pieces in candidates:
+                # every via pair sits on a straight stretch: where the search
+                # turned at a layer change, the run carries straight on past the
+                # station on the new layer and jogs back to the path after it
+                for k in range(len(pieces) - 1):
+                    pts_in, (lay_out, pts_out) = pieces[k][1], pieces[k + 1]
+                    ux, uy = unit(pts_in[-2], pts_in[-1])
+                    vx, vy = unit(pts_out[0], pts_out[1])
+                    dot = ux * vx + uy * vy
+                    if dot >= 0.999 or dot < -0.7 or len(pts_out) < 2:
+                        continue
+                    jx, jy = pts_in[-1]
+                    beyond = (int(round(jx + ux * on)), int(round(jy + uy * on)))
+                    pieces[k + 1] = (lay_out, [(jx, jy)] + jog(*beyond, *pts_out[1], at_end=False) + pts_out[2:])
+                points = [pt for _, pts in pieces for pt in pts]
+                if len(pieces) == 1:
+                    break
+                if _DEBUG:
+                    print(f"[pair-via] {na.name}: w {w} gap {gap} d {d:.0f} dv {dv:.0f} via {na.rules.via_diameter}/{na.rules.via_drill} clr {na.rules.clearance}", flush=True)
+                    print(f"[pair-via] {na.name}: pieces " + " | ".join(
+                        f"L{l_} ({pts[0][0] / 1e6:.1f},{pts[0][1] / 1e6:.1f})->({pts[-1][0] / 1e6:.1f},{pts[-1][1] / 1e6:.1f})"
+                        for l_, pts in pieces), flush=True)
+                for side_ in (1, -1):
+                    got = via_runs(side_)
+                    via_cache[side_] = got if got is not None and all(
+                        via_ok(x, y, ca.net) or via_ok(x, y, cb.net) for x, y in got[3]) else None
+                if all(v is not None for v in via_cache.values()):
+                    break
             else:
-                self._pair_fail(na.name, 'pinch', 'halves would pinch: routed separately')
-            return False
-        if swapped:
-            self.pair_swaps = getattr(self, "pair_swaps", 0) + 1
-            self.pair_log.append((na.name, "coupled with a via swap (pins in opposite order at the two ends)"))
-        self.next_pid += 2
-        for rp, conn, cl_a, cl_b in paths:
-            path = _Path(rp.pid, conn, rp, cells, paired=True)
-            self.paths[rp.pid] = path
-            self._claim(path)
-            self.parent[conn.net][self._find(conn.net, cl_a)] = self._find(conn.net, cl_b)
-            if on_path:
-                on_path(rp)
-        return True
+                if _DEBUG:
+                    for side_ in (1, -1):
+                        got = via_runs(side_)
+                        if got is None:
+                            print(f"[pair-via] {na.name} side {side_}: a stretch is too short to flare "
+                                  f"(pieces {[(l_, round(sum(math.hypot(q[0] - o[0], q[1] - o[1]) for o, q in zip(pts, pts[1:])) / 1e6, 2)) for l_, pts in pieces]})", flush=True)
+                        else:
+                            for x, y in got[3]:
+                                if not (via_ok(x, y, ca.net) or via_ok(x, y, cb.net)):
+                                    cx_, cy_ = grid.cell_x(x), grid.cell_y(y)
+                                    om = owner_map(w)
+                                    who = {p.nets[om[grid.index(li, cx_, cy_)]].name if om[grid.index(li, cx_, cy_)] in p.nets else om[grid.index(li, cx_, cy_)] for li in range(grid.layers)}
+                                    print(f"[pair-via] {na.name} side {side_}: via at ({x / 1e6:.2f},{y / 1e6:.2f}) blocked: "
+                                          f"via_block {p.via_block[cy_ * grid.w + cx_]} guard {p.via_guard[cy_ * grid.w + cx_] if p.via_guard is not None else None} owners {who}", flush=True)
+                self._pair_fail(na.name, 'no_path', 'no room for the via pairs')
+                return False
+            layer_s, layer_e = pieces[0][0], pieces[-1][0]
+            layer = layer_s                                # the swap works on a single-layer run
+            # which side of the centreline each net runs on, decided at the start
+            # and checked at the end (a twist would need a crossing)
+            # The direction is the run's over its first (last) millimetre, not
+            # its first segment alone: a one-cell jog where the run leaves the
+            # midpoint between the pins would otherwise decide the side at random.
+            def heading(pts, reach):
+                x0, y0 = pts[0]
+                left = reach
+                for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+                    seg = math.hypot(x2 - x1, y2 - y1)
+                    if seg >= left:
+                        f = left / seg
+                        return x1 + (x2 - x1) * f - x0, y1 + (y2 - y1) * f - y0
+                    left -= seg
+                return pts[-1][0] - x0, pts[-1][1] - y0
+
+            reach = max(1_000_000, 4 * grid.pitch)
+
+            def side_at(px, py, at_end):
+                pts = points[::-1] if at_end else points
+                ux, uy = heading(pts, reach)
+                if at_end:
+                    ux, uy = -ux, -uy                      # the direction of travel, arriving
+                vx, vy = px - pts[0][0], py - pts[0][1]
+                # which side of the run a line is on: its pin against the partner's
+                return ux * vy - uy * vx
+
+            def side(xa, ya, xb, yb, at_end):
+                da = side_at(grid.nm_x(xa), grid.nm_y(ya), at_end)
+                db = side_at(grid.nm_x(xb), grid.nm_y(yb), at_end)
+                return 1 if da - db > 0 else -1
+            # which side each line runs on: a first guess from the run's heading,
+            # then the other; a side is right when the two finished tracks (pad
+            # entries included) neither cross nor come within clearance: that
+            # is what a crossing pair really is, whatever the run's direction
+            first = side(xa1, ya1, xb1, yb1, False)
+            need = na.rules.clearance + w - 10           # 10 nm: the offsets are rounded to whole nanometres
+
+            clear_cache = {}
+
+            def seg_clear(seg, code):
+                """A track piece keeps clear of every net but its own: the
+                partner's pins and its tracks on other stretches of the pair are
+                copper like any other (only the centreline was searched)."""
+                key_ = (seg, code)
+                ok = clear_cache.get(key_)
+                if ok is None:
+                    lay, x1, y1, x2, y2, ww = seg
+                    om = owner_map(ww)
+                    ok = True
+                    if om is not None:
+                        for idx in grid.segment_cells(lay, x1, y1, x2, y2, grid.pitch // 2):
+                            o = om[idx]
+                            if o != 0 and o != code:
+                                if _DEBUG:
+                                    who = p.nets[o].name if o in p.nets else o
+                                    print(f"[pair-blocked] {p.nets[code].name} seg {seg} hits {who}", flush=True)
+                                ok = False
+                                break
+                    clear_cache[key_] = ok
+                return ok
+
+            def apart(segs_a, segs_b):
+                return min((_segment_distance(a[1:5], b[1:5]) for a in segs_a for b in segs_b), default=need)
+
+            def run_length(poly):
+                return sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(poly, poly[1:]))
+
+            def octilinear(ax, ay, bx, by):
+                return ax == bx or ay == by or abs(abs(bx - ax) - abs(by - ay)) <= 2
+
+            def entries(net, end_cell, join_to, layer):
+                """Ways from a pin's exit onto the coupled run, best first: on
+                along the escape then a 45-degree step (a designer's dog-leg),
+                the 45 first then straight, the two other octilinear bends, and
+                last a single slanted step. Each starts at the pad."""
+                ex, ey, px, py, sw = net.endpoints.get(end_cell, (None,) * 5)
+                l_, cx, cy = grid.unpack(end_cell)
+                gx, gy = grid.nm_x(cx), grid.nm_y(cy)
+                pad = []
+                if ex is not None:
+                    if (ex, ey) != (px, py) and (ex, ey) != (gx, gy):
+                        pad += [(layer, px, py, ex, ey, sw), (layer, ex, ey, gx, gy, sw)]
+                    elif (px, py) != (gx, gy):
+                        pad.append((layer, px, py, gx, gy, sw))
+                # the step onto the run stays at the pin's escape width (necked at fine pitch)
+                ew = min(w, sw) if (ex is not None and sw) else w
+                jx, jy = join_to
+                if (gx, gy) == (jx, jy):
+                    return [pad]
+                out, seen = [], set()
+
+                def add(bends):
+                    pts = [(gx, gy)] + [b for b in bends if b not in ((gx, gy), (jx, jy))] + [(jx, jy)]
+                    key_ = tuple(pts)
+                    if key_ in seen:
+                        return
+                    seen.add(key_)
+                    out.append(pad + [(layer, a[0], a[1], b[0], b[1], ew) for a, b in zip(pts, pts[1:])])
+
+                if ex is not None and (gx, gy) != (px, py):
+                    ux, uy = gx - px, gy - py
+                else:
+                    ux, uy = jx - gx, jy - gy
+                norm = math.hypot(ux, uy) or 1.0
+                ux, uy = ux / norm, uy / norm
+                along = (jx - gx) * ux + (jy - gy) * uy
+                perp = math.hypot((jx - gx) - along * ux, (jy - gy) - along * uy)
+                straight = along - perp
+                if straight > grid.pitch:
+                    add([(int(round(gx + ux * straight)), int(round(gy + uy * straight)))])
+                dx, dy = jx - gx, jy - gy
+                sx, sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
+                m = min(abs(dx), abs(dy))
+                if octilinear(gx, gy, jx, jy):
+                    add([])
+                else:
+                    # diagonal first, then straight on; and straight first, then the diagonal
+                    add([(gx + sx * m, gy + sy * m)])
+                    add([(jx - sx * m, jy - sy * m)])
+                    add([])
+                return out
+
+            # a via swap: where the pins are in opposite order at the two ends,
+            # one line drops through a via, crosses under its partner at 45
+            # degrees on another layer and comes back up on the other side; the
+            # partner steps across on the run's layer. e keeps the vias clear
+            # of the partner line, and swap_half is half the stretch it takes.
+            need_v = vr + na.rules.clearance + w / 2.0
+            e_sw = max(need_v - 2 * d, need_v / math.sqrt(2) - d, 0) + grid.pitch / 2
+            swap_half = d + 2 * e_sw
+
+            def point_at(s_):
+                """The centreline point s_ nm along it, and the direction there."""
+                for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                    seg = math.hypot(x2 - x1, y2 - y1)
+                    if seg and s_ <= seg:
+                        ux, uy = (x2 - x1) / seg, (y2 - y1) / seg
+                        return x1 + ux * s_, y1 + uy * s_, ux, uy
+                    s_ -= seg
+                return None
+
+            def swap_spots():
+                """Where a swap fits: the middle of a straight stretch of the run
+                long enough for it, nearest the ends first (a designer swaps
+                next to the part whose pins are the other way round)."""
+                total = run_length(points)
+                out, s0 = [], 0.0
+                margin = 2 * grid.pitch
+                lead = 1_000_000                           # clear of the pad entries: they need the run's ends
+                for (x1, y1), (x2, y2) in zip(points, points[1:]):
+                    seg = math.hypot(x2 - x1, y2 - y1)
+                    s_ = s0 + swap_half + margin
+                    while s_ <= s0 + seg - swap_half - margin:
+                        if lead <= s_ - swap_half and s_ + swap_half <= total - lead:
+                            out.append(s_)
+                        s_ += 250_000
+                    s0 += seg
+                out.sort(key=lambda v: min(v, total - v))
+                if _DEBUG:
+                    print(f"[pair-swap] {na.name}: run {total / 1e6:.2f} mm, spots {[round(v / 1e6, 2) for v in out[:12]]}", flush=True)
+                return out[:12]
+
+            def swap_runs(sa, hopper, s_c):
+                got = point_at(s_c)
+                if got is None:
+                    return None
+                cx_, cy_, ux, uy = got
+                nx, ny = -uy, ux                           # side +1, as _offset_polyline has it
+
+                def at(al, lat):
+                    return (int(round(cx_ + ux * al + nx * lat)), int(round(cy_ + uy * al + ny * lat)))
+                before = trim(points[::-1], total_c - (s_c - swap_half))
+                after = trim(points, s_c + swap_half)
+                if not before or not after:
+                    return None
+                before = before[::-1]
+                runs_s, runs_e, middle, vias = {}, {}, {}, {}
+                for code, s_ in ((ca.net, sa), (cb.net, -sa)):
+                    b_off = _offset_polyline(before, d, s_)
+                    a_off = _offset_polyline(after, d, -s_)
+                    if code == hopper:
+                        v1 = at(-d - e_sw, s_ * (d + e_sw))
+                        v2 = at(d + e_sw, -s_ * (d + e_sw))
+                        if not (via_ok(*v1, code) and via_ok(*v2, code)):
+                            return None
+                        under = None
+                        others = [l for l in range(grid.layers) if l != layer and self.routable[l]]
+                        # an outer layer first: a plane's layer is best left whole
+                        others.sort(key=lambda l: (0 if l in (0, grid.layers - 1) else 1, -abs(l - layer)))
+                        for l in others:
+                            sg = (l, v1[0], v1[1], v2[0], v2[1], w)
+                            if seg_clear(sg, code):
+                                under = sg
+                                break
+                        if under is None:
+                            return None
+                        runs_s[code] = b_off + [v1]
+                        runs_e[code] = [v2] + a_off
+                        middle[code] = [under]
+                        vias[code] = [v1, v2]
+                    else:
+                        full = b_off + [at(-d, s_ * d), at(d, -s_ * d)] + a_off
+                        runs_s[code] = runs_e[code] = full
+                return runs_s, runs_e, middle, vias
+
+            total_c = run_length(points)
+
+            def acute(segs):
+                """A line that doubles back (a corner sharper than 90 degrees)."""
+                for a, b in zip(segs, segs[1:]):
+                    if a[0] != b[0] or (a[3], a[4]) != (b[1], b[2]):
+                        continue
+                    ux, uy, vx, vy = a[3] - a[1], a[4] - a[2], b[3] - b[1], b[4] - b[2]
+                    if ux * vx + uy * vy < -0.01 * math.hypot(ux, uy) * math.hypot(vx, vy):
+                        return True
+                return False
+
+            def build(sa, swap=None):
+                """Both lines for one choice of sides, or None. Each end gets its
+                pad entries chosen together: the first shapes, joined to the run
+                where it begins or a little further along it, that keep clear of
+                other copper and of the partner line. With a swap (the line
+                that hops, where along the run) the lines change sides there."""
+                runs_s, runs_e, middle, vias = {}, {}, {}, {}
+                total = run_length(points)
+                room = {True: total, False: total}
+                room_keep = grid.pitch
+                if swap is None and len(pieces) == 1:
+                    for net, code, side_ in ((na, ca.net, sa), (nb, cb.net, -sa)):
+                        runs_s[code] = runs_e[code] = _offset_polyline(points, d, side_)
+                elif swap is None:
+                    for net, code, side_ in ((na, ca.net, sa), (nb, cb.net, -sa)):
+                        got = via_cache.get(side_)
+                        if got is None or not all(via_ok(x, y, code) for x, y in got[3]):
+                            return None, "blocked"
+                        runs_s[code], runs_e[code], middle[code], vias[code] = got
+                    room = {True: run_length(runs_s[ca.net]), False: run_length(runs_e[ca.net])}
+                    room_keep = flare + grid.pitch
+                else:
+                    got = swap_runs(sa, *swap)
+                    if got is None:
+                        return None, "blocked"
+                    runs_s, runs_e, middle, vias = got
+                    room = {True: swap[1] - swap_half, False: total - swap[1] - swap_half}
+                    room_keep = 500_000                    # the run leads into the swap straight
+                step = max(grid.pitch * 2, 250_000)
+                trims = {end: [k * step for k in range(0, 7)
+                               if k == 0 or (k * step < total * 0.3 and k * step < room[end] - room_keep)]
+                         for end in (True, False)}
+                ends = {}
+                for at_start, (a_cell, b_cell) in ((True, (ea1, eb1)), (False, (ea2, eb2))):
+                    best = None
+                    options = {}
+                    for net, code, cell in ((na, ca.net, a_cell), (nb, cb.net, b_cell)):
+                        run = runs_s[code] if at_start else runs_e[code][::-1]
+                        opts = []
+                        for ti, t in enumerate(trims[at_start]):
+                            rest = trim(run, t) if t else run
+                            if rest is None or len(rest) < 2:
+                                continue
+                            for si_, ent in enumerate(entries(net, cell, rest[0], layer_s if at_start else layer_e)):
+                                if all(seg_clear(sg, code) for sg in ent):
+                                    # an entry that meets the run at an acute angle (doubling back
+                                    # onto it) only if nothing else will do
+                                    bent = 0
+                                    if ent:
+                                        l_ = ent[-1]
+                                        ux, uy = l_[3] - l_[1], l_[4] - l_[2]
+                                        vx, vy = rest[1][0] - rest[0][0], rest[1][1] - rest[0][1]
+                                        if ux * vx + uy * vy < -0.01 * math.hypot(ux, uy) * math.hypot(vx, vy):
+                                            bent = 30
+                                    opts.append((ti * 3 + si_ + bent, t, ent))
+                        options[code] = opts
+                    near_cache = {}
+
+                    def near(code, t):
+                        """The first stretch of a line's coupled run from this end."""
+                        got = near_cache.get((code, t))
+                        if got is None:
+                            run = runs_s[code] if at_start else runs_e[code][::-1]
+                            run = (trim(run, t) if t else run) or []
+                            got = [(layer_s if at_start else layer_e, a[0], a[1], b[0], b[1], w)
+                                   for a, b in list(zip(run, run[1:]))[:3]]
+                            near_cache[(code, t)] = got
+                        return got
+                    widest = None
+                    for ca_cost, ta, ent_a in options[ca.net]:
+                        for cb_cost, tb, ent_b in options[cb.net]:
+                            cost = ca_cost + cb_cost + 2 * abs(ta - tb) / step
+                            if best is not None and cost >= best[0]:
+                                continue
+                            g_ = min(apart(ent_a, ent_b), apart(ent_a, near(cb.net, tb)), apart(ent_b, near(ca.net, ta)))
+                            widest = g_ if widest is None else max(widest, g_)
+                            if g_ < need:
+                                continue
+                            best = (cost, ta, ent_a, tb, ent_b)
+                    if best is None:
+                        if _DEBUG:
+                            print(f"[pair-end] {na.name} {'start' if at_start else 'end'} side {sa}: "
+                                  f"options {len(options[ca.net])}/{len(options[cb.net])} widest {widest}", flush=True)
+                            for code in (ca.net, cb.net):
+                                for cost_, t_, ent_ in options[code][:2]:
+                                    pts_ = ([(round(sg[1] / 1e6, 2), round(sg[2] / 1e6, 2)) for sg in ent_]
+                                            + [(round(ent_[-1][3] / 1e6, 2), round(ent_[-1][4] / 1e6, 2))]) if ent_ else []
+                                    nr_ = [(round(sg[1] / 1e6, 2), round(sg[2] / 1e6, 2), round(sg[3] / 1e6, 2), round(sg[4] / 1e6, 2))
+                                           for sg in near(code, t_)[:2]]
+                                    print(f"[pair-end]   {p.nets[code].name} cost {cost_} trim {t_ / 1e6:.2f}: entry {pts_} run {nr_}", flush=True)
+                        if not options[ca.net] or not options[cb.net]:
+                            return None, "blocked"
+                        return None, ("cross" if widest is not None and widest <= 0 else "close")
+                    ends[at_start] = best
+                paths = []
+                for net, conn, e_key, cl_a, cl_b in ((na, ca, 0, ca.a, ca.b), (nb, cb, 1, cb_a, cb_b)):
+                    s_end, g_end = ends[True], ends[False]
+                    ts, ent_s = s_end[1 + 2 * e_key], s_end[2 + 2 * e_key]
+                    tg, ent_g = g_end[1 + 2 * e_key], g_end[2 + 2 * e_key]
+                    def piece(run, lay=layer_s):
+                        return [(lay, run[i][0], run[i][1], run[i + 1][0], run[i + 1][1], w) for i in range(len(run) - 1)]
+                    rs, re_ = runs_s[conn.net], runs_e[conn.net]
+                    if rs is re_:
+                        run = rs
+                        if ts:
+                            run = trim(run, ts)
+                        if tg and run:
+                            run = trim(run[::-1], tg)
+                            run = run[::-1] if run else None
+                        if not run or len(run) < 2:
+                            return None, "close"
+                        core = piece(run)
+                    else:
+                        # the line that hops: its run to the first via, the
+                        # crossing underneath, its run on from the second
+                        head = trim(rs, ts) if ts else rs
+                        tail = trim(re_[::-1], tg) if tg else re_[::-1]
+                        if not head or not tail or len(head) < 2 or len(tail) < 2:
+                            return None, "close"
+                        core = piece(head, layer_s) + middle[conn.net] + piece(tail[::-1], layer_e)
+                    if not all(seg_clear(sg, conn.net) for sg in core):
+                        return None, "blocked"
+                    back = [(l, x2, y2, x1, y1, ww) for l, x1, y1, x2, y2, ww in reversed(ent_g)]
+                    segs = ent_s + core + back
+                    if swap is not None and acute(core):
+                        if _DEBUG:
+                            print(f"[pair-swap] {net.name} {swap}: doubles back", flush=True)
+                        return None, "close"
+                    rp = RoutedPath(net.code, w, _merge_collinear(segs), list(vias.get(conn.net, [])),
+                                    net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid + len(paths))
+                    paths.append((rp, conn, cl_a, cl_b))
+                return paths, ""
+
+            def pair_apart(ra, rb):
+                """How far apart two finished lines are, as a track-to-track
+                centre distance: segments on one layer, and each line's vias
+                against the other's segments on any layer."""
+                g_ = min((_segment_distance(a[1:5], b[1:5]) for a in ra.segments for b in rb.segments
+                          if a[0] == b[0]), default=need)
+                for r1, r2 in ((ra, rb), (rb, ra)):
+                    for vx, vy in r1.vias:
+                        for b in r2.segments:
+                            dv = _segment_distance((vx, vy, vx, vy), b[1:5]) - vr + w / 2.0
+                            g_ = min(g_, dv)
+                return g_
+
+            paths, closest, blocked = None, None, False
+            attempts = [(sa, None) for sa in (first, -first)]
+            swaps = []
+            if self.opts.pair_via_swap and getattr(self, '_allow_swap', True) and len(pieces) == 1:
+                spots = swap_spots()
+                swaps = [(sa, (hop, s_)) for s_ in spots for sa in (first, -first) for hop in (ca.net, cb.net)]
+            swapped, plain = False, None
+            for n_try, (sa, swap) in enumerate(attempts + swaps):
+                if swap is not None:
+                    # only when coupling failed for crossing (or pinching) lines,
+                    # never for a run walled in by other copper
+                    if n_try == len(attempts):
+                        if closest is None:
+                            break
+                        plain = (closest, blocked)
+                    if cancelled is not None and cancelled():
+                        break
+                cand, why = build(sa, swap)
+                if _DEBUG and swap is not None and cand is None:
+                    print(f"[pair-swap] {na.name} side {sa} {swap}: {why}", flush=True)
+                if cand is None:
+                    blocked = blocked or why == "blocked"
+                    if why == "cross":
+                        closest = 0 if closest is None else max(closest, 0)
+                    elif why == "close":
+                        closest = 1 if closest is None else max(closest, 1)
+                    continue
+                gap_ = pair_apart(cand[0][0], cand[1][0])
+                if _DEBUG and gap_ < need:
+                    print(f"[pair-halves] {na.name} side {sa} swap {swap}: halves {gap_:.0f} apart, need {need}", flush=True)
+                if gap_ >= need:
+                    paths = cand
+                    swapped = swap is not None
+                    break
+                closest = gap_ if closest is None else max(closest, gap_)
+            if paths is None:
+                if plain is not None:
+                    closest, blocked = plain           # why the plain run failed, not the swaps
+                # the halves cross (touch) both ways round, or only come too close
+                if closest is not None and closest <= 0:
+                    self._pair_fail(na.name, 'cross', 'pair would cross')
+                elif blocked:
+                    self._pair_fail(na.name, 'blocked', 'entries would run into other copper')
+                else:
+                    self._pair_fail(na.name, 'pinch', 'halves would pinch: routed separately')
+                return False
+            if len(pieces) > 1:
+                self.pair_vias = getattr(self, "pair_vias", 0) + len(pieces) - 1
+                self.pair_log.append((na.name, f"coupled through {len(pieces) - 1} via pair(s)"))
+            if swapped:
+                self.pair_swaps = getattr(self, "pair_swaps", 0) + 1
+                self.pair_log.append((na.name, "coupled with a via swap (pins in opposite order at the two ends)"))
+            self.next_pid += 2
+            for rp, conn, cl_a, cl_b in paths:
+                path = _Path(rp.pid, conn, rp, cells, paired=True)
+                self.paths[rp.pid] = path
+                self._claim(path)
+                self.parent[conn.net][self._find(conn.net, cl_a)] = self._find(conn.net, cl_b)
+                if on_path:
+                    on_path(rp)
+            return True
+
+        # on one layer first; then with layer changes, dear ones unless the
+        # single-layer run would cross: a pair whose pins are the other way
+        # round at one part turns about through a via pair (down before the
+        # part's pin rows, up beyond them, back in from the far side), and
+        # that is worth two vias
+        first_why = ""
+        plan = [(False, 1)]
+        long_run = span * grid.pitch >= PAIR_VIA_SPAN_NM
+        if self.opts.allow_vias and long_run:
+            plan.append((True, max(1, self.opts.pair_direct_via_factor)))
+        for n_, step_ in enumerate(plan):
+            if attempt(*step_):
+                return True
+            first_why = first_why or self._pair_why
+            if cancelled is not None and cancelled():
+                break
+            if n_ == 0 and self.opts.allow_vias and long_run and self._pair_why in ("cross", "pinch"):
+                plan.append((True, 1, True))
+        if first_why and self._pair_why == 'no_path':
+            self._pair_why = first_why                 # the single-layer run's reason says more
+        return False
 
     def _try(self, conn: Connection, via_cost: int, cap: int, on_path, cancelled) -> bool:
         if self._find(conn.net, conn.a) == self._find(conn.net, conn.b):
@@ -1877,9 +2162,16 @@ class Router:
 
         self.budget_cuts = 0
 
-        # 0. pads close together with a clear line between them: a direct track
+        # 0. pads close together with a clear line between them: a direct
+        # track. Drawn once the differential pairs have their runs: a wide
+        # power link across a pin field would otherwise take the room a pair
+        # needs to leave its pins side by side.
         self.direct_links = 0
-        if opts.direct_links:
+        direct_done = [not opts.direct_links]
+
+        def direct_pass():
+            nonlocal done
+            direct_done[0] = True
             for conn in sorted(queue, key=lambda c: c.estimate):
                 if stop():
                     break
@@ -1908,10 +2200,10 @@ class Router:
                 if stop():
                     failed.extend(c for c in (ca, cb) if self._find(c.net, c.a) != self._find(c.net, c.b))
                     continue
-                if self._try_pair(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(2)):
+                if self._try_pair(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET)):
                     self.pairs_routed += 1
                 else:
-                    self._route_exception(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(2), failed)
+                    self._route_exception(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET), failed)
                 report(self.p.nets[ca.net].name)
 
         self._allow_swap = not opts.pair_via_swap
@@ -1920,6 +2212,8 @@ class Router:
                 continue
             if deferred and not conn.pair:
                 swapped_pairs()
+            if not direct_done[0] and not conn.pair:
+                direct_pass()
             if stop():
                 if self._find(conn.net, conn.a) != self._find(conn.net, conn.b):
                     failed.append(conn)               # out of time: left open, reported as such
@@ -1928,7 +2222,7 @@ class Router:
             if len(mates) == 2:
                 ca, cb = mates
                 handled.add(id(ca)); handled.add(id(cb))
-                if self._try_pair(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(2)):
+                if self._try_pair(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET)):
                     self.pairs_routed += 1
                     done += 2
                     report(self.p.nets[ca.net].name)
@@ -1938,7 +2232,7 @@ class Router:
                     done += 2
                     continue
                 # an exception: coupling impossible or unnecessary, connect each line directly
-                self._route_exception(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(2), failed)
+                self._route_exception(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET), failed)
                 done += 2
                 report(self.p.nets[ca.net].name)
                 continue
@@ -1947,6 +2241,8 @@ class Router:
             done += 1
             report(self.p.nets[conn.net].name)
         swapped_pairs()
+        if not direct_done[0]:
+            direct_pass()
 
         # 2. rip-up rounds
         rounds = opts.rip_rounds if opts.rip_up else 0
@@ -2096,6 +2392,7 @@ class Router:
         result.fanout = len(fanout_paths)
         result.pairs = getattr(self, "pairs_routed", 0)
         result.pair_swaps = getattr(self, "pair_swaps", 0)
+        result.pair_vias = getattr(self, "pair_vias", 0)
         result.pair_exceptions = list(getattr(self, "pair_exceptions", []))
         result.direct_links = getattr(self, "direct_links", 0)
         result.pair_log = getattr(self, "pair_log", [])

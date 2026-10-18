@@ -204,6 +204,43 @@ def swap_case():
     print("test_native_grid: via swap ok")
 
 
+def pair_via_case():
+    """A pair whose only way past a wall on its layer is the other layer:
+    routed coupled through two via pairs (down before the wall, up beyond
+    it), each line with two vias and a stretch on layer 1, and the two
+    lines still a pair-gap apart on the far side."""
+    from autorouter.engine.native.problem import NetInfo as NI
+    p = make_problem(layers=2, w=110, h=40, via_cost=20)
+    grid = p.grid
+    gap, width = 150_000, 150_000
+    rules = NetRules(width=width, clearance=150_000, via_diameter=450_000, via_drill=200_000)
+    p.owners = {rules.key: grid.new_owner_map(), (2 * width + gap, rules.clearance): grid.new_owner_map()}
+    for own in p.owners.values():
+        grid.mark(own, [grid.index(0, 45, y) for y in range(0, 40)], BLOCKED)
+    for code, y in ((1, 18), (2, 21)):
+        net = NI(code, f"N{code}", rules, partner=3 - code, pair_gap=gap)
+        for cx in (5, 100):
+            idx = grid.index(0, cx, y)
+            net.clusters.append(Cluster(cells={idx}, anchors=[(cx, y)], refs={f"J{cx}"}))
+            px = grid.nm_x(cx - 2) if cx == 5 else grid.nm_x(cx + 2)
+            net.endpoints[idx] = (grid.nm_x(cx), grid.nm_y(y), px, grid.nm_y(y), width)
+            for own in p.owners.values():
+                grid.mark(own, [idx], code)
+        p.nets[code] = net
+        p.connections.append(Connection(code, 0, 1, 95, 0, width, pair=1))
+    r = router.run(p)
+    assert r.pairs == 1, (r.pairs, getattr(r, "pair_log", None))
+    assert r.routed == 2 and not r.failed
+    for path in r.paths:
+        assert len(path.vias) == 2, (path.net, path.vias)
+        assert any(sg[0] == 1 for sg in path.segments), path.segments
+    runs = {path.net: [sg for sg in path.segments if sg[0] == 0 and sg[2] == sg[4] and sg[1] > 55 * PITCH]
+            for path in r.paths}
+    assert any(abs(a[2] - b[2]) == width + gap for a in runs[1] for b in runs[2]), runs
+    print("test_native_grid: pair via ok")
+
+
 if __name__ == "__main__":
     pair_case()
     swap_case()
+    pair_via_case()

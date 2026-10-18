@@ -27,6 +27,7 @@ class JobResult:
     fanout: int = 0
     pairs: int = 0
     pair_swaps: int = 0             # of those, coupled with a via swap
+    pair_vias: int = 0              # via pairs where coupled runs change layers
     stitched: int = 0
     pair_log: List[tuple] = field(default_factory=list)
     escalated: int = 0                                     # connections saved by the second pass
@@ -153,6 +154,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.routed, out.ripped, out.pairs = result.routed, result.ripped, result.pairs
     out.shoved = result.shoved
     out.pair_swaps = getattr(result, "pair_swaps", 0)
+    out.pair_vias = getattr(result, "pair_vias", 0)
     out.pair_log = list(getattr(result, "pair_log", []))
     out.failed_detail = list(getattr(result, "failed_detail", []))
     out.seconds = result.seconds

@@ -868,8 +868,13 @@ class AutorouterDialog(wx.Dialog):
             text += f", {result.fanout} fanout vias"
         if result.pairs:
             text += f", {result.pairs} coupled pairs"
+            extra = []
             if getattr(result, "pair_swaps", 0):
-                text += f" ({result.pair_swaps} with a via swap)"
+                extra.append(f"{result.pair_swaps} with a via swap")
+            if getattr(result, "pair_vias", 0):
+                extra.append(f"{result.pair_vias} layer changes")
+            if extra:
+                text += " (" + ", ".join(extra) + ")"
         if result.tuning:
             text += f", {sum(1 for g in result.tuning if g['ok'])}/{len(result.tuning)} length groups matched"
         if result.stitched:

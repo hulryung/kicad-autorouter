@@ -209,8 +209,20 @@ do:
   drops through a via, crosses under its partner at 45 degrees on another
   layer (an outer layer first, so a plane stays whole) and comes back up,
   while the partner steps across on the run's layer.
-  Pairs whose ends are closer than 3 mm, or that find no room for a run or a
-  swap, are routed separately, and the log says why.
+  A coupled run of 8 mm or more may also change layers: the two lines flare
+  out at 45 degrees to a **via pair** set square across a straight stretch of
+  the run, and close up again beyond it; a via pair sits at least 1 mm from
+  the pins and 2 mm from the next one. A run stays on one layer where it can
+  (each via pair costs three times a via), with one exception: when the pins
+  are the other way round at one part, the run turns about through a via
+  pair beyond that part's pins, as a designer takes a pair into the inner
+  row of a two-row connector: the router picks the first spot out along the
+  pins' escape where the via pair and a straight lead back to the pins fit,
+  the search aims at it from the pins' side (passing under the pin rows on
+  another layer), and each line keeps its side of the board through the
+  turn, so the order comes out right without a swap.
+  Pairs whose ends are closer than 3 mm, or that find no room for a run, a
+  via pair or a swap, are routed separately, and the log says why.
 
 Not read yet: custom DRC rules (`.kicad_dru`) that set track width or via size
 per condition (their clearances are honoured through the per-item clearance).
@@ -224,8 +236,11 @@ search:
 
 - **Direct links**: two pads of a connection within 5 mm of each other, on a
   shared layer, with a clear straight line (or one 45-degree jog) between
-  them, are joined pad to pad first: a resistor facing its LED, a decoupling
-  capacitor beside the IC pin it serves.
+  them, are joined pad to pad before the search: a resistor facing its LED,
+  a decoupling capacitor beside the IC pin it serves. They are drawn once the
+  differential pairs have their runs, and the whole width of the link keeps
+  out of other pads' outlet lanes, so a wide power link across a pin field
+  cannot take the room a pair needs to leave its pins side by side.
 - **Outward exits on two-pin parts**: a chip resistor, capacitor or LED pad
   may also be left straight out of the part's end, not only off the ends of
   the pad's long side, so a track does not leave sideways and loop back.
@@ -491,7 +506,7 @@ looked stuck can be read afterwards. The **Open data folder** button opens it.
 ## Tests
 
 ```bash
-python3 scripts/run-tests.py        # offline: router core on synthetic grids (incl. a coupled pair, a via swap, the time limit),
+python3 scripts/run-tests.py        # offline: router core on synthetic grids (incl. a coupled pair, a via swap, a pair via, the time limit),
                                     # settings, AI schema and loop (fake codex)
 # with KiCad's Python the end-to-end tests run too:
 /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 scripts/run-tests.py

@@ -18,7 +18,8 @@ from .grid import BLOCKED, Grid
 # zig-zag of diagonals (18 per cell), while a true 45-degree move is still
 # cheaper than an L (18 vs 25).
 STRAIGHT, DIAGONAL, AGAINST_STRAIGHT = 10, 18, 15
-LANE_PENALTY = 60     # per cell inside another pad's outlet lane (6 straight cells)
+LANE_PENALTY = 60
+LAST = {"expansions": 0, "capped": False}       # what the last search did (debugging)     # per cell inside another pad's outlet lane (6 straight cells)
 
 # (dx, dy, is_diagonal)
 MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
@@ -32,7 +33,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
-          history=None) -> Optional[List[int]]:
+          history=None, via_lead: int = 0, lead_from=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -40,6 +41,10 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
     at rip_penalty per cell: the result then says which paths are in the way.
     `history` (cell -> extra cost) is what earlier rip-ups learnt about
     contested cells: a route pays it so two nets stop fighting over one spot.
+    `via_lead` keeps vias at least that many cells from the goals and from
+    `lead_from` (a cell, or a pair of cells for the stretch between them; the
+    first source when not given): a coupled pair needs a straight lead to
+    flare out to its vias.
     """
     w, plane, nlayers = grid.w, grid.plane, grid.layers
     via_step = via_cost * STRAIGHT
@@ -101,6 +106,26 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
     # owners do not change during one search: a spot's answer holds for every
     # layer the search reaches it on (the search expands a spot once per layer)
     via_memo: Dict[int, bool] = {}
+    lead_cost = via_lead * STRAIGHT
+    if via_lead:
+        if lead_from is None:
+            lead_from = list(sources)[:1]
+        elif not isinstance(lead_from, (tuple, list)):
+            lead_from = [lead_from]
+        src = [grid.unpack(s)[1:] for s in lead_from]
+        (sx0, sy0), (sx1, sy1) = src[0], src[-1]
+        sdx, sdy = sx1 - sx0, sy1 - sy0
+        slen2 = sdx * sdx + sdy * sdy
+
+    def near_end(idx: int, cx: int, cy: int) -> bool:
+        if not via_lead:
+            return False
+        if h(idx) < lead_cost:
+            return True
+        # distance to the source stretch
+        t = 0.0 if slen2 == 0 else max(0.0, min(1.0, ((cx - sx0) * sdx + (cy - sy0) * sdy) / slen2))
+        dx, dy = abs(sx0 + sdx * t - cx), abs(sy0 + sdy * t - cy)
+        return STRAIGHT * max(dx, dy) + (DIAGONAL - STRAIGHT) * min(dx, dy) < lead_cost
 
     def via_ok(cx: int, cy: int) -> bool:
         rest = cy * w + cx
@@ -155,7 +180,9 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
             return path
         closed.add(idx)
         expansions += 1
+        LAST["expansions"], LAST["capped"] = expansions, False
         if expansions > max_expansions:
+            LAST["capped"] = True
             return None
         if cancelled is not None and expansions % 20000 == 0 and cancelled():
             return None
@@ -193,7 +220,7 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
             targets = [nidx for nidx in (other * plane + rest for other in range(nlayers)
                                          if other != layer and routable[other])
                        if nidx not in closed and passable(nidx) and gc + via_step < g.get(nidx, 1 << 60)]
-            if not targets or not via_ok(cx, cy):
+            if not targets or near_end(idx, cx, cy) or not via_ok(cx, cy):
                 continue
             for nidx in targets:
                 ng = gc + via_step + extra(nidx)

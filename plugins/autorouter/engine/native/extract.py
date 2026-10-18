@@ -809,6 +809,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     own_cells.add(grid.index(li, *centre))
         if hole_radius:
             block_vias_near_hole(pos.x, pos.y, hole_radius)
+            if attr == pcbnew.PAD_ATTRIB_PTH and pth_clr and pl:
+                # the fab's plated-hole rule binds both ways: a via's hole keeps
+                # that far from the plated pad's copper too, which can be more
+                # than the copper clearance the via barrel already keeps
+                r_hole = pth_clr + max_via_drill // 2 + safety
+                r_copper = max(n.rules.via_diameter for n in nets.values()) // 2 + clearance_of(code) if nets else 0
+                if r_hole > r_copper:
+                    kicad_layer = layers[pl[0]].kicad_id
+                    shape = pad.GetEffectiveShape(kicad_layer)
+                    box = _box(shape)
+                    for idx in grid.cells_where(0, (box[0] - r_hole, box[1] - r_hole, box[2] + r_hole, box[3] + r_hole),
+                                                lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r_hole)):
+                        via_block[idx] = 1
         if code in nets:
             pending.append((pad, code, pl, pos, own_cells, centre))
 

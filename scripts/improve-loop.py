@@ -191,6 +191,8 @@ def bench(args, plugins, out, images=True):
         cmd += ["--intent", str(args.intent_frozen)]
     if args.shove:
         cmd.append("--shove")
+    if args.time_limit:
+        cmd += ["--time-limit", str(args.time_limit)]
     if not images:
         cmd.append("--no-images")
     env = dict(os.environ, PYTHONHASHSEED="0")
@@ -333,6 +335,9 @@ def main():
     ap.add_argument("--budget-usd", type=float, default=0, help="per Claude call")
     ap.add_argument("--goal", default="", help="extra guidance for the reviewer and the improver")
     ap.add_argument("--bench-timeout", type=int, default=1800)
+    ap.add_argument("--time-limit", type=float, default=0.0,
+                    help="minutes per benchmark route (the dialog's time limit); 0 = none, the deterministic default. "
+                         "A big board that takes an hour untimed is measured within this instead")
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
     ap.add_argument("--no-final-eval", action="store_true")
     ap.add_argument("--intent", default="", help="design intent JSON (impedance classes, length groups, routing "
