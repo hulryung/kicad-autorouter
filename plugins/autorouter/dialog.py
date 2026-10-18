@@ -11,7 +11,7 @@ from typing import Optional
 import pcbnew
 import wx
 
-from .engine import session, si
+from .engine import fab, session, si
 from .engine.options import RouteOptions
 from .engine.native import (apply as native_apply, extract as native_extract, kicad_tuning as native_kicad_tuning,
                             pipeline as native_pipeline, router as native_router)
@@ -460,7 +460,8 @@ class AutorouterDialog(wx.Dialog):
             outcome = {"error": None, "scope": spec.get("scope", "board"),
                        "connections_in_scope": job.stats.get("connections", 0), "routed": result.routed,
                        "failed": failed, "ripped_up": result.ripped, "fanout_vias": result.fanout,
-                       "coupled_pairs": result.pairs, "stitching_vias": result.stitched,
+                       "coupled_pairs": result.pairs, "via_swaps": getattr(result, "pair_swaps", 0),
+                       "stitching_vias": result.stitched,
                        "failed_detail": getattr(result, "failed_detail", []), "escalated": escalated,
                        "length_matching": job.tuning_lines, "pair_log": [list(x) for x in job.pair_log],
                        "pair_exceptions": job.pair_exceptions,
@@ -547,14 +548,26 @@ class AutorouterDialog(wx.Dialog):
         self.refill.SetValue(o.refill_zones)
         for i, name in enumerate(self.net_classes):
             self.skip_classes.Check(i, name in o.ignore_net_classes)
-        if o.routable_layers and len(o.routable_layers) == len(self.layers):
+        if o.routable_layers and len(o.routable_layers) == len(self.layers) and not all(o.routable_layers):
             for i, v in enumerate(o.routable_layers):
                 self.routable.Check(i, bool(v))
+        else:
+            # nothing chosen yet: an inner ground plane carries no tracks
+            for i in self._ground_planes():
+                self.routable.Check(i, False)
         if o.horizontal_layers and len(o.horizontal_layers) == len(self.layers):
             self.override_dirs.SetValue(True)
             self.horizontal.Enable()
             for i, v in enumerate(o.horizontal_layers):
                 self.horizontal.Check(i, bool(v))
+
+    def _ground_planes(self):
+        try:
+            planes = native_extract.ground_plane_layers(self.board)
+        except Exception:
+            logger.exception("Ground plane check failed")
+            return []
+        return [i for i in planes if i < len(self.layers)]
 
     def _collect_options(self) -> RouteOptions:
         n = len(self.layers)
@@ -602,8 +615,23 @@ class AutorouterDialog(wx.Dialog):
             scope_sheets=[self.sheets[i][0] for i in self.sheet_list.GetCheckedItems()],
             track_mode=o.native_track_mode, track_width=o.native_track_width,
             via_mode=o.native_via_mode, via_diameter=o.native_via_diameter, via_drill=o.native_via_drill)
+        if o.routable_layers and not all(o.routable_layers):
+            planes = set(self._ground_planes())
+            off = [f"{name}{' (ground plane)' if i in planes else ''}"
+                   for i, (_, name) in enumerate(self.layers) if i < len(o.routable_layers) and not o.routable_layers[i]]
+            self._append_log("[plugin] no tracks on " + ", ".join(off) + " (Layers tab)")
         # the Signal integrity tab: impedance widths, length groups, routing order
         cfg = self.si_page.config()
+        if cfg.fab:
+            # the fab's rules first: the net classes they raise are what the
+            # impedance plan and the router read
+            try:
+                for line in fab.apply(self.board, cfg.fab):
+                    self._append_log(f"[plugin] {cfg.fab}: {line}")
+                fab.write_drc_rules(self.board, cfg.fab)
+            except Exception as e:
+                logger.exception("Fabrication rules")
+                self._append_log(f"[plugin] fabrication rules not applied: {e!r}")
         try:
             plan = si.plan(self.board, cfg)
         except Exception as e:
@@ -799,7 +827,8 @@ class AutorouterDialog(wx.Dialog):
                     self._show_progress("Length matching...", None)
                     self.si_page.pair_exceptions = list(result.pair_exceptions)
                     for e in result.pair_exceptions:
-                        self._append_log(f"[plugin] pair {e['nets'][0]} / {e['nets'][1]} connected directly: "
+                        where = f" ({e['where']})" if e.get("where") else ""
+                        self._append_log(f"[plugin] pair {e['nets'][0]} / {e['nets'][1]}{where} connected directly: "
                                          f"{e['text']}")
                     report = native_pipeline.tune_lengths(self.board, self._native_opts,
                                                           pair_exceptions=result.pair_exceptions)
@@ -839,6 +868,8 @@ class AutorouterDialog(wx.Dialog):
             text += f", {result.fanout} fanout vias"
         if result.pairs:
             text += f", {result.pairs} coupled pairs"
+            if getattr(result, "pair_swaps", 0):
+                text += f" ({result.pair_swaps} with a via swap)"
         if result.tuning:
             text += f", {sum(1 for g in result.tuning if g['ok'])}/{len(result.tuning)} length groups matched"
         if result.stitched:
@@ -847,8 +878,6 @@ class AutorouterDialog(wx.Dialog):
             text += f" ({result.ripped} rerouted)"
         if result.shoved:
             text += f", {result.shoved} existing pieces moved"
-        for name, why in result.pair_log:
-            self._append_log(f"[plugin] pair {name} routed separately: {why}")
         if result.failed:
             text += f", {len(result.failed)} not routed ({', '.join(failed[:6])}{'...' if len(failed) > 6 else ''})"
             self._append_log("[plugin] unrouted: " + ", ".join(failed))

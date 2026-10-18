@@ -272,6 +272,7 @@ def intent_metrics(board, o, job, si_plan) -> dict:
         "open_by_group": open_by_group,
         "tuning_log": job.tuning_lines,
         "pairs_routed_coupled": job.pairs,
+        "pair_via_swaps": getattr(job, "pair_swaps", 0),
         "pair_exceptions": [f"{e['nets'][0]} / {e['nets'][1]}: {e['text']}" for e in job.pair_exceptions],
         "kicad_tuning_patterns": sum(1 for _ in board.Generators()),
         "pair_log": [f"{n}: {why}" for n, why in job.pair_log],
@@ -367,6 +368,8 @@ def main():
     ap.add_argument("--skip", default="GND,GND1,GND2")
     ap.add_argument("--pitch", type=float, default=0.1)
     ap.add_argument("--shove", action="store_true")
+    ap.add_argument("--time-limit", type=float, default=0.0,
+                    help="job time limit in minutes, as the dialog sets it (default: none, same input same result)")
     ap.add_argument("--no-images", action="store_true")
     ap.add_argument("--focus", default="", help="extra close-ups: x,y[,half];x,y ... in mm")
     ap.add_argument("--intent", default="", help="design intent JSON (engine/si.py SiConfig): stackup, "
@@ -402,10 +405,21 @@ def main():
 
     o = NativeOptions(pitch_mm=args.pitch)
     o.skip_nets = [s for s in args.skip.split(",") if s]
+    from autorouter.engine.native.extract import ground_plane_layers
+    planes = ground_plane_layers(board)
+    if planes:
+        # what the dialog does by default: no tracks on an inner ground plane
+        n = len(list(board.GetEnabledLayers().CuStack()))
+        o.routable_layers = [i not in planes for i in range(n)]
+        print(f"  ground plane layers left unrouted: {planes}", flush=True)
     si_cfg = si_plan = None
     if args.intent:
         from autorouter.engine import si
         si_cfg = si.SiConfig.from_dict(json.loads(Path(args.intent).read_text(encoding="utf-8")))
+        if si_cfg.fab:
+            from autorouter.engine import fab
+            for line in fab.apply(board, si_cfg.fab):
+                print(f"  [fab] {line}", flush=True)
         si_plan = si.plan(board, si_cfg)
         o = si.apply_to_options(o, si_cfg, si_plan)
         for line in si_plan.lines + [f"warning: {w}" for w in si_plan.warnings]:
@@ -417,8 +431,12 @@ def main():
     for kv in [x for x in os.environ.get("AUTOROUTER_BENCH_SET", "").split(",") if x]:
         k, v = kv.split("=")
         setattr(o, k, json.loads(v))          # quick experiments: AUTOROUTER_BENCH_SET=protect_groups=false
-    o.time_limit_s = 0             # same input, same result: no wall-clock cut-offs in a benchmark
-    o.fine_budget_s = 0
+    if args.time_limit > 0:
+        o.time_limit_s = args.time_limit * 60.0     # the dialog's limits: the job's, the second pass's, each connection's
+    else:
+        o.time_limit_s = 0         # same input, same result: no wall-clock cut-offs in a benchmark
+        o.fine_budget_s = 0
+        o.conn_time_s = 0
     stages = []
     t0 = time.time()
 
@@ -445,6 +463,9 @@ def main():
         lengths = {names[c]: l for c, l in tuning.track_lengths(board).items()}
         saved = pcbnew.LoadBoard(str(routed_path))     # the rules file goes next to the routed copy
         si.write_drc_rules(saved, si.drc_rules(board, si_cfg, si_plan, lengths, job.pair_exceptions))
+        if si_cfg.fab:
+            from autorouter.engine import fab
+            fab.write_drc_rules(saved, si_cfg.fab)
 
     tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
     vias = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]

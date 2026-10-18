@@ -3,8 +3,8 @@ out the same length (a memory byte lane, a parallel bus, the two halves of
 a differential pair).
 
 Runs on the board after routing, the way KiCad's length tuner does it by
-hand: the shorter nets of a group get trapezoid bumps (45-degree corners) on
-their straight runs, as many and as tall as the room beside each run allows,
+hand: the shorter nets of a group get trapezoid bumps on their straight runs
+(corners rounded with arc fillets, or 45-degree chamfers), as many and as tall as the room beside each run allows,
 until each is within the group's tolerance of the target. Room is checked
 against the real copper (pads, tracks, vias, keepouts, the board edge) at the
 nets' clearance; the pours are refilled afterwards and do not count.
@@ -16,6 +16,9 @@ from typing import Callable, Dict, List, Optional, Tuple
 import pcbnew
 
 CHAMFER_LOSS = 8 - 4 * math.sqrt(2)          # per bump: 2A - CHAMFER_LOSS * c is the length it adds
+FILLET_LOSS = 8 - 2 * math.pi                # the same with each corner an arc of radius c
+MIN_FILLET = 20_000                          # smaller corners stay chamfered (an arc would be degenerate)
+ROUNDED = True                               # module default; tune(rounded=...) sets it per run
 
 
 @dataclass
@@ -265,17 +268,32 @@ class _Room:
 
 def _bump(ax, ay, ux, uy, nx, ny, x0: float, p: float, a: float, c: float) -> List[Tuple[int, int]]:
     """One trapezoid bump starting x0 along the run (u) on side n, amplitude a,
-    legs p apart, corners chamfered by c: the points after the baseline."""
+    legs p apart, corners cut by c: the points after the baseline. Rounded
+    (fillets), each corner is three points: arc start, arc middle, arc end."""
     def pt(along, out):
         return (int(round(ax + ux * along + nx * out)), int(round(ay + uy * along + ny * out)))
-    return [pt(x0 - c, 0), pt(x0, c), pt(x0, a - c), pt(x0 + c, a), pt(x0 + p - c, a), pt(x0 + p, a - c),
-            pt(x0 + p, c), pt(x0 + p + c, 0)]
+    corners = [((x0 - c, 0), (x0, 0), (x0, c)), ((x0, a - c), (x0, a), (x0 + c, a)),
+               ((x0 + p - c, a), (x0 + p, a), (x0 + p, a - c)), ((x0 + p, c), (x0 + p, 0), (x0 + p + c, 0))]
+    out = []
+    for (s0, s1), (q0, q1), (e0, e1) in corners:
+        out.append(pt(s0, s1))
+        if _rounded(c):
+            # the fillet's middle: from the arc centre toward the square corner, c out
+            cx, cy = s0 + e0 - q0, s1 + e1 - q1
+            k = c / math.hypot(q0 - cx, q1 - cy)
+            out.append(pt(cx + (q0 - cx) * k, cy + (q1 - cy) * k))
+        out.append(pt(e0, e1))
+    return out
+
+
+def _rounded(c: float) -> bool:
+    return ROUNDED and c >= MIN_FILLET
 
 
 def _extra(a: float, p: float) -> Tuple[float, float]:
-    """(length a bump of amplitude a adds, its chamfer)."""
+    """(length a bump of amplitude a adds, its corner size)."""
     c = min(p / 4, a / 4)
-    return 2 * a - CHAMFER_LOSS * c, c
+    return 2 * a - (FILLET_LOSS if _rounded(c) else CHAMFER_LOSS) * c, c
 
 
 @dataclass
@@ -338,20 +356,35 @@ def _rebuild(board, room: _Room, track, bumps: List[Tuple[float, int, float]], p
     ax, ay, bx, by = s.x, s.y, e.x, e.y
     length = math.hypot(bx - ax, by - ay)
     ux, uy = (bx - ax) / length, (by - ay) / length
-    pts = [(ax, ay)]
+    # the path as lines (point) and fillets (start, middle, end)
+    steps: List[tuple] = [(ax, ay)]
     for x0, side, a in sorted(bumps):
         nx, ny = -uy * side, ux * side
-        pts += _bump(ax, ay, ux, uy, nx, ny, x0, p, a, _extra(a, p)[1])
-    pts.append((bx, by))
-    clean = [pts[0]]
-    for q in pts[1:]:
-        if q != clean[-1]:
-            clean.append(q)
+        c = _extra(a, p)[1]
+        q = _bump(ax, ay, ux, uy, nx, ny, x0, p, a, c)
+        if _rounded(c):
+            for k in range(0, len(q), 3):
+                steps += [q[k], (q[k + 1], q[k + 2])]
+        else:
+            steps += q
+    steps.append((bx, by))
     new = []
-    for i in range(len(clean) - 1):
-        t = pcbnew.PCB_TRACK(board)
-        t.SetStart(pcbnew.VECTOR2I(*clean[i]))
-        t.SetEnd(pcbnew.VECTOR2I(*clean[i + 1]))
+    at = steps[0]
+    for st in steps[1:]:
+        arc = isinstance(st[0], tuple)
+        end = st[1] if arc else st
+        if end == at:
+            continue
+        if arc:
+            t = pcbnew.PCB_ARC(board)
+            t.SetStart(pcbnew.VECTOR2I(*at))
+            t.SetMid(pcbnew.VECTOR2I(*st[0]))
+            t.SetEnd(pcbnew.VECTOR2I(*end))
+        else:
+            t = pcbnew.PCB_TRACK(board)
+            t.SetStart(pcbnew.VECTOR2I(*at))
+            t.SetEnd(pcbnew.VECTOR2I(*end))
+        at = end
         t.SetWidth(track.GetWidth())
         t.SetLayer(track.GetLayer())
         t.SetNetCode(track.GetNetCode())
@@ -448,7 +481,7 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
 def tune(board, groups: List[dict], status: Optional[Callable[[str], None]] = None,
          spacing_nm: int = 0, amin_nm: int = 200_000, amax_nm: int = 1_000_000,
          removed_sink: Optional[list] = None, kicad_patterns: bool = True,
-         skip_nets: Optional[set] = None) -> TuneReport:
+         skip_nets: Optional[set] = None, rounded: bool = True) -> TuneReport:
     """Bring each group's nets to its target length (the longest member, or
     the group's own target) within its tolerance. groups: [{"name", "nets":
     [net names], "tolerance": nm, "target": nm or 0}]. Meander spacing and
@@ -457,7 +490,10 @@ def tune(board, groups: List[dict], status: Optional[Callable[[str], None]] = No
     target length window, spacing and amplitudes), so KiCad's length tuner owns
     it: it shows the pattern's handles and "Edit > Update All Tuning Patterns"
     rebuilds it with KiCad's own meander engine. skip_nets: names not tuned
-    (pairs whose coupling was waived as unnecessary)."""
+    (pairs whose coupling was waived as unnecessary). rounded: the bumps'
+    corners are arc fillets (KiCad's "round" corner style), else chamfers."""
+    global ROUNDED
+    ROUNDED = rounded
     say = status or (lambda t: None)
     report = TuneReport()
     if not spacing_nm:
@@ -502,7 +538,8 @@ def tune(board, groups: List[dict], status: Optional[Callable[[str], None]] = No
                                         "members": [str(i.m_Uuid.AsString()) for i in main["items"]],
                                         "target": target, "tolerance": tol, "spacing": main["spacing"],
                                         "amin": amin_nm, "amax": max([amax_nm] + main["amplitudes"]),
-                                        "length": lengths[c] + added, "corner": kicad_corner_percent(board)})
+                                        "length": lengths[c] + added, "corner": kicad_corner_percent(board),
+                                        "rounded": rounded})
             report.added += new
             report.removed += len(removed)
             if removed_sink is not None:

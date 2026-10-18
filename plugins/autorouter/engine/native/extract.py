@@ -322,6 +322,23 @@ def _pick_pair_ends(nets: Dict[int, NetInfo], connections: List[Connection]) -> 
                 conn.priority = 0 if (net.clusters[e1].tight or net.clusters[e2].tight) else 1
 
 
+
+def _faces_row(fp, pad, pos, exit_pt, reach: int = 4_000_000) -> bool:
+    """Does leaving the pad toward exit_pt head into another row of the
+    footprint's pads close by (the inside of a two-row connector)?"""
+    ux, uy = exit_pt[0] - pos.x, exit_pt[1] - pos.y
+    norm = math.hypot(ux, uy)
+    if not norm:
+        return False
+    ux, uy = ux / norm, uy / norm
+    for other in fp.Pads():
+        q = other.GetPosition()
+        vx, vy = q.x - pos.x, q.y - pos.y
+        along = vx * ux + vy * uy
+        if norm < along <= reach and abs(vx * uy - vy * ux) < 1_000_000:
+            return True
+    return False
+
 def _room_beyond(grid, own, layer: int, code: int, px: int, py: int, ex: int, ey: int, pitch: int,
                  depth_nm: int = 2_000_000, half_nm: int = 400_000, holders: Optional[dict] = None) -> float:
     """How open the board is past a pad exit: the share of free cells (or the
@@ -430,6 +447,38 @@ def copper_layers(board, options: NativeOptions) -> List[LayerInfo]:
             l.routable = True
     return layers
 
+
+
+def ground_plane_layers(board) -> List[int]:
+    """Indices (in the copper stack) of the inner layers that are a ground
+    plane: a ground net's pour over most of the board. A track there cuts
+    the return path of every signal above and below it, so they are left
+    out of routing unless the designer asks for them."""
+    try:
+        box = board.GetBoardEdgesBoundingBox()
+        area = float(box.GetWidth()) * float(box.GetHeight())
+    except Exception:
+        return []
+    if area <= 0:
+        return []
+    stack = list(board.GetEnabledLayers().CuStack())
+    out = []
+    for i, lid in enumerate(stack):
+        if i == 0 or i == len(stack) - 1:
+            continue
+        for zone in board.Zones():
+            if zone.GetIsRuleArea() or zone.GetNetCode() <= 0 or not zone.IsOnLayer(lid):
+                continue
+            if "GND" not in zone.GetNetname().upper():
+                continue
+            try:
+                covered = float(zone.Outline().Area()) / area
+            except Exception:
+                continue
+            if covered >= 0.7:
+                out.append(i)
+                break
+    return out
 
 def _zone_covers(zone, x: int, y: int, margin: int = 0) -> bool:
     """Is the point inside (or within margin of) the zone's outline?"""
@@ -627,6 +676,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     hole_clr = max(getattr(ds, "m_HoleClearance", 0), 0)
     hole_to_hole = max(getattr(ds, "m_HoleToHoleMin", 0), 0)
+    pth_clr = int(getattr(options, "pth_hole_clearance_mm", 0.0) * 1_000_000)
     max_via_drill = max([n.rules.via_drill for n in nets.values()] or [0])
 
     def block_vias_near_hole(x: int, y: int, hole_radius: int) -> None:
@@ -751,7 +801,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 # the hole itself, under the hole-clearance rule, on every layer
                 # (inner layers may carry no annular ring at all)
                 claim(li, code, lambda r, li=li: grid.disc_cells(li, pos.x, pos.y, hole_radius + r),
-                      max(clr, hole_clr))
+                      max(clr, hole_clr, pth_clr if attr == pcbnew.PAD_ATTRIB_PTH else 0))
             if code in nets:
                 inside = grid.cells_where(li, box, lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), 0))
                 own_cells.update(inside)
@@ -910,6 +960,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                                    + str({(nets[h].name if h in nets else h): c for h, c in hd.items()})
                                    for (ex, ey), r, hd in zip(escapes, room, holders)), flush=True)
             if room[0] < 0.6 and room[1] > room[0] + 0.25:
+                escapes.reverse()
+            elif fp is not None and room[1] >= 0.8 and _faces_row(fp, pad, pos, escapes[0]) \
+                    and not _faces_row(fp, pad, pos, escapes[1]):
+                # a two-row connector: the channel between the rows is the
+                # other row's way out too; the pins leave outward when they can
                 escapes.reverse()
         if escapes:
             problem_escape_sides[pad_key] = escapes[0]

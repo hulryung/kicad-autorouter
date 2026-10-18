@@ -139,6 +139,7 @@ class NativeOptions:
     max_expansions: int = 400_000
     fine_budget_s: Optional[float] = None   # the finer second pass's own time budget; None = 60 s + 20 s per
                                             # open connection, 0 = none (benchmarks: same input, same result)
+    conn_time_s: float = 20.0          # one connection's searches (a rip-up attempt: twice); 0 = no limit
     time_limit_s: float = 600.0        # the whole job (all passes); 0 = no limit. Rip-up on a big board
                                        # can otherwise grind for hours with the counter standing still
     retry_failed: bool = True
@@ -158,6 +159,8 @@ class NativeOptions:
     length_groups: List[dict] = field(default_factory=list)              # tuned after routing
     tune_lengths: bool = True
     kicad_tuning_patterns: bool = True  # meanders become KiCad tuning patterns (the length tuner can retune them)
+    pth_hole_clearance_mm: float = 0.0  # plated pad holes to other copper, when stricter than the hole clearance (fab rules)
+    tune_rounded: bool = True          # meander corners are arc fillets (KiCad's round style), else 45-degree chamfers
     cut_acute: bool = True             # no corner sharper than 90 degrees: cut it with a 0/45/90 run
     outward_exits: bool = True         # two-pin parts may also be left straight out of their ends
     direct_links: bool = True          # close pads with a clear line between them: a direct track first
@@ -165,6 +168,7 @@ class NativeOptions:
     pair_min_span_mm: float = 3.0      # pair ends closer than this: coupling is unnecessary, connect directly
     pair_uncoupled_max_mm: float = 5.0  # a pair connected directly whose nets are no longer than this: skew waived
     pair_direct_via_factor: int = 3    # a pair connected directly (an exception) pays this many times the via cost
+    pair_via_swap: bool = True         # pins in opposite order at the two ends: one line crosses under the other through two vias
     protect_groups: bool = True        # rip-up may not move a pair/memory/high-speed route for a later group
 
 

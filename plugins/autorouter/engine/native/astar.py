@@ -94,25 +94,40 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
     disc = [(dx, dy) for dx in range(-via_reach, via_reach + 1)
             for dy in range(-via_reach, via_reach + 1) if dx * dx + dy * dy <= reach2]
 
+    # the disc as offsets from its centre on each layer; a disc that would
+    # leave the board is refused up front (it reaches via_reach along the axes)
+    disc_offsets = [layer * plane + dy * w + dx for layer in range(nlayers) for dx, dy in disc]
+    gh = grid.h
+    # owners do not change during one search: a spot's answer holds for every
+    # layer the search reaches it on (the search expands a spot once per layer)
+    via_memo: Dict[int, bool] = {}
+
     def via_ok(cx: int, cy: int) -> bool:
-        if via_block[cy * w + cx]:
+        rest = cy * w + cx
+        known = via_memo.get(rest)
+        if known is not None:
+            return known
+        ok = _via_ok(cx, cy, rest)
+        via_memo[rest] = ok
+        return ok
+
+    def _via_ok(cx: int, cy: int, rest: int) -> bool:
+        if via_block[rest]:
             return False
         if via_guard is not None:
             # the outlet of another net's pad escape: no via barrel there
-            g = via_guard[cy * w + cx]
+            g = via_guard[rest]
             if g and g != net and g != also_ok:
                 return False
-        for dx, dy in disc:
-            px, py = cx + dx, cy + dy
-            if not (0 <= px < w and 0 <= py < grid.h):
+        if cx < via_reach or cy < via_reach or cx >= w - via_reach or cy >= gh - via_reach:
+            return False
+        for off in disc_offsets:
+            i = rest + off
+            o = owners[i]
+            if o != 0 and o != net and o != also_ok:
+                if soft and routed[i] != 0 and rippable(routed[i]):
+                    continue
                 return False
-            off = py * w + px
-            for layer in range(nlayers):
-                o = owners[layer * plane + off]
-                if o != 0 and o != net and o != also_ok:
-                    if soft and routed[layer * plane + off] != 0 and rippable(routed[layer * plane + off]):
-                        continue
-                    return False
         return True
 
     g: Dict[int, int] = {}
@@ -173,13 +188,14 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 g[nidx] = ng
                 came[nidx] = (idx, m)
                 heapq.heappush(heap, (ng + h(nidx), ng, nidx, m))
-        if allow_vias and nlayers > 1 and via_ok(cx, cy):
-            for other in range(nlayers):
-                if other == layer or not routable[other]:
-                    continue
-                nidx = other * plane + rest
-                if nidx in closed or not passable(nidx):
-                    continue
+        if allow_vias and nlayers > 1:
+            # the layers a via here could go on to, before the costly barrel check
+            targets = [nidx for nidx in (other * plane + rest for other in range(nlayers)
+                                         if other != layer and routable[other])
+                       if nidx not in closed and passable(nidx) and gc + via_step < g.get(nidx, 1 << 60)]
+            if not targets or not via_ok(cx, cy):
+                continue
+            for nidx in targets:
                 ng = gc + via_step + extra(nidx)
                 if ng < g.get(nidx, 1 << 60):
                     g[nidx] = ng

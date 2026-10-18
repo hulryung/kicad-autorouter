@@ -79,6 +79,8 @@ class SiConfig:
     group_patterns: Dict[str, List[str]] = field(default_factory=dict)   # extra patterns per group
     tune_lengths: bool = True
     kicad_patterns: bool = True                  # meanders handed to KiCad's length tuner as tuning patterns
+    fab: str = ""                                # fabrication rules template (engine/fab.py); "" = the board's own
+    rounded: bool = True                         # meander corners as arc fillets (else 45-degree chamfers)
     pair_min_span_mm: float = 3.0                # pair ends closer than this: connected directly, not coupled
     pair_uncoupled_max_mm: float = 5.0           # uncoupled length a pair may have (KiCad rule); shorter pairs: no skew
 
@@ -96,6 +98,8 @@ class SiConfig:
         cfg.group_patterns = {k: list(v) for k, v in (d.get("group_patterns") or {}).items()}
         cfg.tune_lengths = bool(d.get("tune_lengths", True))
         cfg.kicad_patterns = bool(d.get("kicad_patterns", True))
+        cfg.fab = str(d.get("fab") or "")
+        cfg.rounded = bool(d.get("rounded", True))
         cfg.pair_min_span_mm = float(d.get("pair_min_span_mm", 3.0))
         cfg.pair_uncoupled_max_mm = float(d.get("pair_uncoupled_max_mm", 5.0))
         return cfg
@@ -235,6 +239,10 @@ def apply_to_options(options, cfg: SiConfig, si_plan: Optional[SiPlan]):
     o.impedance = dict(si_plan.impedance) if si_plan else {}
     o.length_groups = list(si_plan.length_groups) if (si_plan and cfg.tune_lengths) else []
     o.kicad_tuning_patterns = cfg.kicad_patterns
+    from . import fab
+    rules = fab.get(cfg.fab)
+    o.pth_hole_clearance_mm = rules.pth_hole_clearance if rules else 0.0
+    o.tune_rounded = cfg.rounded
     o.pair_min_span_mm = cfg.pair_min_span_mm
     o.pair_uncoupled_max_mm = cfg.pair_uncoupled_max_mm
     return o

@@ -69,7 +69,7 @@ def pattern_sexpr(board, spec: dict, uid: str, member: str = "") -> str:
 			(xy {_mm(x1)} {_mm(y1)})
 		)
 		(override_custom_rules yes)
-		(rounded no)
+		(rounded {"yes" if spec.get("rounded") else "no"})
 		(single_sided no)
 		(target_length {_mm(target)})
 		(target_length_max {_mm(target + tol)})
@@ -96,7 +96,10 @@ def attach(board, specs: List[dict]) -> int:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        holder = pcbnew.LoadBoard(path)
+        # the board reader directly: pcbnew.LoadBoard would also load the
+        # file's (non-existent) project, which in the PCB editor replaces the
+        # open project with this temporary one
+        holder = pcbnew.PCB_IO_MGR.Load(pcbnew.PCB_IO_MGR.KICAD_SEXP, path)
     finally:
         try:
             os.unlink(path)

@@ -26,6 +26,7 @@ class JobResult:
     shoved: int = 0                 # existing board tracks moved out of the way (shove mode)
     fanout: int = 0
     pairs: int = 0
+    pair_swaps: int = 0             # of those, coupled with a via swap
     stitched: int = 0
     pair_log: List[tuple] = field(default_factory=list)
     escalated: int = 0                                     # connections saved by the second pass
@@ -151,6 +152,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.stats = dict(problem.stats)
     out.routed, out.ripped, out.pairs = result.routed, result.ripped, result.pairs
     out.shoved = result.shoved
+    out.pair_swaps = getattr(result, "pair_swaps", 0)
     out.pair_log = list(getattr(result, "pair_log", []))
     out.failed_detail = list(getattr(result, "failed_detail", []))
     out.seconds = result.seconds
@@ -158,6 +160,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.timed_out = result.timed_out
     out.failed = sorted({problem.nets[c.net].name for c in result.failed})
     out.pair_exceptions = list(getattr(result, "pair_exceptions", []))
+    out.stats["budget_cuts"] = getattr(result, "budget_cuts", 0)
 
     # the finer pass needs room in the time limit (its board read alone takes a while)
     time_for_more = not limit or remaining() > 60.0
@@ -189,6 +192,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         if problem2 is not None and problem2.connections:
             out.passes = 2
             out.escalated = result2.routed
+            out.stats["budget_cuts"] += getattr(result2, "budget_cuts", 0)
             out.routed += result2.routed
             out.ripped += result2.ripped
             out.shoved += result2.shoved
@@ -258,7 +262,8 @@ def tune_lengths(board, options: NativeOptions, status=None, pair_exceptions=Non
         return None
     try:
         report = native_tuning.tune(board, groups, status=status, removed_sink=_REMOVED,
-                                    kicad_patterns=options.kicad_tuning_patterns)
+                                    kicad_patterns=options.kicad_tuning_patterns,
+                                    rounded=getattr(options, "tune_rounded", True))
     except Exception as e:
         if status:
             status(f"Length matching failed: {e!r}")

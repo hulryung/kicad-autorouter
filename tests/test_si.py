@@ -144,8 +144,12 @@ def test_tuning(tmp: Path):
     assert text.count('tuning_pattern') == 2 and "(members" in text, text[-2000:]
     again = pcbnew.LoadBoard(str(path))
     assert len(list(again.Generators())) == 2
-    # every new segment is 0/45/90 degrees and keeps clear of the other nets
+    # the corners are fillets (arcs, a rounded KiCad pattern); every straight
+    # segment is 0/45/90 degrees and keeps clear of the other nets
+    assert any(t.GetClass() == "PCB_ARC" for t in board.GetTracks()) and "(rounded yes)" in text
     for t in board.GetTracks():
+        if t.GetClass() == "PCB_ARC":
+            continue
         dx, dy = t.GetEnd().x - t.GetStart().x, t.GetEnd().y - t.GetStart().y
         assert dx == 0 or dy == 0 or abs(abs(dx) - abs(dy)) <= 2, (dx, dy)
     d0 = [t for t in board.GetTracks() if t.GetNetCode() == nets[0].GetNetCode()]
@@ -193,6 +197,24 @@ def test_board_intent(tmp: Path):
     p = si.write_drc_rules(board, rules)
     p2 = si.write_drc_rules(board, rules)                     # rewritten in place, not appended
     assert p == p2 and p.read_text().count(si.BEGIN) == 1 and p.read_text().startswith("(version 1)")
+    # fabrication rules: constraints to the template, net classes raised, never lowered
+    from autorouter.engine import fab
+    ds = board.GetDesignSettings()
+    ds.m_MinClearance, ds.m_HoleToHoleMin = 0, 240_000          # a looser and a stricter rule
+    lines = fab.apply(board, "JLCPCB 4-layer standard")
+    assert ds.m_MinClearance == 100_000 and ds.m_HoleClearance >= 200_000 and ds.m_CopperEdgeClearance >= 300_000, lines
+    assert ds.m_HoleToHoleMin == 240_000, "the designer's stricter hole spacing stays"
+    ns = ds.m_NetSettings
+    for name in [None] + [str(n) for n in ns.GetNetclasses().keys()]:
+        nc = ns.GetDefaultNetclass() if name is None else ns.GetNetClassByName(name)
+        assert nc.GetClearance() >= 127_000 and nc.GetViaDrill() >= 200_000 and nc.GetViaDiameter() >= 450_000
+    rp = fab.write_drc_rules(board, "JLCPCB 4-layer standard")
+    fab.write_drc_rules(board, "JLCPCB 4-layer standard")
+    text = rp.read_text()
+    assert text.count(fab.BEGIN) == 1 and text.count(si.BEGIN) == 1 and "isPlated()" in text, text
+    o2 = si.apply_to_options(NativeOptions(), si.SiConfig(fab="JLCPCB 4-layer standard"), None)
+    assert o2.pth_hole_clearance_mm == 0.3
+    extract.extract(board, o2)
     print(f"test_si: board intent ok ({len(plan.impedance)} controlled nets, groups {problem.stats['groups']})")
 
 

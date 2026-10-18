@@ -167,5 +167,43 @@ def pair_case():
     print("test_native_grid: time limit ok")
 
 
+def swap_case():
+    """A pair whose pins are in opposite order at the two ends: coupled with
+    a via swap, one line crossing under the other on the second layer
+    through two vias; with the swap turned off the same pair is an exception."""
+    from autorouter.engine.native.problem import NetInfo as NI
+
+    def build(swap):
+        p = make_problem(layers=2, w=80, h=40, via_cost=20)
+        p.options.pair_via_swap = swap
+        grid = p.grid
+        gap, width = 150_000, 150_000
+        rules = NetRules(width=width, clearance=150_000, via_diameter=450_000, via_drill=200_000)
+        p.owners = {rules.key: grid.new_owner_map(), (2 * width + gap, rules.clearance): grid.new_owner_map()}
+        for code, ys in ((1, (18, 21)), (2, (21, 18))):
+            net = NI(code, f"N{code}", rules, partner=3 - code, pair_gap=gap)
+            for cx, y in zip((5, 70), ys):
+                idx = grid.index(0, cx, y)
+                net.clusters.append(Cluster(cells={idx}, anchors=[(cx, y)], refs={f"J{cx}"}))
+                px = grid.nm_x(cx - 2) if cx == 5 else grid.nm_x(cx + 2)
+                net.endpoints[idx] = (grid.nm_x(cx), grid.nm_y(y), px, grid.nm_y(y), width)
+                for own in p.owners.values():
+                    grid.mark(own, [idx], code)
+            p.nets[code] = net
+            p.connections.append(Connection(code, 0, 1, 65, 0, width, pair=1))
+        return p
+
+    r = router.run(build(True))
+    assert r.pairs == 1, (r.pairs, getattr(r, "pair_log", None))
+    assert r.routed == 2 and not r.failed
+    hops = [path for path in r.paths if path.vias]
+    assert len(hops) == 1 and len(hops[0].vias) == 2, [(p.net, p.vias) for p in r.paths]
+    assert any(s[0] == 1 for s in hops[0].segments), hops[0].segments
+    r = router.run(build(False))
+    assert r.pairs == 0, r.pairs                 # routed separately (here only one fits)
+    print("test_native_grid: via swap ok")
+
+
 if __name__ == "__main__":
     pair_case()
+    swap_case()

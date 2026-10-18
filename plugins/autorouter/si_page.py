@@ -4,7 +4,7 @@ length groups and the routing order, kept per board in
 import wx
 import wx.grid
 
-from .engine import si, stackup as stk
+from .engine import fab, si, stackup as stk
 
 # Common interfaces: (label, class) for the "Add preset" menu.
 PRESETS = [
@@ -65,6 +65,15 @@ class SiPage(wx.Panel):
                                 "standard 1.6 mm stackups; order the board with impedance control for exact widths.")
         self.stackup.Bind(wx.EVT_CHOICE, lambda e: self.compute())
         sbox.Add(self.stackup, 0, wx.EXPAND | wx.ALL, 4)
+        self.fabs = [fab.NONE] + list(fab.TEMPLATES)
+        self.fab = wx.Choice(self, choices=["Fabrication rules: the board's own (Board Setup > Constraints)"] + [
+            f"Fabrication rules: {n} ({fab.TEMPLATES[n].description})" for n in fab.TEMPLATES])
+        self.fab.SetToolTip("Raise the board's constraints (clearance, track width, vias, hole and edge clearances) "
+                            "and the net classes to the board house's standard, no-extra-cost capabilities "
+                            "before routing (a stricter value already set stays); the rules the Constraints page "
+                            "cannot express go to the .kicad_dru.")
+        self.fab.SetSelection(0)
+        sbox.Add(self.fab, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 4)
         self.sizes = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
         self.sizes.SetFont(wx.Font(wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
         self.sizes.SetMinSize((-1, 90))
@@ -129,6 +138,11 @@ class SiPage(wx.Panel):
                                      "or change its target to retune it by hand.")
         self.kicad_update.SetValue(True)
         lbox.Add(self.kicad_update, 0, wx.LEFT | wx.BOTTOM, 4)
+        self.rounded = wx.CheckBox(self, label="Round the meander corners (fillets)")
+        self.rounded.SetToolTip("Meander corners are arcs, like KiCad's round tuning pattern style; "
+                                "off: 45-degree chamfers.")
+        self.rounded.SetValue(True)
+        lbox.Add(self.rounded, 0, wx.LEFT | wx.BOTTOM, 4)
         box.Add(lbox, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
 
         # -- KiCad
@@ -214,6 +228,7 @@ class SiPage(wx.Panel):
 
     def set_config(self, cfg: si.SiConfig):
         self.stackup.SetSelection(self.stackups.index(cfg.stackup) if cfg.stackup in self.stackups else 0)
+        self.fab.SetSelection(self.fabs.index(cfg.fab) if cfg.fab in self.fabs else 0)
         for grid in (self.zgrid, self.lgrid):
             if grid.GetNumberRows():
                 grid.DeleteRows(0, grid.GetNumberRows())
@@ -225,6 +240,7 @@ class SiPage(wx.Panel):
         self._fill_order(cfg.route_order)
         self.tune.SetValue(cfg.tune_lengths)
         self.kicad_update.SetValue(cfg.kicad_patterns)
+        self.rounded.SetValue(cfg.rounded)
         self.pair_span.SetValue(cfg.pair_min_span_mm)
         self.pair_uncoupled.SetValue(cfg.pair_uncoupled_max_mm)
         p = si.config_path(self.board)
@@ -234,6 +250,7 @@ class SiPage(wx.Panel):
     def config(self) -> si.SiConfig:
         cfg = si.SiConfig()
         cfg.stackup = self.stackups[max(0, self.stackup.GetSelection())]
+        cfg.fab = self.fabs[max(0, self.fab.GetSelection())]
         for grid in (self.zgrid, self.lgrid):
             # commit a cell being typed into; with no editor open there is nothing to commit
             # (committing then writes the editor's stale text into the cursor cell)
@@ -253,6 +270,7 @@ class SiPage(wx.Panel):
         cfg.route_order = list(self._order_keys)
         cfg.tune_lengths = self.tune.GetValue()
         cfg.kicad_patterns = self.kicad_update.GetValue()
+        cfg.rounded = self.rounded.GetValue()
         cfg.pair_min_span_mm = self.pair_span.GetValue()
         cfg.pair_uncoupled_max_mm = self.pair_uncoupled.GetValue()
         return cfg
@@ -264,7 +282,7 @@ class SiPage(wx.Panel):
         if p is None:
             return
         if p.exists() or cfg.impedance or cfg.length_groups or cfg.route_order != si.DEFAULT_ORDER \
-                or cfg.stackup != stk.BOARD or not cfg.kicad_patterns or cfg.pair_min_span_mm != 3.0 \
+                or cfg.stackup != stk.BOARD or cfg.fab or not cfg.kicad_patterns or not cfg.rounded or cfg.pair_min_span_mm != 3.0 \
                 or cfg.pair_uncoupled_max_mm != 5.0:
             try:
                 si.save(self.board, cfg)
@@ -290,6 +308,11 @@ class SiPage(wx.Panel):
             return
         cfg = self.config()
         try:
+            if cfg.fab:
+                for line in fab.apply(self.board, cfg.fab):
+                    self.log(f"[plugin] {cfg.fab}: {line}")
+                fab.write_drc_rules(self.board, cfg.fab)
+                plan = self.compute() or plan
             for line in si.apply_net_classes(self.board, cfg, plan):
                 self.log("[plugin] " + line)
             from .engine.native import tuning

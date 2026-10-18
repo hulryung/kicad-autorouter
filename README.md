@@ -1,5 +1,7 @@
 # KiCad Autorouter
 
+<img src="docs/logo.png" alt="Autorouter logo" width="96" align="right">
+
 Autoroute the open board without leaving KiCad's PCB editor. One toolbar
 button opens a dialog with the router and an AI assistant:
 
@@ -28,15 +30,64 @@ button opens a dialog with the router and an AI assistant:
 
 ### With the Plugin and Content Manager (recommended)
 
-1. In KiCad: **Plugin and Content Manager → Manage… → Add Repository**, paste
+The plugin is published in its own PCM repository, so KiCad installs it, shows
+when a newer version is out and updates it for you.
+
+**1. Add the repository (once)**
+
+1. Open the **KiCad** project manager (the main window, not the PCB editor)
+   and click **Plugin and Content Manager** in the launcher on the right
+   (also under **Tools → Plugin and Content Manager**).
+2. Click **Manage…** next to the repository dropdown at the top.
+3. Click **+** (*Add repository*), paste this URL and confirm with **OK**:
    ```
    https://raw.githubusercontent.com/hulryung/kicad-autorouter-pcm/main/repository.json
    ```
-2. Switch the repository dropdown to **KiCad Autorouter Repository**, select
-   **Autorouter**, **Install**, then **Apply Pending Changes**.
-3. The *Autorouter* button appears in the PCB editor's toolbar
-   (**Tools → External Plugins** lists it too). The PCM also tells you when a
-   newer version is published.
+4. Click **Save** to close the repository list.
+
+**2. Install**
+
+1. In the repository dropdown, choose **KiCad Autorouter Repository**.
+2. On the **Plugins** tab, select **Autorouter** and click **Install**.
+3. Click **Apply Pending Changes** (bottom right) and close the manager.
+
+**3. Run it**
+
+1. Open a board in the PCB editor. The **Autorouter** button (the green board
+   with gold traces) is on the top toolbar, and the plugin is under
+   **Tools → External Plugins → Autorouter**.
+2. If the button is not there, use **Tools → External Plugins → Refresh
+   Plugins**, or restart KiCad.
+
+**Updating and removing**
+
+- When a new version is published, the manager shows **Update** next to
+  Autorouter (on the **Installed** tab too). Click it, then **Apply Pending
+  Changes**.
+- To remove the plugin, click **Uninstall** on the **Installed** tab, then
+  **Apply Pending Changes**. Your settings and job logs stay in the data
+  folder (see [Data folder](#data-folder)).
+
+**Troubleshooting**
+
+- *The repository does not show up in the dropdown*: check the URL (it ends
+  in `repository.json`) and that KiCad can reach `raw.githubusercontent.com`
+  (proxy settings in **Preferences → Preferences → Common**).
+- *"Package not compatible"*: the plugin needs KiCad 9.0 or 10.x.
+- *Installed but no button*: some KiCad builds hide plugin buttons until the
+  plugin is enabled under **Preferences → PCB Editor → Action Plugins**;
+  tick **Show button** for Autorouter.
+
+#### 설치 방법 (한국어 요약)
+
+1. KiCad 메인 창에서 **플러그인 및 콘텐츠 관리자**(Plugin and Content Manager)를 엽니다.
+2. 상단의 **관리…**(Manage…) → **+** 를 눌러 아래 주소를 추가하고 **저장**합니다.
+   `https://raw.githubusercontent.com/hulryung/kicad-autorouter-pcm/main/repository.json`
+3. 저장소 목록에서 **KiCad Autorouter Repository** 를 고르고, **Plugins** 탭의
+   **Autorouter** → **설치**(Install) → **변경 사항 적용**(Apply Pending Changes).
+4. PCB 편집기 상단 툴바의 Autorouter 버튼(초록 보드에 금색 트레이스)을 누릅니다.
+   보이지 않으면 **도구 → 외부 플러그인 → 플러그인 새로 고침** 또는 KiCad 재시작.
+5. 새 버전이 나오면 관리자에 **업데이트** 버튼이 표시됩니다.
 
 The source repository is private; the PCM repository above holds only the
 installable packages and their metadata. Maintainers publish a new version with
@@ -152,8 +203,14 @@ do:
   where KiCad keeps the impedance choice (Board Setup > Net Classes), and are
   routed coupled: one search for the pair's centreline, then the two tracks a
   gap apart, each joined to its pad with a straight run and a 45-degree step.
-  Pairs whose ends are closer than 3 mm, whose pins would force a crossing,
-  or whose halves would pinch are routed separately, and the log says why.
+  When the pins are in opposite order at the two ends (P above N at one part,
+  below it at the other), the pair still runs coupled with a **via swap**: on
+  a straight stretch of the run, at least 1 mm from either end, one line
+  drops through a via, crosses under its partner at 45 degrees on another
+  layer (an outer layer first, so a plane stays whole) and comes back up,
+  while the partner steps across on the run's layer.
+  Pairs whose ends are closer than 3 mm, or that find no room for a run or a
+  swap, are routed separately, and the log says why.
 
 Not read yet: custom DRC rules (`.kicad_dru`) that set track width or via size
 per condition (their clearances are honoured through the per-item clearance).
@@ -212,8 +269,8 @@ project.
 - **Pair exceptions**: a pair that cannot or need not run coupled is
   connected directly instead, and the log says why: ends closer than 3 mm
   (coupling does not matter over such a short run, e.g. a USB connector to its
-  ESD part), pins in opposite order at the two ends, ends on different layers,
-  or no room. Each line then takes the most direct route it can, with vias
+  ESD part), pins in opposite order at the two ends with no room for a via
+  swap, ends on different layers, or no room. Each line then takes the most direct route it can, with vias
   three times as costly. If the whole pair is no longer than the allowed
   uncoupled length (5 mm), its skew is not matched either. "Write to KiCad"
   adds a rule after the class rules that lifts the coupling, gap (and, for
@@ -434,7 +491,7 @@ looked stuck can be read afterwards. The **Open data folder** button opens it.
 ## Tests
 
 ```bash
-python3 scripts/run-tests.py        # offline: router core on synthetic grids (incl. a coupled pair, the time limit),
+python3 scripts/run-tests.py        # offline: router core on synthetic grids (incl. a coupled pair, a via swap, the time limit),
                                     # settings, AI schema and loop (fake codex)
 # with KiCad's Python the end-to-end tests run too:
 /Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3 scripts/run-tests.py
