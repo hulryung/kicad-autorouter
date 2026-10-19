@@ -202,6 +202,7 @@ def pad_escape(pad, fp, rules: NetRules, pitch: int,
 _DEBUG = bool(os.environ.get("AUTOROUTER_DEBUG"))
 
 OUTLET_NM = 600_000          # how far past a pad exit stays clear of other nets' vias and tracks
+LINK_NM = 4_000_000          # two exits of a net on one layer this close keep the run between them open
 
 PAIR_SUFFIXES = (("+", "-"), ("_P", "_N"), ("_p", "_n"), ("DP", "DN"), ("D+", "D-"), ("P", "N"))
 
@@ -984,6 +985,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     escape_stats: Dict[str, int] = {"straight": 0, "jog": 0, "jog_at_end": 0, "lane_blocked": 0}
     exit_owner: Dict[int, int] = {}            # exit cell -> net, to keep lanes apart
     outlets: List[Tuple[int, int, int, int, int, int]] = []   # (net, pad x, pad y, exit x, exit y, stub width)
+    link_exits: List[Tuple[int, str, int, int, int, int]] = []   # (net, footprint, layer, exit x, exit y, stub width)
     # Other nets' track centrelines keep out of the first 0.6 mm past an exit
     # (per layer cell: the net it is kept for), so a neighbour's track hugging
     # the pad row cannot wall a pin in. Clearance zones may still overlap it.
@@ -1237,6 +1239,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                             lane_guard[idx] = code if cur in (0, code) else -1   # two outlets: nobody's lane
                 if wants_outlet and towards is not None:
                     outlets.append((code, pos.x, pos.y, gx, gy, stub_w, outlet_len))
+                    link_exits.append((code, ref, pl[0], gx, gy, stub_w))
                     # The outlet's first exit is also where the pin drops its
                     # via: keep other nets' centrelines out of that spot on
                     # the layers the pad is not on, or an inner-layer track
@@ -1280,6 +1283,67 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         for idx in grid.segment_cells(0, gx, gy, fx, fy, reach):
             cur = via_guard[idx]
             via_guard[idx] = code if cur in (0, code) else -1
+
+    # Short links: two exits of a net on different parts, on one layer and
+    # within LINK_NM of each other, whose octilinear run between them is
+    # still free, keep that run as the net's lane (and no other net's via
+    # on it). A designer draws such a link straight (a USB connector's CC
+    # pin to its pull-down a few millimetres up); routed late, after the
+    # power and pair nets, the link would otherwise find a neighbour's via
+    # or track across its lane and go the long way round.
+    link_stats = {"kept": 0}
+    by_net: Dict[int, List[Tuple[int, str, int, int, int, int]]] = {}
+    for item in link_exits:
+        by_net.setdefault(item[0], []).append(item)
+    for code, items in by_net.items():
+        if code not in nets or not nets[code].route or len(items) < 2:
+            continue
+        net = nets[code]
+        own = owners[net.rules.key]
+
+        def nearest(i: int) -> Optional[int]:
+            _, ref_i, layer_i, xi, yi, _ = items[i]
+            best, best_d = None, LINK_NM * LINK_NM + 1
+            for j, (_, ref_j, layer_j, xj, yj, _) in enumerate(items):
+                if j == i or ref_j == ref_i or layer_j != layer_i:
+                    continue
+                d = (xi - xj) ** 2 + (yi - yj) ** 2
+                if d < best_d or (d == best_d and j < best):
+                    best, best_d = j, d
+            return best
+
+        for i in range(len(items)):
+            j = nearest(i)
+            if j is None or j < i or nearest(j) != i:
+                continue                                  # each pair once, and only mutual nearest
+            _, _, layer, xa, ya, wa = items[i]
+            _, _, _, xb, yb, wb = items[j]
+            run = None
+            for at_end in (False, True):
+                pts = jog(xa, ya, xb, yb, at_end=at_end)
+                cells = []
+                for k in range(len(pts) - 1):
+                    cells += grid.segment_cells(layer, *pts[k], *pts[k + 1], pitch // 2)
+                if all(own[idx] in (0, code) for idx in cells):
+                    run = pts
+                    break
+            if run is None:
+                continue
+            link_stats["kept"] += 1
+            half = max(wa, wb) // 2
+            via_r = max(max_via_d // 2 + clearance_of(code), max_via_drill // 2 + hole_clr) + half + safety + pitch
+            for k in range(len(run) - 1):
+                # the run is the net's copper already, as its escape stubs
+                # are: no other net's track crosses it on this layer, and no
+                # via lands on it
+                claim(layer, code, lambda r, k=k: grid.segment_cells(layer, *run[k], *run[k + 1], r + half))
+                for idx in grid.segment_cells(0, *run[k], *run[k + 1], via_r):
+                    cur = via_guard[idx]
+                    via_guard[idx] = code if cur in (0, code) else -1
+            if _DEBUG:
+                print(f"[link] {net.name} keeps the run ({xa / 1e6:.2f},{ya / 1e6:.2f}) -> "
+                      f"({xb / 1e6:.2f},{yb / 1e6:.2f}) open", flush=True)
+    escape_stats["links_kept"] = link_stats["kept"]
 
     conn = board.GetConnectivity()
 
