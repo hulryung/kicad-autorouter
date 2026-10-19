@@ -393,6 +393,7 @@ def main():
         side = ref_path.with_suffix(ext)
         if side.exists():
             shutil.copy(side, out / ("routed" + ext))
+            shutil.copy(side, out / ("stripped" + ext))     # the board before routing, for the DRC baseline
 
     board = pcbnew.LoadBoard(str(ref_path))
     items = list(board.GetTracks())
@@ -451,6 +452,14 @@ def main():
             last[0] = time.time()
             print(f"  [{time.time() - t0:5.0f}s] {done}/{total} routed {routed} failed {failed}  {name}", flush=True)
 
+    # the stripped board as the router sees it (rules applied): what its DRC
+    # reports is there before any track, a footprint's own pads against its
+    # holes for instance, and is not counted against the router
+    stripped_path = out / "stripped.kicad_pcb"
+    pcbnew.SaveBoard(str(stripped_path), board)
+    if si_cfg is not None and si_cfg.fab:
+        from autorouter.engine import fab
+        fab.write_drc_rules(pcbnew.LoadBoard(str(stripped_path)), si_cfg.fab)
     job = pipeline.run_job(board, o, status=status, progress=progress, escalate=True)
     seconds = time.time() - t0
     session.refill_zones(board)
@@ -474,13 +483,23 @@ def main():
 
     print(f"  [{time.time() - t0:5.0f}s] saved; DRC...", flush=True)
     report = drc(routed_path, out / "drc.json")
+    baseline = drc(stripped_path, out / "drc-stripped.json")
+
+    def signature(v):
+        return (v["type"], v.get("severity"), tuple(sorted(i["description"] for i in v.get("items", []))))
+    preexisting = Counter(signature(v) for v in (baseline or {}).get("violations", []))
     print(f"  [{time.time() - t0:5.0f}s] DRC done; measuring...", flush=True)
     violations = Counter()
+    skipped_preexisting = 0
     issues = []                     # positions worth a close-up
     unconnected = None
     if report is not None:
         for v in report.get("violations", []):
             if v["type"] == "lib_footprint_issues" or v["type"].startswith("lib_"):
+                continue
+            if preexisting.get(signature(v)):
+                preexisting[signature(v)] -= 1
+                skipped_preexisting += 1
                 continue
             violations[(v["type"], v["severity"])] += 1
             if v.get("items"):
@@ -530,6 +549,7 @@ def main():
         "stages": stages,
         "unconnected_after": unconnected,
         "drc": {f"{t}/{s}": n for (t, s), n in sorted(violations.items())},
+        "drc_preexisting": skipped_preexisting,     # on the board before routing (footprints), not counted
         # physical errors (clearance, shorts...) apart from the design-intent rules (width, gap, skew, length)
         "drc_errors": sum(n for (t, s), n in violations.items() if s == "error" and t not in INTENT_RULES),
         "rule_errors": sum(n for (t, s), n in violations.items() if s == "error" and t in INTENT_RULES),

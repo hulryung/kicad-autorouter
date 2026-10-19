@@ -608,6 +608,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # pieces (a signal walled in by one may rip it up; the pour pass puts it
     # back), so their nets stay in the model even in a pass without pours
     job_items: Set[str] = set(options.movable_uuids)
+    locked_items: Set[str] = set(options.locked_uuids)
     job_codes: Set[int] = set()
     if job_items:
         job_codes = {t.GetNetCode() for t in board.GetTracks() if str(t.m_Uuid.AsString()) in job_items}
@@ -850,7 +851,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         # exact-shape copper index so pad escapes are planned around it
         is_movable = False
         if options.shove and code in nets and nets[code].route and cls in ("PCB_TRACK", "PCB_VIA"):
-            if item.IsLocked():
+            if item.IsLocked() or (locked_items and str(item.m_Uuid.AsString()) in locked_items):
                 fixed_tracks.setdefault(code, []).append(item)
             else:
                 movable.setdefault(code, []).append(item)

@@ -42,6 +42,9 @@ class JobResult:
     pair_exceptions: List[dict] = field(default_factory=list)   # pairs connected directly, and why
 
 
+FIRST_PASS_SHARE = 0.7          # of the time limit; the finer second pass gets the rest
+
+
 def fine_options(options: NativeOptions, failed_nets: List[str], board) -> NativeOptions:
     """The second pass's options: half the pitch, the neck width, cheaper
     vias, scoped to the open nets, no more pour vias."""
@@ -80,6 +83,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     extract = extract_fn or (lambda b, o, st: native_extract.extract(b, o, status=st))
     out = JobResult()
     added: list = []                       # board items this job created (apply_paths)
+    paired_items: list = []                # ...of which the coupled pairs' lines
     import time as _time
     job_started = _time.time()
     limit = options.time_limit_s if options.time_limit_s and options.time_limit_s > 0 else 0.0
@@ -116,7 +120,12 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         result = native_router.run(problem, progress=progress, on_path=on_path, on_remove=remove,
                                    cancelled=cancelled)
         if apply_paths:
-            added.extend(native_apply.add_paths(board, problem.layers, result.paths))
+            paired = getattr(result, "paired_pids", set())
+            for rp in result.paths:
+                items = native_apply.add_path(board, problem.layers, rp)
+                added.extend(items)
+                if rp.pid in paired:
+                    paired_items.extend(items)       # a coupled pair's lines: no later pass moves them
             if result.shoved:
                 try:
                     board.BuildConnectivity()
@@ -154,7 +163,12 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         first.fanout_vias = False
         first.stitch_vias = False
     if limit:
-        first.time_limit_s = max(1.0, remaining())
+        # the first pass leaves the finer second pass its share of the time:
+        # once the first pass is down to rip-up rounds that gain a connection
+        # a minute, the finer grid (neck width, cheaper vias, shove) does
+        # better with the same minutes on what is still open
+        share = FIRST_PASS_SHARE if escalate and options.pitch_mm > 0.04 else 1.0
+        first.time_limit_s = max(1.0, remaining() * share)
     problem, result = one_pass(first)
     if problem is None:
         return out
@@ -189,6 +203,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         if status:
             status(f"Second pass on {len(out.failed)} open connection(s): finer grid, neck width, cheaper vias...")
         fine = fine_options(options, out.failed, board)
+        fine.locked_uuids = list(options.locked_uuids) + [str(item.m_Uuid.AsString()) for item in paired_items]
         # the finer grid is four times the cells: a stubborn connection could
         # search for minutes there, so the pass gets its own budget
         budget = options.fine_budget_s

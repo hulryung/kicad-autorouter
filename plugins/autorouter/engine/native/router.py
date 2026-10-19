@@ -455,6 +455,7 @@ class Router:
         # (net, exit cell) of plane-net pads whose via a rip-up took out: they
         # get a via again after the rip-up rounds, like the fanout list
         self.restore: List[Tuple[int, int]] = []
+        self.ripped_existing: List[_Path] = []       # board pieces shove took out, in case they must come back
         self._rip_planes = False          # the second tier of a rip-up search: plane vias may go too
         self.restore_possible = False     # ...there are such vias on the board
         # new paths get ids above every board piece's, even one that is not
@@ -546,6 +547,29 @@ class Router:
             path.via_cells += grid.disc_cells(0, x, y, r_hole)
         for idx in path.via_cells:
             p.via_block[idx] = 1
+
+    def _fits(self, path: _Path) -> bool:
+        """Is this path's copper (with clearance) still clear of every other net?"""
+        grid, p, net = self.grid, self.p, self.p.nets[path.conn.net]
+        rp = path.path
+        for key, owners in p.owners.items():
+            width, clearance = key
+            for seg in rp.segments:
+                layer, x1, y1, x2, y2 = seg[:5]
+                seg_w = seg[5] if len(seg) > 5 else rp.width
+                r = seg_w // 2 + max(clearance, net.rules.clearance) + width // 2 + p.safety
+                if any(owners[idx] not in (0, net.code) for idx in grid.segment_cells(layer, x1, y1, x2, y2, r)):
+                    return False
+            r_via = rp.via_diameter // 2 + max(clearance, net.rules.clearance) + width // 2 + p.safety
+            for x, y in rp.vias:
+                for layer in range(grid.layers):
+                    if any(owners[idx] not in (0, net.code) for idx in grid.disc_cells(layer, x, y, r_via)):
+                        return False
+        r_hole = rp.via_drill // 2 + p.hole_to_hole + p.max_via_drill // 2
+        for x, y in rp.vias:
+            if any(p.via_block[idx] for idx in grid.disc_cells(0, x, y, r_hole)):
+                return False
+        return True
 
     def _rebuild_maps(self) -> None:
         """Fixed copper plus every surviving path, from scratch."""
@@ -837,8 +861,10 @@ class Router:
                         self.restore.append((path.conn.net, exits[0]))
             elif path.existing:
                 # a board piece may have joined several clusters: each join
-                # becomes a connection to route again
+                # becomes a connection to route again (and the piece comes
+                # back as it was if that fails and its room is still free)
                 self.shoved += 1
+                self.ripped_existing.append(path)
                 for a, b in path.joins:
                     if a != b:
                         conns.append(Connection(path.conn.net, a, b, 0, rank=path.conn.rank))
@@ -2542,8 +2568,31 @@ class Router:
         if _DEBUG:
             for d in result.failed_detail:
                 print(f"[failed] {d}", flush=True)
+        # a board piece shove ripped up whose connection did not come back:
+        # the piece returns as it was when its room is still free (the board
+        # must not end with less than it had)
+        restored = []
+        for path in self.ripped_existing:
+            code = path.conn.net
+            if path.pid in self.paths or all(self._find(code, a) == self._find(code, b) for a, b in path.joins if a != b):
+                continue
+            if not self._fits(path):
+                continue
+            self.paths[path.pid] = path
+            self._claim(path)
+            for a, b in path.joins:
+                if a != b:
+                    self.parent[code][self._find(code, a)] = self._find(code, b)
+            restored.append(path.path)
+            self.shoved -= 1
+            if on_path:
+                on_path(path.path)
+        if restored:
+            result.failed = [c for c in result.failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
+            result.failed_detail = [self._why_failed(c) for c in result.failed]
         new_paths = [self.paths[pid] for pid in sorted(self.paths) if not self.paths[pid].existing]
-        result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths
+        result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths + restored
+        result.paired_pids = {pid for pid, path in self.paths.items() if path.paired}
         result.stitched = len(stitch_paths)
         result.routed = len(new_paths)
         result.shoved = self.shoved

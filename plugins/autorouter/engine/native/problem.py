@@ -132,6 +132,7 @@ class NativeOptions:
     # nets' pad vias): the signal passes may rip them up when one walls in a
     # connection's only corridor; the pour pass places them again where room is left
     movable_uuids: List[str] = field(default_factory=list)
+    locked_uuids: List[str] = field(default_factory=list)    # board items shove mode may not move (a coupled pair's lines)
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
     track_mode: str = SIZE_AUTO
