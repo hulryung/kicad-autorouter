@@ -34,13 +34,8 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
-          history=None, via_lead: int = 0, lead_from=None, end_costs=None) -> Optional[List[int]]:
+          history=None, via_lead: int = 0, lead_from=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
-
-    `end_costs` (cell -> extra cost) is paid on stepping onto that cell: a
-    through-hole pad's cells on the inner layers, where leaving or entering
-    the pin there is a layer change like any via's (`source_costs` is the
-    same for the search's start cells).
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
     `rippable(pid)`, cells of other paths that may be ripped up are passable
@@ -101,8 +96,6 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
             cost += rip_penalty
         if history is not None:
             cost += history[idx]
-        if end_costs is not None:
-            cost += end_costs.get(idx, 0)
         return cost
 
     # The via barrel reaches via_reach cells beyond the track half-width the

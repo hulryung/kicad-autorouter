@@ -146,7 +146,7 @@ class NativeOptions:
     via_mode: str = SIZE_NETCLASS
     via_diameter: int = 0
     via_drill: int = 0
-    via_cost: int = 50                 # in straight cells (a via is worth 5 mm of straight track at 0.1 mm pitch)
+    via_cost: int = 25                 # in straight cells
     allow_vias: bool = True
     max_expansions: int = 400_000
     fine_budget_s: Optional[float] = None   # the finer second pass's own time budget; None = 60 s + 20 s per
