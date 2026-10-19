@@ -1572,7 +1572,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
                              fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, stitch=stitch, existing=existing, via_guard=via_guard,
-                             lane_guard=lane_guard)
+                             lane_guard=lane_guard, board_vias=existing_vias)
     problem.escape_sides = problem_escape_sides
     problem.stats = {"groups": dict(Counter(n.group for n in nets.values() if n.route)),
                      "net_groups": {n.name: n.group for n in nets.values() if n.route},

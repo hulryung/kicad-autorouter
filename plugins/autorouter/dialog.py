@@ -191,7 +191,7 @@ class AutorouterDialog(wx.Dialog):
                                    "Pour nets left unrouted that have zones on two or more layers get a grid "
                                    "of vias through their zones, wherever a via still fits, to shorten return "
                                    "current loops. Placed after all routing.")
-        self.stitch_pitch = wx.SpinCtrlDouble(page, min=1.0, max=50.0, initial=8.0, inc=0.5)
+        self.stitch_pitch = wx.SpinCtrlDouble(page, min=1.0, max=50.0, initial=4.0, inc=0.5)
         self.stitch_pitch.SetDigits(1)
         stitch_row.Add(self.native_stitch, 0, wx.ALIGN_CENTER_VERTICAL)
         stitch_row.Add(self.stitch_pitch, 0, wx.LEFT | wx.RIGHT, 6)

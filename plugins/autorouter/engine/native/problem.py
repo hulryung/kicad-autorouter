@@ -121,8 +121,8 @@ class NativeOptions:
     neck_length_mm: float = 1.5     # how far from a fine-pitch pin the track stays at the neck width
     fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
     diff_pairs: bool = True         # route +/- pairs coupled, at the net class pair width and gap
-    stitch_vias: bool = True        # via stitching across pour nets that span several layers
-    stitch_pitch_mm: float = 8.0    # grid pitch of the stitching vias (a designer stitches sparsely)
+    stitch_vias: bool = True        # via stitching across pour nets that span several layers, beside signal layer changes only
+    stitch_pitch_mm: float = 4.0    # grid pitch of the candidate stitching spots (a via lands within 3/4 of it of a layer change)
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     plane_nets: bool = True         # nets whose pour covers their pads are planes: vias to the pour, no tracks
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
@@ -194,6 +194,7 @@ class RoutingProblem:
     fanout_alt: Dict[int, List[int]] = field(default_factory=dict)   # exit cell -> the pad's other exits to try
     fanout_goals: Dict[int, Set[int]] = field(default_factory=dict)  # exit cell -> cells on the net's pour, within reach
     stitch: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> candidate (cx, cy) via spots
+    board_vias: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> via centres (nm) on the board already
     escape_sides: Dict[Tuple[str, str], Tuple[int, int]] = field(default_factory=dict)   # see NativeOptions
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum
     max_via_drill: int = 0                        # nm, the largest via drill any net uses

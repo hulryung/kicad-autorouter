@@ -2508,18 +2508,76 @@ class Router:
                         if on_path:
                             on_path(rp)
 
-        # 5. stitching vias on the pour nets, wherever they still fit
+        # 5. stitching vias on the pour nets, where they serve: a candidate
+        # spot gets a via only when a signal changes layer near it (the
+        # signal's return current needs a path between the planes there)
+        # and the pour has no via within reach yet (a pad's fanout via, or
+        # a stitch placed before). The rest of the plane is left alone, as
+        # a designer leaves it; a blanket of vias is not artwork.
         stitch_paths: List[RoutedPath] = []
-        if not halted():
-            n_spots = sum(len(v) for v in self.p.stitch.values())
+        if self.p.stitch and not halted():
+            reach = int(self.opts.stitch_pitch_mm * 1_000_000 * 0.75)      # beyond the candidate grid's half diagonal
+            changes: List[Tuple[int, int]] = []                              # where the signals change layer
+            pour_vias: Dict[int, List[Tuple[int, int]]] = {}                 # pour net -> its vias so far
+
+            def _is_pour(code: int) -> bool:
+                return code in self.p.stitch or (code in self.p.nets and not self.p.nets[code].route)
+
+            # the vias on the board already (the signal passes before this
+            # one, or a routed board), then this pass's own
+            for code, vias in self.p.board_vias.items():
+                if _is_pour(code):
+                    pour_vias.setdefault(code, []).extend(vias)
+                elif code > 0:
+                    changes.extend(vias)
+            for path in self.paths.values():
+                if path.existing:
+                    continue
+                code = path.conn.net
+                if _is_pour(code):
+                    pour_vias.setdefault(code, []).extend(path.path.vias)
+                else:
+                    changes.extend(path.path.vias)
+            for rp in fanout_paths:
+                pour_vias.setdefault(rp.net, []).extend(rp.vias)
+
+            def _near(points, x, y) -> bool:
+                for vx, vy in points:
+                    if abs(vx - x) <= reach and abs(vy - y) <= reach and (vx - x) ** 2 + (vy - y) ** 2 <= reach * reach:
+                        return True
+                return False
+
+            def _nearest_change(x, y) -> int:
+                best = -1
+                for vx, vy in changes:
+                    if abs(vx - x) > reach or abs(vy - y) > reach:
+                        continue
+                    d = (vx - x) ** 2 + (vy - y) ** 2
+                    if d <= reach * reach and (best < 0 or d < best):
+                        best = d
+                return best
+
             for code, spots in self.p.stitch.items():
                 if halted():
                     break
-                report(f"{len(stitch_paths)} placed of {n_spots} sites", "stitching vias: ")
+                # the spots closest to a layer change first: the via lands
+                # beside the change, and the spots around it are then covered
+                ranked = []
                 for cx, cy in spots:
+                    d = _nearest_change(self.grid.nm_x(cx), self.grid.nm_y(cy))
+                    if d >= 0:
+                        ranked.append((d, cy, cx))
+                ranked.sort()
+                report(f"{len(ranked)} of {len(spots)} sites beside a layer change", "stitching vias: ")
+                mine = pour_vias.setdefault(code, [])
+                for _, cy, cx in ranked:
+                    x, y = self.grid.nm_x(cx), self.grid.nm_y(cy)
+                    if _near(mine, x, y):
+                        continue
                     rp = self._stitch_via(code, cx, cy)
                     if rp is not None:
                         stitch_paths.append(rp)
+                        mine.extend(rp.vias)
                         if on_path:
                             on_path(rp)
 
