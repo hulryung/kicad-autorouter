@@ -681,6 +681,20 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         raise RuntimeError("No routable copper layer is enabled.")
     layer_of: Dict[int, int] = {l.kicad_id: l.index for l in layers}
 
+    if options.pours_only and options.fanout_vias and options.fanout_only_unconnected:
+        # The pour pass decides which pads still need a via from the pours
+        # as the tracks now on the board leave them: refilled, so an island
+        # the new tracks cut off the pour shows as one (the fills a board
+        # carries are from before this job's tracks).
+        say("Refilling the pours...")
+        try:
+            zones = [z for z in board.Zones() if not z.GetIsRuleArea()]
+            if zones:
+                pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+                board.BuildConnectivity()
+        except Exception:
+            pass
+
     outline = pcbnew.SHAPE_POLY_SET()
     if not board.GetBoardPolygonOutlines(outline, True) or outline.OutlineCount() == 0:
         # No usable Edge.Cuts: fall back to the bounding box of what is there.
@@ -1495,15 +1509,24 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     conn = board.GetConnectivity()
 
-    def _pour_reaches(pad) -> bool:
-        """Is this pad already joined to a filled zone of its net (as the
-        board's connectivity sees it, i.e. with the current fills)?"""
+    def _pour_ties(pad) -> bool:
+        """Is this pad on a filled pour of its net (as the board's
+        connectivity sees it, with the current fills) that is already tied
+        to the net's copper on the other layers: a through-hole pad or a via
+        of the net in the same piece of copper? A pour island the tracks
+        cut off has neither, and needs a via of its own; so does a pad the
+        pour does not reach at all."""
         try:
-            for item in conn.GetConnectedItems(pad):
-                if item.GetClass() == "ZONE":
-                    return True
+            items = list(conn.GetConnectedItems(pad))
         except Exception:
-            pass
+            return False
+        if not any(item.GetClass() == "ZONE" for item in items):
+            return False
+        for item in items:
+            if item.GetClass() == "PCB_VIA":
+                return True
+            if item.GetClass() == "PAD" and item.GetAttribute() == pcbnew.PAD_ATTRIB_PTH:
+                return True
         return False
 
     # Fanout candidates: pads of pour nets that are not routed with tracks and
@@ -1602,8 +1625,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if not any(_zone_covers(z, pos.x, pos.y, 1_500_000) for z in plane_zones.get(code, ())
                        if {layer_of[l] for l in z.GetLayerSet().CuStack() if l in layer_of} - set(pl)):
                 continue                          # the pour does not come under this pad
-            if options.fanout_only_unconnected and _pour_reaches(pad):
-                continue                          # the pour on its own layer already connects it
+            if options.fanout_only_unconnected and _pour_ties(pad):
+                continue                          # the pour on its own layer already connects it, through-hole pins or vias tie that pour
             exits = _pad_exits(code, pos)
             if exits:                             # no stub: the via is sought around the pad itself
                 fanout.append((code, exits[0]))
