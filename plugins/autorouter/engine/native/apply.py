@@ -46,6 +46,15 @@ def _uncovered(tracks, x1: int, y1: int, x2: int, y2: int, width: int):
     return [(ax, ay, bx, by) for ax, ay, bx, by in out if (ax, ay) != (bx, by)]
 
 
+def _point_to_segment(x: int, y: int, x1: int, y1: int, x2: int, y2: int) -> float:
+    dx, dy = x2 - x1, y2 - y1
+    length2 = dx * dx + dy * dy
+    if length2 == 0:
+        return math.hypot(x - x1, y - y1)
+    t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / length2))
+    return math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
+
+
 def _same_copper(board, net: int, layer_id: int):
     return [t for t in board.GetTracks()
             if t.GetClass() == "PCB_TRACK" and t.GetNetCode() == net and t.GetLayer() == layer_id]
@@ -97,6 +106,199 @@ def trim_overlaps(board, items) -> int:
 
 
 _REMOVED: list = []        # items taken off the board; Python must not free them
+
+
+def _via_radius(via) -> int:
+    try:
+        return via.GetWidth(pcbnew.F_Cu) // 2            # KiCad 9+: the width is per layer
+    except TypeError:
+        return via.GetWidth() // 2
+
+
+def prune_redundant_vias(board, items, within_nm: int, log=None) -> int:
+    """After a run: a via the run dropped comes off again when the net's
+    copper around it (tracks, pads and the filled pours on their layers)
+    stays in one piece without it and that piece holds another via of the
+    net within `within_nm`. Two neighbouring pads of a power net each got a
+    via before the signals were routed; once a track or the pour on their
+    layer joins the pads, one via serves both, as a designer draws a
+    decoupling cap and the pin it feeds. The stub a removed via leaves
+    behind is taken off too, back to where it meets other copper. The
+    zones are refilled first so the pours stand as they will on the
+    finished board. Returns the number of vias removed."""
+    if within_nm <= 0 or not items:
+        return 0
+    uid = lambda item: str(item.m_Uuid.AsString())
+    live = {uid(t): t for t in items if t.GetClass() in ("PCB_TRACK", "PCB_VIA")}
+    if not any(t.GetClass() == "PCB_VIA" for t in live.values()):
+        return 0
+    try:
+        zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
+        if zones:
+            pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    except Exception:
+        zones = []
+
+    def _touch(item, x: int, y: int, slack: int) -> bool:
+        """Is the point within the item's copper (plus slack)?"""
+        cls = item.GetClass()
+        if cls == "PCB_TRACK":
+            s, e = item.GetStart(), item.GetEnd()
+            return _point_to_segment(x, y, s.x, s.y, e.x, e.y) <= item.GetWidth() // 2 + slack
+        if cls == "PCB_VIA":
+            p = item.GetPosition()
+            return math.hypot(p.x - x, p.y - y) <= _via_radius(item) + slack
+        if cls == "PAD":
+            try:
+                return bool(item.HitTest(pcbnew.VECTOR2I(x, y)))
+            except Exception:
+                return False
+        return False
+
+    def _anchors(item):
+        if item.GetClass() == "PCB_TRACK":
+            s, e = item.GetStart(), item.GetEnd()
+            return [(s.x, s.y), (e.x, e.y)]
+        p = item.GetPosition()
+        return [(p.x, p.y)]
+
+    def _layers(item):
+        cls = item.GetClass()
+        if cls == "PCB_TRACK":
+            return {item.GetLayer()}
+        if cls == "PCB_VIA":
+            return None                               # a through via: every layer
+        try:
+            return set(item.GetLayerSet().CuStack())
+        except Exception:
+            return None
+
+    graphs = {}
+
+    def _graph(net: int):
+        """Nodes: the net's tracks, vias and pads (by UUID) and each filled
+        pour layer of the net (by zone UUID and layer); edges where copper
+        touches, from the geometry (KiCad's connectivity hands back whole
+        clusters, not neighbours)."""
+        if net in graphs:
+            return graphs[net]
+        copper = [(uid(t), t) for t in board.GetTracks() if t.GetNetCode() == net]
+        copper += [(uid(p), p) for p in board.GetPads() if p.GetNetCode() == net]
+        adj = {k: [] for k, _ in copper}
+        for i, (ka, a) in enumerate(copper):
+            la = _layers(a)
+            for kb, b in copper[i + 1:]:
+                lb = _layers(b)
+                if la is not None and lb is not None and not (la & lb):
+                    continue
+                if a.GetClass() == "PAD" and b.GetClass() == "PAD":
+                    continue
+                if any(_touch(b, x, y, 1000) for x, y in _anchors(a)) or \
+                        any(_touch(a, x, y, 1000) for x, y in _anchors(b)):
+                    adj[ka].append((kb, b))
+                    adj[kb].append((ka, a))
+        for z in zones:
+            if z.GetNetCode() != net:
+                continue
+            for layer in z.GetLayerSet().CuStack():
+                try:
+                    fill = z.GetFilledPolysList(layer)
+                    if fill.OutlineCount() == 0:
+                        continue
+                except Exception:
+                    continue
+                zk = (uid(z), int(layer))
+                adj[zk] = []
+                for ka, a in copper:
+                    la = _layers(a)
+                    if la is not None and layer not in la:
+                        continue
+                    if a.GetClass() == "PCB_TRACK":
+                        hit = any(fill.Contains(pcbnew.VECTOR2I(x, y)) for x, y in _anchors(a))
+                    else:
+                        # a pad or via with a thermal relief: its centre is in
+                        # the gap, the spokes touch its edge
+                        try:
+                            hit = bool(fill.Collide(a.GetEffectiveShape(layer), 1000))
+                        except Exception:
+                            hit = any(fill.Contains(pcbnew.VECTOR2I(x, y)) for x, y in _anchors(a))
+                    if hit:
+                        adj[ka].append((zk, None))
+                        adj[zk].append((ka, a))
+        graphs[net] = adj
+        return adj
+
+    def _near(a, b) -> bool:
+        pa, pb = a.GetPosition(), b.GetPosition()
+        return abs(pa.x - pb.x) <= within_nm and abs(pa.y - pb.y) <= within_nm \
+            and (pa.x - pb.x) ** 2 + (pa.y - pb.y) ** 2 <= within_nm * within_nm
+
+    gone: set = set()
+    removed = 0
+    # by position: deterministic, and of a pair the one farther down the
+    # board goes when either would do
+    vias = sorted((v for v in live.values() if v.GetClass() == "PCB_VIA"),
+                  key=lambda v: (v.GetNetCode(), v.GetPosition().y, v.GetPosition().x))
+    for via in vias:
+        vk = uid(via)
+        adj = _graph(via.GetNetCode())
+        held = [(k, o) for k, o in adj.get(vk, []) if o is not None and k not in gone]
+        if not held:
+            if log is not None:
+                log.append((via.GetNetCode(), via.GetPosition().x, via.GetPosition().y, "lone"))
+            continue                                      # a stitching via: placed on purpose
+        # the piece of the net the via's copper falls into without the via
+        seen = {vk, held[0][0]}
+        queue = [held[0][0]]
+        found = False
+        while queue:
+            k = queue.pop(0)
+            for nk, o in adj.get(k, []):
+                if nk in gone or nk in seen:
+                    continue
+                seen.add(nk)
+                queue.append(nk)
+                if o is not None and o.GetClass() == "PCB_VIA" and _near(o, via):
+                    found = True
+        split = any(k not in seen for k, _ in held)
+        if log is not None:
+            log.append((via.GetNetCode(), via.GetPosition().x, via.GetPosition().y,
+                        "bridge" if split else ("removed" if found else "kept"), [o.GetClass() for _, o in held]))
+        if split or not found:
+            continue
+        gone.add(vk)
+        board.Remove(via)
+        via.thisown = 0
+        _REMOVED.append(via)
+        removed += 1
+        # the stub it leaves: the run's own tracks with an end in the air now
+        while True:
+            loose = None
+            for k, _ in held:
+                if k in gone or k not in live or live[k].GetClass() != "PCB_TRACK":
+                    continue
+                t = live[k]
+                for x, y in _anchors(t):
+                    if not any(o is not None and nk not in gone and _touch(o, x, y, 1000)
+                               for nk, o in adj.get(k, [])):
+                        loose = k
+                        break
+                if loose:
+                    break
+            if loose is None:
+                break
+            t = live[loose]
+            gone.add(loose)
+            board.Remove(t)
+            t.thisown = 0
+            _REMOVED.append(t)
+            held = [(k, o) for k, o in adj.get(loose, []) if o is not None and k not in gone]
+    if removed:
+        try:
+            board.BuildConnectivity()
+        except Exception:
+            pass
+    return removed
 
 
 def add_path(board, layers: List[LayerInfo], path: RoutedPath, trim: bool = False) -> List[object]:

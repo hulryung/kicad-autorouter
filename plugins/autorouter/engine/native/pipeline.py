@@ -256,6 +256,14 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
         live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
         out.stats["trimmed"] = native_apply.trim_overlaps(board, live)
+        # a pad via left behind where a track now joins its pad to a
+        # neighbour's via: one via serves both, as a designer draws it
+        gone = {str(item.m_Uuid.AsString()) for item in _REMOVED} | \
+            {str(item.m_Uuid.AsString()) for item in native_apply._REMOVED}
+        live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
+        pruned = native_apply.prune_redundant_vias(board, live, int(options.prune_via_mm * 1_000_000))
+        out.stats["pruned_vias"] = pruned
+        out.fanout = max(0, out.fanout - pruned)
     if apply_paths and not (cancelled and cancelled()):
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
