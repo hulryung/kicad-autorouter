@@ -339,6 +339,22 @@ def _faces_row(fp, pad, pos, exit_pt, reach: int = 4_000_000) -> bool:
             return True
     return False
 
+def _target_ahead(px: int, py: int, ex: int, ey: int, target: Tuple[int, int],
+                  depth_nm: int = 2_000_000, half_nm: int = 750_000) -> bool:
+    """Does the net's target pad sit in the lane past this exit (within
+    depth ahead, half beside)? The room beyond is then no reason to leave
+    the other way: the track ends at that pad. An SOIC power pin with its
+    decoupling capacitor right below has the capacitor's ground pad beside
+    the lane, which makes the strip look boxed in."""
+    dx, dy = ex - px, ey - py
+    n = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / n, dy / n
+    tx, ty = target[0] - ex, target[1] - ey
+    along = tx * ux + ty * uy
+    beside = abs(ty * ux - tx * uy)
+    return -half_nm <= along <= depth_nm and beside <= half_nm
+
+
 def _room_beyond(grid, own, layer: int, code: int, px: int, py: int, ex: int, ey: int, pitch: int,
                  depth_nm: int = 2_000_000, half_nm: int = 400_000, holders: Optional[dict] = None) -> float:
     """How open the board is past a pad exit: the share of free cells (or the
@@ -978,7 +994,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         abroad = [q for q, r in zip(positions_by_net[code], refs_by_net[code]) if r != ref]
         then = min(abroad, key=lambda q: (q[0] - pos.x) ** 2 + (q[1] - pos.y) ** 2) if abroad else None
         two_pin = options.outward_exits and fp is not None and sum(1 for _ in fp.Pads()) <= 2
-        escapes = pad_escape(pad, fp, net.rules, pitch, towards, then, outward=two_pin)
+        # The side is chosen by the net's nearest pad on another footprint:
+        # a chip's power pin leaves toward its decoupling capacitor, not
+        # toward the same-net pin round the corner of the chip (those two
+        # are joined outside, or by the plane). A same-footprint pad decides
+        # only when the net has no other part.
+        target = then if then is not None else towards
+        escapes = pad_escape(pad, fp, net.rules, pitch, target, outward=two_pin)
         if escapes and fp is not None and options.neck_down:
             key = fp.GetReference()
             if key not in tight_by_fp:
@@ -1012,7 +1034,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             # right outside a QFP row) while the other side is open: a
             # designer takes the open side, often under the body to a via.
             holders = [{}, {}]
-            room = [_room_beyond(grid, own, pl[0], code, pos.x, pos.y, ex, ey, pitch, holders=h)
+            room = [1.0 if target is not None and _target_ahead(pos.x, pos.y, ex, ey, target)
+                    else _room_beyond(grid, own, pl[0], code, pos.x, pos.y, ex, ey, pitch, holders=h)
                     for (ex, ey), h in zip(escapes, holders)]
             if _DEBUG:
                 print(f"[room] {net.name} {fp.GetReference() if fp else '?'}.{pad.GetNumber()} "

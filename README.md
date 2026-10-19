@@ -341,12 +341,16 @@ obstacle.
    clusters; the connections to route are a minimum spanning tree over each
    net's clusters, like KiCad's ratsnest.
    - **Pad escapes**: SMD pads are left along the pad's long axis to an exit
-     point just past the pad end, towards the net's nearest other pad when
-     that lane is free; each lane is checked with KiCad's own shape collision
-     tests and lanes are kept clear of each other. When the board past the
-     preferred side is boxed in (a crystal or resistor right outside a QFP
-     row) and the other side is open, the pad leaves the open side, as a
-     designer takes a pin under the body to a via. The first 0.6 mm past an
+     point just past the pad end, towards the net's nearest pad on another
+     footprint when that lane is free (a chip's power pin heads for its
+     decoupling capacitor, not for the same-net pin round the corner of the
+     chip); each lane is checked with KiCad's own shape collision tests and
+     lanes are kept clear of each other. When the board past the preferred
+     side is boxed in (a crystal or resistor right outside a QFP row) and
+     the other side is open, the pad leaves the open side, as a designer
+     takes a pin under the body to a via; not when the target pad itself
+     sits in that lane within 2 mm (the capacitor right below an SOIC pin,
+     whose ground pad beside the lane makes it look boxed in). The first 0.6 mm past an
      exit is an **outlet**: other nets' vias may not sit on it and their
      tracks pay a penalty to cross it, so a neighbour cannot wall a pin in.
      The side chosen when the job starts is kept for the whole job: the
