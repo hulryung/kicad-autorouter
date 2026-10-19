@@ -543,6 +543,7 @@ def main():
         "intent": intent,
         "connections_before": before,
         "routed": job.routed, "open_nets": job.failed, "escalated": job.escalated,
+        "failed_detail": list(getattr(job, "failed_detail", []))[:60],     # where each open connection is walled in
         "fanout_vias": job.fanout, "stitching_vias": job.stitched,
         "pass_errors": {k: v for k, v in job.stats.items() if k.endswith("_error")},
         "route_seconds": round(seconds, 1),
