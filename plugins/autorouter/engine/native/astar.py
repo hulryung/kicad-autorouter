@@ -9,7 +9,7 @@ to the nearest target anchor, so it stays admissible for in-layer moves.
 import heapq
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from .grid import BLOCKED, Grid
+from .grid import BLOCKED, BODY_LANE, Grid
 
 # Costs per move. Against the layer's preferred direction a straight move costs
 # 1.5x; a diagonal is half along, half against, so it costs the mean of the
@@ -19,6 +19,7 @@ from .grid import BLOCKED, Grid
 # cheaper than an L (18 vs 25).
 STRAIGHT, DIAGONAL, AGAINST_STRAIGHT = 10, 18, 15
 LANE_PENALTY = 60                               # per cell inside another pad's outlet lane (6 straight cells)
+BODY_PENALTY = 10                               # per cell under an IC body on its own layer: that run counts double
 LAST = {"expansions": 0, "capped": False}       # what the last search did (debugging)
 
 # (dx, dy, is_diagonal)
@@ -84,7 +85,12 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
         cost = 0
         if lane_guard is not None:
             g = lane_guard[idx]
-            if g and g != net and g != also_ok:
+            if g == BODY_LANE:
+                # the room inside an IC's pin ring on the part's layer: a
+                # designer runs a track there only to reach a via of a pin
+                # whose way out is under the body, not along the pin rows
+                cost += BODY_PENALTY
+            elif g and g != net and g != also_ok:
                 cost += LANE_PENALTY
         if soft and owners[idx] not in (0, net) and routed[idx] != 0:
             cost += rip_penalty

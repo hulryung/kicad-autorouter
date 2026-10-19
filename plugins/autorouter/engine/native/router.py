@@ -24,7 +24,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 import os
 
 from . import astar
-from .grid import BLOCKED, Grid, jog
+from .grid import BLOCKED, BODY_LANE, Grid, jog
 from .problem import Connection, NetInfo, RoutedPath, RoutingProblem
 
 ProgressFn = Callable[[int, int, int, int, str], None]    # done, total, routed, failed, net name
@@ -953,7 +953,7 @@ class Router:
                                 if ok and p.lane_guard is not None:
                                     for idx in grid.segment_cells(layer, *pts[i], *pts[i + 1], max(grid.pitch // 2, w // 2)):
                                         g = p.lane_guard[idx]
-                                        if g and g != net.code:
+                                        if g and g != net.code and g != BODY_LANE:
                                             ok = False
                                             break
                                 if not ok:
@@ -1106,7 +1106,7 @@ class Router:
             w, h, plane = grid.w, grid.h, grid.plane
             offs = [(dx, dy) for dx in range(-reach, reach + 1) for dy in range(-reach, reach + 1)
                     if dx * dx + dy * dy <= reach * reach and (dx or dy)]
-            for idx in (i for i, v in enumerate(src) if v):
+            for idx in (i for i, v in enumerate(src) if v and v != BODY_LANE):
                 code = src[idx]
                 layer, rest = divmod(idx, plane)
                 cy, cx = divmod(rest, w)

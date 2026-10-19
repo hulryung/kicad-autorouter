@@ -16,6 +16,9 @@ from array import array
 from typing import Callable, Iterable, List, Sequence, Tuple
 
 BLOCKED = -1
+# lane_guard value of a cell under an IC body on the part's own layer (inside
+# its pin ring): passable, but a track there pays astar.BODY_PENALTY per cell
+BODY_LANE = -2
 
 
 class Grid:

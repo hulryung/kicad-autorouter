@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import pcbnew
 
-from .grid import BLOCKED, Grid, jog
+from .grid import BLOCKED, BODY_LANE, Grid, jog
 from .problem import (ExistingPath, Cluster, Connection, LayerInfo, NativeOptions, NetInfo, NetRules,
                       RoutedPath, RoutingProblem, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                       SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED)
@@ -371,6 +371,12 @@ def _dense_rows(fp) -> Dict[str, Tuple[int, Optional[Tuple[float, float]]]]:
 BODY_MIN_PADS = 6            # an IC body: this many SMD pins or more round a package
 BODY_BEHIND_NM = 1_500_000   # a body pin's target this far behind the pad (on the body's side) keeps the inward exit
 BODY_ROUND_GROUPS = ("signal", "power")   # ...except for these routing groups: they go round the body outside
+# A coarse body (an SOIC, not a QFP or a SOT-23): its pin ring spans this
+# much both ways and its pins sit this far apart. The room inside such a
+# ring is a channel a track could run along, and its pads are wide enough
+# to be entered from under the body; both are kept for the pins' own way out.
+BODY_MIN_SPAN = 3_000_000
+BODY_MIN_PITCH = 1_000_000
 
 
 def _pin_ring(fp) -> Optional[Tuple[int, int, int, int]]:
@@ -387,6 +393,26 @@ def _pin_ring(fp) -> Optional[Tuple[int, int, int, int]]:
     if x1 - x0 < 500_000 or y1 - y0 < 500_000:
         return None
     return x0, y0, x1, y1
+
+
+def _pin_pitch(fp) -> int:
+    """The closest two SMD pad centres of a footprint, in nm (its pin pitch)."""
+    pts = [(p.GetPosition().x, p.GetPosition().y) for p in fp.Pads()
+           if p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)]
+    best = 1 << 60
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            d = (pts[i][0] - pts[j][0]) ** 2 + (pts[i][1] - pts[j][1]) ** 2
+            if d < best:
+                best = d
+    return int(math.sqrt(best)) if best < (1 << 60) else 0
+
+
+def coarse_body(fp, box: Optional[Tuple[int, int, int, int]]) -> bool:
+    """An SOIC-like body: a pin ring at least BODY_MIN_SPAN both ways whose
+    pins are BODY_MIN_PITCH or more apart (not a QFP, not a SOT-23)."""
+    return box is not None and box[2] - box[0] >= BODY_MIN_SPAN and box[3] - box[1] >= BODY_MIN_SPAN \
+        and _pin_pitch(fp) >= BODY_MIN_PITCH
 
 
 def _inward_exit(box: Optional[Tuple[int, int, int, int]], pos, x: int, y: int) -> bool:
@@ -857,6 +883,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     tight_by_fp: Dict[int, Set[str]] = {}
     dense_by_fp: Dict[str, Dict[str, Tuple[int, Optional[Tuple[float, float]]]]] = {}
     ring_by_fp: Dict[str, Optional[Tuple[int, int, int, int]]] = {}   # IC bodies: the pad ring, by reference
+    coarse_by_fp: Dict[str, bool] = {}                                # ...which of them are SOIC-like
+    body_layers: Dict[str, Set[int]] = {}                             # ...and the layers the coarse ones' pins are on
     pending = []
     pad_copper: Dict[Tuple[int, int, int], Set[int]] = {}   # (net, pad x, pad y) -> cells inside its copper
     # Every piece of copper as a KiCad shape, in 2 mm buckets per layer, for
@@ -1109,6 +1137,20 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 return (dx * partner_side[0] + dy * partner_side[1]) / norm
             if max(_along(e) for e in escapes) < 0.7:
                 partner_side = None
+        # A pin of an IC body (QFP, QFN, SOIC): one of its two exits points
+        # under the body. Known before the side is chosen, since a side an
+        # earlier pass remembered is a body pin's side all the same.
+        body_pin = False
+        inward = [False, False]
+        if escapes and len(escapes) == 2 and fp is not None:
+            if ref not in ring_by_fp:
+                ring_by_fp[ref] = _pin_ring(fp)
+            inward = [_inward_exit(ring_by_fp[ref], pos, ex, ey) for ex, ey in escapes]
+            body_pin = inward[0] != inward[1]
+            if body_pin and ref not in coarse_by_fp:
+                coarse_by_fp[ref] = coarse_body(fp, ring_by_fp[ref])
+            if body_pin and coarse_by_fp[ref]:
+                body_layers.setdefault(ref, set()).update(pl)
         if escapes and len(escapes) >= 2 and remembered is not None:
             # an earlier pass of this job chose the side before its vias went
             # in; keep it, so those vias do not flip the choice
@@ -1142,11 +1184,6 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             # round the chip is the long one, and a designer spends the
             # room for vias under the body on those nets; a plain signal or
             # power track goes round outside.
-            if fp is not None and ref not in ring_by_fp:
-                ring_by_fp[ref] = _pin_ring(fp)
-            ring = ring_by_fp.get(ref) if fp is not None else None
-            inward = [_inward_exit(ring, pos, ex, ey) for ex, ey in escapes]
-            body_pin = inward[0] != inward[1]
             behind = False
             if body_pin and target is not None and net.group not in BODY_ROUND_GROUPS:
                 ox, oy = escapes[1 if inward[0] else 0]
@@ -1275,6 +1312,28 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 break
         if chosen:
             half = stub_w // 2
+            if body_pin and coarse_by_fp[ref] and net.route and len(chosen) == 1:
+                # A coarse body's pin is entered from its chosen side only.
+                # The pad's own copper is free ground to the search, so a
+                # route could otherwise come in under the body, cross the
+                # pad and leave by the outward exit (the trim at the pad
+                # then keeps the inward entry): the escape side would be
+                # planned for nothing, and an SOIC's power pin got its
+                # track along the inside of the pin row. The half of the
+                # pad behind its centre, seen from the exit, is a wall; the
+                # exit stub (claimed next) and the pad centre stay the
+                # net's own. (A QFP pin is too narrow to enter that way.)
+                gx, gy = chosen[0][4], chosen[0][5]
+                dx, dy = gx - pos.x, gy - pos.y
+                norm = math.hypot(dx, dy) or 1.0
+                wall = []
+                for idx in own_cells:
+                    _, cx, cy = grid.unpack(idx)
+                    if ((grid.nm_x(cx) - pos.x) * dx + (grid.nm_y(cy) - pos.y) * dy) / norm < -(pitch // 2):
+                        wall.append(idx)
+                for own_map in owners.values():
+                    grid.mark(own_map, wall, BLOCKED)
+                escape_stats["walled"] = escape_stats.get("walled", 0) + 1
             # With dual escapes (the pipeline's pass for the nets left open)
             # both sides are exits and the search leaves by whichever is
             # cheaper; only the stub of the exit a route uses is written.
@@ -1410,6 +1469,29 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 print(f"[link] {net.name} keeps the run ({xa / 1e6:.2f},{ya / 1e6:.2f}) -> "
                       f"({xb / 1e6:.2f},{yb / 1e6:.2f}) open", flush=True)
     escape_stats["links_kept"] = link_stats["kept"]
+
+    # Under a coarse IC body (an SOIC), on the part's own layer, a track
+    # pays extra per cell (astar.BODY_PENALTY): the room between the pin
+    # rows is for the pins whose way out is under the body (an exit there,
+    # a short run to a via), not a channel along the inside of a row for a
+    # track that could not get past the row outside; a designer takes two
+    # vias for that. Cells that are a pin's own outlet lane keep that. (Under
+    # a QFP the pocket is all via sites; a charge there sent routes through
+    # the neighbouring pins' outlets instead.)
+    body_cells = 0
+    for ref, box in ring_by_fp.items():
+        if ref not in body_layers:
+            continue
+        x0, y0, x1, y1 = box
+        shrunk = (x0 + pitch, y0 + pitch, x1 - pitch, y1 - pitch)
+        if shrunk[2] <= shrunk[0] or shrunk[3] <= shrunk[1]:
+            continue
+        for li in sorted(body_layers[ref]):
+            for idx in grid.cells_where(li, shrunk, lambda x, y: True):
+                if lane_guard[idx] == 0:
+                    lane_guard[idx] = BODY_LANE
+                    body_cells += 1
+    escape_stats["body_cells"] = body_cells
 
     conn = board.GetConnectivity()
 
