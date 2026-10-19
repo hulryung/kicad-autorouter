@@ -368,6 +368,36 @@ def _dense_rows(fp) -> Dict[str, Tuple[int, Optional[Tuple[float, float]]]]:
     return out
 
 
+BODY_MIN_PADS = 6            # an IC body: this many SMD pins or more round a package
+BODY_BEHIND_NM = 1_500_000   # a body pin's target this far behind the pad (on the body's side) keeps the inward exit
+BODY_ROUND_GROUPS = ("signal", "power")   # ...except for these routing groups: they go round the body outside
+
+
+def _pin_ring(fp) -> Optional[Tuple[int, int, int, int]]:
+    """The nm box of an IC's pin ring: the bounding box of the pad centres
+    of a QFP, QFN or SOIC, for telling a pin's inward exit (under the body)
+    from its outward one. None for parts with fewer than BODY_MIN_PADS SMD
+    pads (a resistor, a crystal) or whose pads lie in one line."""
+    pads = [p for p in fp.Pads() if p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)]
+    if len(pads) < BODY_MIN_PADS:
+        return None
+    xs = [p.GetPosition().x for p in pads]
+    ys = [p.GetPosition().y for p in pads]
+    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+    if x1 - x0 < 500_000 or y1 - y0 < 500_000:
+        return None
+    return x0, y0, x1, y1
+
+
+def _inward_exit(box: Optional[Tuple[int, int, int, int]], pos, x: int, y: int) -> bool:
+    """Does an exit of a pin on an IC's pin ring point under the body:
+    inside the ring and nearer its centre than the pad?"""
+    if box is None or not (box[0] <= x <= box[2] and box[1] <= y <= box[3]):
+        return False
+    cx, cy = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+    return (x - cx) ** 2 + (y - cy) ** 2 < (pos.x - cx) ** 2 + (pos.y - cy) ** 2
+
+
 def _faces_row(fp, pad, pos, exit_pt, reach: int = 4_000_000) -> bool:
     """Does leaving the pad toward exit_pt head into another row of the
     footprint's pads close by (the inside of a two-row connector)?"""
@@ -826,6 +856,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     pad_cells: Dict[int, List[Tuple[object, Set[int], Tuple[int, int], str]]] = {}
     tight_by_fp: Dict[int, Set[str]] = {}
     dense_by_fp: Dict[str, Dict[str, Tuple[int, Optional[Tuple[float, float]]]]] = {}
+    ring_by_fp: Dict[str, Optional[Tuple[int, int, int, int]]] = {}   # IC bodies: the pad ring, by reference
     pending = []
     pad_copper: Dict[Tuple[int, int, int], Set[int]] = {}   # (net, pad x, pad y) -> cells inside its copper
     # Every piece of copper as a KiCad shape, in 2 mm buckets per layer, for
@@ -1100,6 +1131,33 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 print(f"[dense] {net.name} {ref}.{pad.GetNumber()} pin {dense_info[0]} leaves "
                       f"{'inward' if want_in else 'outward'}, vias {outlet_len / 1e6:.1f} mm off", flush=True)
         elif escapes and len(escapes) == 2:
+            # A pin of an IC body (QFP, QFN, SOIC) leaves outward on its own
+            # layer, as a designer draws it, even when the net's other pad
+            # lies on the far side of the chip: the inward exit ends under
+            # the body, where only a via (or a run across the body) gets
+            # out. Inward stays first when the target itself sits in that
+            # lane within 2 mm (a same-net pin across an SOIC), or, for a
+            # net of the groups routed first (pairs, memory, high speed,
+            # clocks), well behind the pad on the body's side: the way
+            # round the chip is the long one, and a designer spends the
+            # room for vias under the body on those nets; a plain signal or
+            # power track goes round outside.
+            if fp is not None and ref not in ring_by_fp:
+                ring_by_fp[ref] = _pin_ring(fp)
+            ring = ring_by_fp.get(ref) if fp is not None else None
+            inward = [_inward_exit(ring, pos, ex, ey) for ex, ey in escapes]
+            body_pin = inward[0] != inward[1]
+            behind = False
+            if body_pin and target is not None and net.group not in BODY_ROUND_GROUPS:
+                ox, oy = escapes[1 if inward[0] else 0]
+                norm = math.hypot(ox - pos.x, oy - pos.y) or 1.0
+                behind = ((target[0] - pos.x) * (ox - pos.x) + (target[1] - pos.y) * (oy - pos.y)) / norm < -BODY_BEHIND_NM
+            if body_pin and inward[0] and not behind \
+                    and not (target is not None and _target_ahead(pos.x, pos.y, escapes[0][0], escapes[0][1], target)):
+                escapes.reverse()
+                inward.reverse()
+                if _DEBUG:
+                    print(f"[body] {net.name} {ref}.{pad.GetNumber()} leaves outward first", flush=True)
             # The side the nearest pad of the net points to comes first, but
             # not when the lane beyond it is boxed in (a crystal or resistor
             # right outside a QFP row) while the other side is open: a
@@ -1113,7 +1171,15 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                       + " | ".join(f"({ex / 1e6:.2f},{ey / 1e6:.2f}) room {r:.2f} "
                                    + str({(nets[h].name if h in nets else h): c for h, c in hd.items()})
                                    for (ex, ey), r, hd in zip(escapes, room, holders)), flush=True)
-            if room[0] < 0.6 and room[1] > room[0] + 0.25:
+            # (a body pin turns inward only when the way out is nearly shut:
+            # a part right outside the row with under a third of the strip
+            # free, or a crowded strip with less than 1 mm free straight
+            # ahead; with more, the track leaves and turns along the row)
+            if body_pin and not inward[0]:
+                boxed = room[0] < 0.35 or (room[0] < 0.6 and holders[0].get("ahead", 1.0) < 0.5)
+            else:
+                boxed = room[0] < 0.6
+            if boxed and room[1] > room[0] + 0.25:
                 escapes.reverse()
             elif fp is not None and room[1] >= 0.8 and _faces_row(fp, pad, pos, escapes[0]) \
                     and not _faces_row(fp, pad, pos, escapes[1]):

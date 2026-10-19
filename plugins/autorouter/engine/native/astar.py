@@ -18,8 +18,8 @@ from .grid import BLOCKED, Grid
 # zig-zag of diagonals (18 per cell), while a true 45-degree move is still
 # cheaper than an L (18 vs 25).
 STRAIGHT, DIAGONAL, AGAINST_STRAIGHT = 10, 18, 15
-LANE_PENALTY = 60
-LAST = {"expansions": 0, "capped": False}       # what the last search did (debugging)     # per cell inside another pad's outlet lane (6 straight cells)
+LANE_PENALTY = 60                               # per cell inside another pad's outlet lane (6 straight cells)
+LAST = {"expansions": 0, "capped": False}       # what the last search did (debugging)
 
 # (dx, dy, is_diagonal)
 MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
