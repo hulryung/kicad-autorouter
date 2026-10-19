@@ -53,6 +53,13 @@ PAIR_VIA_STRETCH_NM = 2_000_000  # a coupled stretch between two via pairs is at
 PAIR_BUDGET = 8          # a pair's share of the per-connection time: two lines, several runs tried (layers, swaps)
 PAIR_UNNECESSARY = ("short", "joined")          # no skew tuning or coupling rules for these either
 PROTECTED_GROUPS = ("pairs", "memory", "high_speed")          # routing groups lower groups may not rip up
+# A route with vias is tried again on one outer layer alone; the flat route
+# wins when it is at most this times the straight distance between the ends
+# (plus the slack, for the pad stubs). A free top-layer corridor then beats
+# two vias and an inner-layer run, without a higher via cost everywhere.
+FLAT_DETOUR = 1.25
+FLAT_SLACK_NM = 2_000_000
+FLAT_MIN_EXPANSIONS = 20_000
 
 
 class RouteResult:
@@ -589,7 +596,8 @@ class Router:
         net = self.p.nets[conn.net]
         return (conn.width or net.rules.width, net.rules.clearance)
 
-    def _search(self, conn: Connection, via_cost: int, cap: int, soft: bool, cancelled):
+    def _search(self, conn: Connection, via_cost: int, cap: int, soft: bool, cancelled,
+                only_layer: Optional[int] = None):
         net = self.p.nets[conn.net]
         owners = self.p.owners[self._key(conn)]
         a_cells, a_anchors = self._component(conn.net, conn.a)
@@ -598,6 +606,17 @@ class Router:
             return None
         if len(a_cells) > len(b_cells):
             a_cells, b_cells, b_anchors = b_cells, a_cells, a_anchors
+        routable = self.routable
+        allow_vias = self.opts.allow_vias
+        if only_layer is not None:
+            # one layer, no vias: the flat route a designer draws when it is direct
+            routable = [i == only_layer and r for i, r in enumerate(self.routable)]
+            allow_vias = False
+            plane = self.grid.plane
+            a_cells = {c for c in a_cells if c // plane == only_layer}
+            b_cells = {c for c in b_cells if c // plane == only_layer}
+            if not a_cells or not b_cells:
+                return None
         # pad cells inside another net's clearance zone would put the track end
         # too close to that net; only use them when nothing else is left
         goals = {c for c in b_cells if owners[c] in (0, net.code)} or b_cells
@@ -616,9 +635,50 @@ class Router:
             kwargs["neck_owners"] = self.p.owners.get((conn.neck, net.rules.clearance), owners)
             kwargs["neck_region"] = region
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
-                           self.horizontal, via_cost, self.opts.allow_vias, via_reach, cap,
-                           self.opts.turn_cost, cancelled, routable=self.routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
+                           self.horizontal, via_cost, allow_vias, via_reach, cap,
+                           self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
                            history=self.history, **kwargs)
+
+    def _flat_route(self, conn: Connection, cells: List[int], cap: int, cancelled) -> List[int]:
+        """A route that changes layers is tried again on one outer layer
+        alone: a designer keeps a connection on the top (or bottom) layer
+        whenever the flat track is nearly direct, and spends vias only where
+        it is not. The flat route replaces the via route when it is no longer
+        than FLAT_DETOUR times the straight distance between the ends (plus
+        FLAT_SLACK_NM for the pad stubs), else the via route stands."""
+        grid, p = self.grid, self.p
+        plane = grid.plane
+        if grid.layers < 2 or all(cells[k] // plane == cells[k - 1] // plane for k in range(1, len(cells))):
+            return cells
+        _, a_anchors = self._component(conn.net, conn.a)
+        _, b_anchors = self._component(conn.net, conn.b)
+        if not a_anchors or not b_anchors:
+            return cells
+        # the straight distance between the ends, in cells (octile)
+        direct = min(max(abs(ax - bx), abs(ay - by)) + (math.sqrt(2) - 1) * min(abs(ax - bx), abs(ay - by))
+                     for ax, ay in a_anchors for bx, by in b_anchors)
+        limit = FLAT_DETOUR * direct + FLAT_SLACK_NM / grid.pitch
+        net = p.nets[conn.net]
+        lane_guard = p.lane_guard
+        flat_cap = min(cap, max(FLAT_MIN_EXPANSIONS, int(4 * direct * direct)))
+        for layer in (0, grid.layers - 1):
+            if not self.routable[layer]:
+                continue
+            flat = self._search(conn, 0, flat_cap, False, cancelled, only_layer=layer)
+            if not flat:
+                continue
+            length = 0.0
+            for k in range(1, len(flat)):
+                _, x1, y1 = grid.unpack(flat[k - 1])
+                _, x2, y2 = grid.unpack(flat[k])
+                length += math.sqrt(2) if x1 != x2 and y1 != y2 else 1.0
+            if length > limit:
+                continue
+            if lane_guard is not None and any(
+                    lane_guard[c] not in (0, net.code, BODY_LANE) for c in flat):
+                continue                           # it runs through another pin's outlet: not that
+            return flat
+        return cells
 
     def _neck_region(self, conn: Connection) -> Set[int]:
         """Cells within neck_length of the connection's fine-pitch exits, on
@@ -1968,6 +2028,8 @@ class Router:
         cells = self._search(conn, via_cost, cap, False, cancelled)
         if not cells:
             return False
+        if self.opts.flat_first:
+            cells = self._flat_route(conn, cells, cap, cancelled)
         self._commit(conn, cells, on_path)
         return True
 

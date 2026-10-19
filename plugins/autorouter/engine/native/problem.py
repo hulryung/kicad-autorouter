@@ -143,6 +143,7 @@ class NativeOptions:
     via_drill: int = 0
     via_cost: int = 25                 # in straight cells
     allow_vias: bool = True
+    flat_first: bool = True            # a route with vias is tried on one outer layer alone; the flat route wins when nearly direct
     max_expansions: int = 400_000
     fine_budget_s: Optional[float] = None   # the finer second pass's own time budget; None = 60 s + 20 s per
                                             # open connection, 0 = none (benchmarks: same input, same result)
