@@ -122,7 +122,7 @@ class NativeOptions:
     fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
     diff_pairs: bool = True         # route +/- pairs coupled, at the net class pair width and gap
     stitch_vias: bool = True        # via stitching across pour nets that span several layers
-    stitch_pitch_mm: float = 4.0    # grid pitch of the stitching vias
+    stitch_pitch_mm: float = 8.0    # grid pitch of the stitching vias (a designer stitches sparsely)
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     plane_nets: bool = True         # nets whose pour covers their pads are planes: vias to the pour, no tracks
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)

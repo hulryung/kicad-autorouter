@@ -214,7 +214,8 @@ def penalty(m, base_seconds):
     p = (1000 * (m.get("unconnected_after") or 0) + 300 * m.get("drc_errors", 0) + 40 * m.get("dangling", 0)
          + 20 * m.get("off_45", 0) + 20 * m.get("doubled_back", 0) + 20 * m.get("acute_corners", 0)
          + 5 * (total - agree)
-         + 0.05 * m["length_mm"] + 0.5 * max(0, own_vias))
+         + 0.05 * m["length_mm"] + 0.5 * max(0, own_vias)
+         + 0.2 * m.get("stitching_vias", 0))              # a blanket of stitching vias is not what a designer does
     p += 60 * m.get("rule_errors", 0)
     it = m.get("intent") or {}
     if it:

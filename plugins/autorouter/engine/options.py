@@ -12,7 +12,7 @@ class RouteOptions:
     native_fanout_vias: bool = True       # vias from pads of pour nets (GND, power) to their planes
     native_diff_pairs: bool = True        # coupled routing for +/- pairs at the net class pair width/gap
     native_stitch_vias: bool = True       # via stitching across multi-layer pour nets (GND)
-    native_stitch_pitch_mm: float = 4.0
+    native_stitch_pitch_mm: float = 8.0
     native_power_pours: bool = True       # power nets with pours: pad vias to the plane and coarse stitching
     native_plane_nets: bool = True        # nets whose pour covers their pads: vias to the pour, no tracks
     native_shove: bool = False            # existing tracks may be ripped up and rerouted to make room
