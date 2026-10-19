@@ -464,7 +464,7 @@ def main():
             reset(args.worktree)
         write_report(args, rounds, best, base)
 
-    if not args.no_final_eval and rounds[-1].get("kept") == "yes":
+    if not args.no_final_eval and (rounds[-1].get("kept") == "yes" or args.rounds == 0):   # --rounds 0: score only
         log("final evaluation of the best result...")
         try:
             data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=current_dir, goal=goal,
