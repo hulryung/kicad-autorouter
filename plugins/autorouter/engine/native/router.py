@@ -2104,8 +2104,15 @@ class Router:
         step = (dx / norm, dy / norm)
 
         run_pts = [None]                          # the exit-to-via run fits() accepted
+        # the direction the stub arrives at the exit in: the run to the via
+        # must not turn back past 90 degrees against it (a via dropped a cell
+        # behind the exit made a 45-degree hairpin at the mouth of the stub)
+        if (ex, ey) != (px, py) and (ex, ey) != (gx, gy):
+            arrive = (gx - ex, gy - ey)
+        else:
+            arrive = (gx - px, gy - py)
 
-        def fits(vx: int, vy: int) -> bool:
+        def fits(vx: int, vy: int, hairpin_ok: bool) -> bool:
             if not grid.inside(vx, vy) or p.via_block[vy * grid.w + vx]:
                 return False
             if p.via_guard is not None and p.via_guard[vy * grid.w + vx] not in (0, code):
@@ -2123,6 +2130,9 @@ class Router:
             # whichever end leaves it free
             for at_end in (False, True):
                 pts = jog(gx, gy, grid.nm_x(vx), grid.nm_y(vy), at_end=at_end)
+                if not hairpin_ok and len(pts) >= 2 \
+                        and (pts[1][0] - pts[0][0]) * arrive[0] + (pts[1][1] - pts[0][1]) * arrive[1] < 0:
+                    continue                      # the first leg would double back on the stub
                 if all(own[i] in (0, code)
                        for k in range(len(pts) - 1)
                        for i in grid.segment_cells(layer, pts[k][0], pts[k][1], pts[k + 1][0], pts[k + 1][1],
@@ -2137,15 +2147,30 @@ class Router:
                        for ddx in range(-radius, radius + 1) for ddy in range(-radius, radius + 1)
                        if 0 < ddx * ddx + ddy * ddy <= radius * radius))
         candidates += [(x, y) for _, x, y in ring]
+        # The nearest spot whose run leaves the exit without turning back on
+        # the stub; a spot that needs a hairpin is kept only as the fallback,
+        # and a clean spot is preferred only up to two cells farther out, so
+        # the vias stay where they were for the signals routed after them.
         seen = set()
+        fallback = None                           # (vx, vy, run) of the nearest hairpin spot
         for vx, vy in candidates:
             if (vx, vy) in seen:
                 continue
             seen.add((vx, vy))
-            if fits(vx, vy):
+            if fallback is not None:
+                limit = math.hypot(fallback[0] - ecx, fallback[1] - ecy) + 2.0
+                if math.hypot(vx - ecx, vy - ecy) > limit:
+                    break
+            if fits(vx, vy, hairpin_ok=False):
+                fallback = None
                 break
+            if fallback is None and fits(vx, vy, hairpin_ok=True):
+                fallback = (vx, vy, run_pts[0])
         else:
-            return None
+            if fallback is None:
+                return None
+        if fallback is not None:
+            vx, vy, run_pts[0] = fallback
         vxn, vyn = grid.nm_x(vx), grid.nm_y(vy)
         segments = []
         if (ex, ey) != (px, py) and (ex, ey) != (gx, gy):
