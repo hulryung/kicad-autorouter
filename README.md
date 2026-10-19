@@ -390,7 +390,10 @@ obstacle.
    routed, as the decoupling vias are in a hand layout. Off with **Nets with
    a copper pour under their pads** in the dialog (`plane_nets` for the AI).
 3. **Finish**: pads of unrouted pour nets get **fanout vias** to their planes,
-   pours spanning two or more layers get **stitching vias** on a grid, both
+   pours spanning two or more layers get **stitching vias** where a return
+   path needs one: on the grid of the chosen pitch, but only beside a
+   signal's layer change or a pour net's own via (a blanket of vias is not
+   what a designer does), both
    only where a via still fits and only where no via of that net sits already
    (a second run, or a scoped AI route call, adds none twice); copper zones
    are refilled. The pours come last on purpose: a via dropped first would
