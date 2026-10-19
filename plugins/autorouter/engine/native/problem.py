@@ -135,11 +135,6 @@ class NativeOptions:
     locked_uuids: List[str] = field(default_factory=list)    # board items shove mode may not move (a coupled pair's lines)
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     fanout_only_unconnected: bool = False  # ...only where the pour on the pad's layer does not reach it
-    # after routing, a pad via of a pour net whose pad ended up joined by
-    # tracks to another via of the net this close is taken out again with its
-    # stub (a decoupling cap and the pin it feeds share one via, as a designer
-    # draws it); 0 keeps every via
-    prune_via_mm: float = 1.5
     track_mode: str = SIZE_AUTO
     power_patterns: List[str] = field(default_factory=lambda: list(POWER_PATTERNS))
     track_width: int = 0
