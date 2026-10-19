@@ -323,6 +323,50 @@ def _pick_pair_ends(nets: Dict[int, NetInfo], connections: List[Connection]) -> 
 
 
 
+DENSE_PITCH_NM = 700_000     # a row of pins closer than this cannot take a via between two outlets
+DENSE_ROW_GAP_NM = 5_000_000 # two such rows this close face each other (a connector, not a QFP)
+DEEP_OUTLET_NM = 1_400_000   # every other pin of a dense row keeps vias this far off (staggered depths)
+
+
+def _dense_rows(fp) -> Dict[str, Tuple[int, Optional[Tuple[float, float]]]]:
+    """For a part with rows of pins too fine for a via between two outlets
+    (a 0.4 mm board-to-board connector): pad number -> (index along its
+    row, unit vector toward the facing row or None). Rows are the pads'
+    lines along x or y; only rows of ten or more count."""
+    pads = list(fp.Pads())
+    if len(pads) < 20:
+        return {}
+    out: Dict[str, Tuple[int, Optional[Tuple[float, float]]]] = {}
+    for axis in (1, 0):                      # rows along x (same y) first, then along y
+        rows: Dict[int, list] = {}
+        for pad in pads:
+            pp = pad.GetPosition()
+            key = (pp.y if axis == 1 else pp.x) // 50_000
+            rows.setdefault(key, []).append(pad)
+        dense = []
+        for key, members in rows.items():
+            if len(members) < 10:
+                continue
+            members.sort(key=lambda q: q.GetPosition().x if axis == 1 else q.GetPosition().y)
+            coords = [q.GetPosition().x if axis == 1 else q.GetPosition().y for q in members]
+            gaps = sorted(b - a for a, b in zip(coords, coords[1:]))
+            if gaps[len(gaps) // 2] < DENSE_PITCH_NM:
+                dense.append((key * 50_000, members))
+        if not dense:
+            continue
+        for level, members in dense:
+            facing = [lv for lv, _ in dense if lv != level and abs(lv - level) <= DENSE_ROW_GAP_NM]
+            inward = None
+            if facing:
+                other = min(facing, key=lambda lv: abs(lv - level))
+                sign = 1.0 if other > level else -1.0
+                inward = (0.0, sign) if axis == 1 else (sign, 0.0)
+            for i, pad in enumerate(members):
+                out[pad.GetNumber()] = (i, inward)
+        break
+    return out
+
+
 def _faces_row(fp, pad, pos, exit_pt, reach: int = 4_000_000) -> bool:
     """Does leaving the pad toward exit_pt head into another row of the
     footprint's pads close by (the inside of a two-row connector)?"""
@@ -780,6 +824,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     say("Rasterizing pads...")
     pad_cells: Dict[int, List[Tuple[object, Set[int], Tuple[int, int], str]]] = {}
     tight_by_fp: Dict[int, Set[str]] = {}
+    dense_by_fp: Dict[str, Dict[str, Tuple[int, Optional[Tuple[float, float]]]]] = {}
     pending = []
     pad_copper: Dict[Tuple[int, int, int], Set[int]] = {}   # (net, pad x, pad y) -> cells inside its copper
     # Every piece of copper as a KiCad shape, in 2 mm buckets per layer, for
@@ -1010,6 +1055,18 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 stub_w = neck_width(board, net.rules)
         pad_key = (fp.GetReference() if fp else "", pad.GetNumber())
         remembered = options.escape_sides.get(pad_key)
+        # A pin of a dense two-row connector: the pins alternate between
+        # leaving outward and into the channel between the rows, and
+        # neighbours on one side keep their vias at different depths, so
+        # every pin has a lane of its own past the others' vias (a designer
+        # fans such a connector out that way; a via dropped right past one
+        # outlet would wall the next pin in)
+        if fp is not None and ref not in dense_by_fp:
+            dense_by_fp[ref] = _dense_rows(fp)
+        dense_info = dense_by_fp.get(ref, {}).get(pad.GetNumber()) if fp is not None else None
+        outlet_len = OUTLET_NM
+        if dense_info is not None:
+            outlet_len = DEEP_OUTLET_NM if (dense_info[0] // 2) % 2 else OUTLET_NM
         partner_side = pair_sides.get((ref, net.partner)) if (net.partner and ref and escapes) else None
         if partner_side is not None:
             # the escape running the partner's way, if this pad has one
@@ -1028,6 +1085,18 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if _DEBUG:
                 print(f"[escape] {net.name} {ref}.{pad.GetNumber()} leaves with its pair partner: "
                       f"({escapes[0][0] / 1e6:.2f},{escapes[0][1] / 1e6:.2f})", flush=True)
+        elif escapes and len(escapes) == 2 and dense_info is not None and dense_info[1] is not None:
+            inward = dense_info[1]
+
+            def _inward(e):
+                dx, dy = e[0] - pos.x, e[1] - pos.y
+                norm = math.hypot(dx, dy) or 1.0
+                return (dx * inward[0] + dy * inward[1]) / norm
+            want_in = dense_info[0] % 2 == 1
+            escapes.sort(key=lambda e: (-_inward(e) if want_in else _inward(e)))
+            if _DEBUG:
+                print(f"[dense] {net.name} {ref}.{pad.GetNumber()} pin {dense_info[0]} leaves "
+                      f"{'inward' if want_in else 'outward'}, vias {outlet_len / 1e6:.1f} mm off", flush=True)
         elif escapes and len(escapes) == 2:
             # The side the nearest pad of the net points to comes first, but
             # not when the lane beyond it is boxed in (a crystal or resistor
@@ -1167,7 +1236,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                             cur = lane_guard[idx]
                             lane_guard[idx] = code if cur in (0, code) else -1   # two outlets: nobody's lane
                 if wants_outlet and towards is not None:
-                    outlets.append((code, pos.x, pos.y, gx, gy, stub_w))
+                    outlets.append((code, pos.x, pos.y, gx, gy, stub_w, outlet_len))
                     # The outlet's first exit is also where the pin drops its
                     # via: keep other nets' centrelines out of that spot on
                     # the layers the pad is not on, or an inner-layer track
@@ -1203,8 +1272,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # to go). Tracks may still pass there at normal clearance.
     via_guard = array("i", [0]) * grid.plane
     max_via_d = max([n.rules.via_diameter for n in nets.values()] or [0])
-    outlet_len = OUTLET_NM
-    for code, px, py, gx, gy, stub_w in outlets:
+    for code, px, py, gx, gy, stub_w, outlet_len in outlets:
         dx, dy = gx - px, gy - py
         norm = math.hypot(dx, dy) or 1.0
         fx, fy = int(round(gx + dx / norm * outlet_len)), int(round(gy + dy / norm * outlet_len))
