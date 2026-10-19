@@ -615,10 +615,34 @@ class Router:
         if region:
             kwargs["neck_owners"] = self.p.owners.get((conn.neck, net.rules.clearance), owners)
             kwargs["neck_region"] = region
+        # A through-hole pin is copper on every layer, but a track that leaves
+        # or enters it on an inner layer has changed layer all the same (the
+        # pin is its via): that end pays the via cost, so a connector pin and
+        # an SMD pad are joined on the pad's own layer when the room is there,
+        # as a designer draws it, rather than by a free inner-layer start.
+        inner = self._inner_pad_cells(net, sources | goals)
+        if inner:
+            fee = via_cost * astar.STRAIGHT
+            kwargs["source_costs"] = {c: fee for c in sources if c in inner}
+            kwargs["end_costs"] = {c: fee for c in goals if c in inner}
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, self.opts.allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=self.routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
                            history=self.history, **kwargs)
+
+    def _inner_pad_cells(self, net, cells: Set[int]) -> Set[int]:
+        """Those of `cells` that are a pad's own cells (not routed copper) on
+        an inner layer: only a through-hole pad has any."""
+        grid = self.grid
+        if grid.layers < 3:
+            return set()
+        lo, hi = grid.plane, (grid.layers - 1) * grid.plane
+        out: Set[int] = set()
+        for cl in net.clusters:
+            for c in cl.cells:
+                if lo <= c < hi and c in cells:
+                    out.add(c)
+        return out
 
     def _neck_region(self, conn: Connection) -> Set[int]:
         """Cells within neck_length of the connection's fine-pitch exits, on
