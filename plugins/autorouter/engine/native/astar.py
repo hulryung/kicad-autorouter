@@ -7,6 +7,7 @@ plus a small turn penalty and the via cost. The heuristic is octile distance
 to the nearest target anchor, so it stays admissible for in-layer moves.
 """
 import heapq
+import time as _time
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .grid import BLOCKED, BODY_LANE, Grid
@@ -21,6 +22,7 @@ STRAIGHT, DIAGONAL, AGAINST_STRAIGHT = 10, 18, 15
 LANE_PENALTY = 60                               # per cell inside another pad's outlet lane (6 straight cells)
 BODY_PENALTY = 10                               # per cell under an IC body on its own layer: that run counts double
 LAST = {"expansions": 0, "capped": False}       # what the last search did (debugging)
+TOTALS = {"searches": 0, "expansions": 0, "capped": 0, "seconds": 0.0}   # over the process (profiling)
 
 # (dx, dy, is_diagonal)
 MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
@@ -161,6 +163,8 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 return False
         return True
 
+    TOTALS["searches"] += 1
+    _t0 = _time.time()
     g: Dict[int, int] = {}
     came: Dict[int, Tuple[int, int]] = {}      # idx -> (prev idx, move id)
     heap = []
@@ -183,12 +187,17 @@ def route(grid: Grid, owners, via_block: bytearray, net: int,
                 path.append(prev)
                 prev = came[prev][0]
             path.reverse()
+            TOTALS["expansions"] += expansions
+            TOTALS["seconds"] += _time.time() - _t0
             return path
         closed.add(idx)
         expansions += 1
         LAST["expansions"], LAST["capped"] = expansions, False
         if expansions > max_expansions:
             LAST["capped"] = True
+            TOTALS["capped"] += 1
+            TOTALS["expansions"] += expansions
+            TOTALS["seconds"] += _time.time() - _t0
             return None
         if cancelled is not None and expansions % 20000 == 0 and cancelled():
             return None

@@ -337,6 +337,8 @@ def main():
     ap.add_argument("--budget-usd", type=float, default=0, help="per Claude call")
     ap.add_argument("--goal", default="", help="extra guidance for the reviewer and the improver")
     ap.add_argument("--bench-timeout", type=int, default=1800)
+    ap.add_argument("--eval-only", default="", metavar="BENCH_DIR",
+                    help="only score an existing benchmark directory (its metrics.json and images) and exit")
     ap.add_argument("--time-limit", type=float, default=0.0,
                     help="minutes per benchmark route (the dialog's time limit); 0 = none, the deterministic default. "
                          "A big board that takes an hour untimed is measured within this instead")
@@ -355,6 +357,17 @@ def main():
     args.name = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     args.run_dir = REPO / ".improve" / args.name
     args.run_dir.mkdir(parents=True)
+    if args.eval_only:
+        bench_dir = Path(args.eval_only).expanduser().resolve()
+        args.run_dir = bench_dir.parent                     # the reviewer may read the images next to it
+        intent_text = INTENT_TEXT.format(intent_file=args.intent) if args.intent and args.intent != "none" else ""
+        goal = f"\nThe user's goal for this run: {args.goal}\n" if args.goal else ""
+        data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=bench_dir, goal=goal,
+                                             intent=intent_text), REPO, bench_dir / "evaluation.json", args,
+                          schema=EVAL_SCHEMA, tools=("Read",))
+        ev = structured(data)
+        print(json.dumps(ev, indent=1, ensure_ascii=False))
+        return
     args.bench_script = args.run_dir / "improve_bench.py"           # frozen: every round measured the same way
     shutil.copy(REPO / "scripts" / "improve_bench.py", args.bench_script)
     args.worktree, args.branch = make_worktree(args.run_dir, args.name)

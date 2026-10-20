@@ -743,11 +743,23 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     job_codes: Set[int] = set()
     if job_items:
         job_codes = {t.GetNetCode() for t in board.GetTracks() if str(t.m_Uuid.AsString()) in job_items}
+    # the pours of each plane net, to tell the pads they reach from the strays
+    pour_zones: Dict[int, list] = {}
+    for zone in board.Zones():
+        if not zone.GetIsRuleArea() and zone.GetNetCode() in plane_codes \
+                and any(l in layer_of for l in zone.GetLayerSet().CuStack()):
+            pour_zones.setdefault(zone.GetNetCode(), []).append(zone)
+    user_skipped: Set[int] = set()
     for code, net in board.GetNetsByNetcode().items():
         if code <= 0:
             continue
-        skipped = _skip_net(net, options) or code in plane_codes
-        if skipped and not (options.fanout_vias and code in zone_layers) and code not in job_codes:
+        if _skip_net(net, options):
+            user_skipped.add(code)
+        skipped = code in user_skipped or code in plane_codes
+        # a plane net the user did not leave to the pours stays in the model
+        # in every pass: the pads its pour does not reach are routed
+        stray_plane = code in plane_codes and code not in user_skipped
+        if skipped and not (options.fanout_vias and code in zone_layers) and code not in job_codes and not stray_plane:
             continue
         nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options, hints), route=not skipped)
     # Controlled impedance: the width each layer needs for the net's target.
@@ -1719,12 +1731,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                         parent[find(i)] = find(j)
         groups: Dict[int, Cluster] = {}
         cluster_index: Dict[int, int] = {}
+        cluster_pads: Dict[int, list] = {}
         for i, (pad, cells, centre, ref, tight) in enumerate(entries):
             root = find(i)
             if root not in groups:
                 cluster_index[root] = len(groups)
                 groups[root] = Cluster()
             cl = groups[root]
+            cluster_pads.setdefault(cluster_index[root], []).append(pad.GetPosition())
             cl.cells.update(cells)
             pos = pad.GetPosition()
             cl.copper.update(pad_copper.get((code, pos.x, pos.y), ()))
@@ -1748,10 +1762,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             pad_exits = [_pad_exits(code, pads[i].GetPosition()) for i in sorted(piece["pads"])]
             existing.append(ExistingPath(rp, list(zip(touched, touched[1:])), touched[0] if touched else -1,
                                          cells, piece["items"], [e for e in pad_exits if e]))
-        if len(net.clusters) < 2 or not net.route:
+        if len(net.clusters) < 2:
             continue
-        # Minimum spanning tree over clusters by nearest anchor distance (Prim).
-        k = len(net.clusters)
 
         def dist(ca: Cluster, cb: Cluster) -> int:
             best = None
@@ -1762,6 +1774,26 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                         best = d
             return best
 
+        if not net.route:
+            # A plane net: its pads under the pour get vias; the strays (a
+            # connector pin or a capacitor off the island, a pour on another
+            # layer the plane never meets) are joined to the nearest pad the
+            # pour reaches by a track, the way the designer ran one there.
+            zones = pour_zones.get(code) if code not in user_skipped else None
+            if not zones:
+                continue
+            covered = [any(_zone_covers(z, pp.x, pp.y, 1_500_000) for z in zones for pp in cluster_pads.get(i, []))
+                       for i in range(len(net.clusters))]
+            if not any(covered):
+                continue
+            for i, cl in enumerate(net.clusters):
+                if covered[i]:
+                    continue
+                j = min((j for j in range(len(net.clusters)) if covered[j]), key=lambda j: dist(cl, net.clusters[j]))
+                connections.append(Connection(code, i, j, dist(cl, net.clusters[j]), 1, net.rules.width, rank=net.rank))
+            continue
+        # Minimum spanning tree over clusters by nearest anchor distance (Prim).
+        k = len(net.clusters)
         in_tree = {0}
         best_edge = {j: (dist(net.clusters[0], net.clusters[j]), 0) for j in range(1, k)}
         while len(in_tree) < k:
