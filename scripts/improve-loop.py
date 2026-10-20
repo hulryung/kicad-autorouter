@@ -107,7 +107,7 @@ Rules:
 - edit only files under plugins/autorouter/engine/ (and tests/ if a test needs updating);
 - keep it deterministic (no randomness, no wall-clock decisions);
 - run the tests before you finish: {kicad_py} scripts/run-tests.py
-- you may run the benchmark yourself to check (takes 1-3 minutes):
+- you may run the benchmark yourself to check ({bench_time}):
   {kicad_py} {bench_script} --reference {reference} --plugins plugins --out {scratch} --skip {skip} --no-images{intent_arg}
   (it prints a one-line JSON summary at the end); never write to the reference board;
 - do not commit; the loop measures your change and keeps or discards it.
@@ -434,7 +434,10 @@ def main():
                                        history=json.dumps(history, indent=1) if history else "(none yet)",
                                        kicad_py=args.kicad_py, bench_script=args.bench_script, scratch=scratch,
                                        skip=args.skip,
-                                       intent_arg=f" --intent {args.intent_frozen}" if args.intent else "")
+                                       intent_arg=(f" --intent {args.intent_frozen}" if args.intent else "")
+                                       + (f" --time-limit {args.time_limit:g}" if args.time_limit else ""),
+                                       bench_time=(f"about {args.time_limit + 2:g} minutes, keep --time-limit as given"
+                                                   if args.time_limit else "takes 1-3 minutes"))
         tools = ("Read", "Edit", "Write", "Glob", "Grep", f"Bash({args.kicad_py} *)", "Bash(python3 *)",
                  "Bash(git diff*)", "Bash(git status*)", "Bash(ls *)")
         try:
