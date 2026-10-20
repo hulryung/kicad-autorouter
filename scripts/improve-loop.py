@@ -135,6 +135,23 @@ def claude_env():
 
 
 def run_claude(prompt, cwd, out_file, args, schema=None, tools=("Read",), edit=False, timeout=3600):
+    """One claude -p call; a dropped network (the API unreachable) is waited
+    out and the call made again, up to three times, instead of losing the round."""
+    for attempt in range(3):
+        try:
+            return _run_claude(prompt, cwd, out_file, args, schema, tools, edit, timeout)
+        except RuntimeError as e:
+            if "reach the API" not in str(e) and "ENOTFOUND" not in str(e) or attempt == 2:
+                raise
+            log(f"  network down ({str(e)[:80]}); waiting to retry...")
+            for _ in range(60):                      # up to 30 minutes for the network to come back
+                time.sleep(30)
+                if subprocess.run(["curl", "-sI", "-m", "8", "https://api.anthropic.com"],
+                                  capture_output=True).returncode == 0:
+                    break
+
+
+def _run_claude(prompt, cwd, out_file, args, schema=None, tools=("Read",), edit=False, timeout=3600):
     cmd = [args.claude, "-p", prompt, "--output-format", "json", "--no-session-persistence",
            "--add-dir", str(args.run_dir)]
     if schema:
