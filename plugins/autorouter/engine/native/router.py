@@ -2332,9 +2332,14 @@ class Router:
         # A differential pair's stretches go longest first: the coupled run
         # between the two parts gets the room at the pins before the short
         # hops (an ESD array's pass-through, a connector's twin pins) do.
+        # After the pairs, a connection with a fine-pitch end (a connector
+        # row, a QFN walled in by its neighbours) of any group goes before
+        # the open-field connections of every group: its escape cell is the
+        # one place it can leave, and a long bus or power run of an earlier
+        # group would otherwise take it on the way past.
         queue = sorted(self.p.connections,
-                       key=lambda c: (c.rank, 0 if c.pair else 1, -c.estimate if c.pair else c.priority,
-                                      c.estimate))
+                       key=lambda c: (0 if c.pair else 1 if c.priority == 0 else 2, c.rank,
+                                      -c.estimate if c.pair else c.priority, c.estimate))
         total = len(queue)
         failed: List[Connection] = []
         done = 0
