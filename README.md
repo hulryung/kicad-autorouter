@@ -221,6 +221,12 @@ do:
   the search aims at it from the pins' side (passing under the pin rows on
   another layer), and each line keeps its side of the board through the
   turn, so the order comes out right without a swap.
+  When the run fits but one end does not let both lines in side by side (a
+  crowded QFN or connector), the coupled run is kept, stops about 1 mm short
+  of that end, and each line is finished to its pin single-ended; the result
+  notes which end of which pair ("coupled, the U304 end connected
+  single-ended"), so it can be checked by hand. Only if that fails too is
+  the pair routed separately.
   Pairs whose ends are closer than 3 mm, or that find no room for a run, a
   via pair or a swap, are routed separately, and the log says why.
 

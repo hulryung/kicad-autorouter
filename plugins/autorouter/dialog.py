@@ -464,7 +464,7 @@ class AutorouterDialog(wx.Dialog):
                        "stitching_vias": result.stitched,
                        "failed_detail": getattr(result, "failed_detail", []), "escalated": escalated,
                        "length_matching": job.tuning_lines, "pair_log": [list(x) for x in job.pair_log],
-                       "pair_exceptions": job.pair_exceptions,
+                       "pair_exceptions": job.pair_exceptions, "pair_loose": job.pair_loose,
                        "unconnected_after": self.board.GetConnectivity().GetUnconnectedCount(True)}
             outcome["summary"] = (f"{result.routed} routed ({escalated} on the finer second pass), {len(failed)} failed, "
                                   f"{result.fanout} fanout vias, {result.stitched} stitching vias; "
@@ -826,6 +826,9 @@ class AutorouterDialog(wx.Dialog):
                 try:
                     self._show_progress("Length matching...", None)
                     self.si_page.pair_exceptions = list(result.pair_exceptions)
+                    for e in getattr(result, "pair_loose", []):
+                        self._append_log(f"[plugin] note: pair {e['nets'][0]} / {e['nets'][1]} is coupled, but its "
+                                         f"{e['end']} end is connected single-ended (no room to enter the pins side by side)")
                     for e in result.pair_exceptions:
                         where = f" ({e['where']})" if e.get("where") else ""
                         self._append_log(f"[plugin] pair {e['nets'][0]} / {e['nets'][1]}{where} connected directly: "
@@ -873,6 +876,8 @@ class AutorouterDialog(wx.Dialog):
                 extra.append(f"{result.pair_swaps} with a via swap")
             if getattr(result, "pair_vias", 0):
                 extra.append(f"{result.pair_vias} layer changes")
+            if getattr(result, "pair_loose", None):
+                extra.append(f"{len(result.pair_loose)} with one end single-ended, see the notes")
             if extra:
                 text += " (" + ", ".join(extra) + ")"
         if result.tuning:

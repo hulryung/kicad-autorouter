@@ -180,6 +180,7 @@ class NativeOptions:
     pair_min_span_mm: float = 3.0      # pair ends closer than this: coupling is unnecessary, connect directly
     pair_uncoupled_max_mm: float = 5.0  # a pair connected directly whose nets are no longer than this: skew waived
     pair_direct_via_factor: int = 3    # a pair connected directly (an exception) pays this many times the via cost
+    pair_loose_ends: bool = True       # an end the pair cannot enter side by side: finish it single-ended (noted)
     pair_via_swap: bool = True         # pins in opposite order at the two ends: one line crosses under the other through two vias
     protect_groups: bool = True        # rip-up may not move a pair/memory/high-speed route for a later group
 

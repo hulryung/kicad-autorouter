@@ -40,6 +40,7 @@ class JobResult:
     tuning: List[dict] = field(default_factory=list)       # length groups: target, lengths before/after
     tuning_lines: List[str] = field(default_factory=list)
     pair_exceptions: List[dict] = field(default_factory=list)   # pairs connected directly, and why
+    pair_loose: List[dict] = field(default_factory=list)        # pairs coupled but finished single-ended at one end
 
 
 FIRST_PASS_SHARE = 0.7          # of the time limit; the finer second pass gets the rest
@@ -185,6 +186,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.timed_out = result.timed_out
     out.failed = sorted({problem.nets[c.net].name for c in result.failed})
     out.pair_exceptions = list(getattr(result, "pair_exceptions", []))
+    out.pair_loose = list(getattr(result, "pair_loose", []))
     out.stats["budget_cuts"] = getattr(result, "budget_cuts", 0)
     if apply_paths and options.movable_uuids:
         # the plane vias as they stand now (ripped ones gone, restored ones in)

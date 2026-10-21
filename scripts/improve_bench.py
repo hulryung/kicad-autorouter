@@ -274,6 +274,7 @@ def intent_metrics(board, o, job, si_plan) -> dict:
         "pairs_routed_coupled": job.pairs,
         "pair_via_swaps": getattr(job, "pair_swaps", 0),
         "pair_exceptions": [f"{e['nets'][0]} / {e['nets'][1]}: {e['text']}" for e in job.pair_exceptions],
+        "pair_loose_ends": [f"{e['nets'][0]} / {e['nets'][1]}: {e['end']} end single-ended" for e in getattr(job, "pair_loose", [])],
         "kicad_tuning_patterns": sum(1 for _ in board.Generators()),
         "pair_log": [f"{n}: {why}" for n, why in job.pair_log],
     }

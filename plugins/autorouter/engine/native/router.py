@@ -50,6 +50,7 @@ PAIR_EXCEPTIONS = {
 }
 PAIR_VIA_SPAN_NM = 8_000_000   # a coupled run shorter than this stays on one layer (two via pairs are not worth it)
 PAIR_VIA_STRETCH_NM = 2_000_000  # a coupled stretch between two via pairs is at least this long
+LOOSE_TRIM_NM = 1_000_000  # a coupled run finished single-ended at one end stops this far short of it
 PAIR_BUDGET = 8          # a pair's share of the per-connection time: two lines, several runs tried (layers, swaps)
 PAIR_UNNECESSARY = ("short", "joined")          # no skew tuning or coupling rules for these either
 PROTECTED_GROUPS = ("pairs", "memory", "high_speed")          # routing groups lower groups may not rip up
@@ -1150,6 +1151,45 @@ class Router:
         self._pair_why = why or self._pair_why
         return False
 
+    def _commit_loose(self, cand, loose, cells, via_cost, cap, on_path, cancelled) -> bool:
+        """Commit a coupled run that stops short of one end, then finish each
+        line to its pad there single-ended. All or nothing: if either line
+        cannot be finished, everything goes again and the pair is left to the
+        caller's exception route."""
+        grid = self.grid
+        before = set(self.paths)
+        self.next_pid += 2
+        committed = []
+        for rp, conn, cl_a, cl_b in cand:
+            good = cl_b if loose else cl_a           # the end the run did enter
+            own_cells = []
+            for sg in rp.segments:
+                own_cells += grid.segment_cells(sg[0], sg[1], sg[2], sg[3], sg[4], grid.pitch // 2)
+            path = _Path(rp.pid, dataclasses.replace(conn, a=good, b=good), rp, own_cells, paired=True)
+            self.paths[rp.pid] = path
+            self._claim(path)
+            committed.append((rp, conn))
+        ok = True
+        for rp, conn in committed:
+            if cancelled is not None and cancelled():
+                ok = False
+                break
+            if not self._try(conn, via_cost, cap, None, cancelled):
+                ok = False
+                break
+        new = [pid for pid in self.paths if pid not in before]
+        if not ok:
+            for pid in new:
+                self.paths.pop(pid, None)
+            for code in {conn.net for _, conn in committed}:
+                self._rebuild_union(code)
+            self._rebuild_maps()
+            return False
+        if on_path:
+            for pid in sorted(new):
+                on_path(self.paths[pid].path)
+        return True
+
     def _wide_lane_guard(self, reach: int):
         """The pad outlet lanes grown by `reach` cells: only a coupled run's
         centreline is searched, and its two lines run either side of it, so
@@ -1792,12 +1832,15 @@ class Router:
                         return True
                 return False
 
-            def build(sa, swap=None):
+            def build(sa, swap=None, loose=None):
                 """Both lines for one choice of sides, or None. Each end gets its
                 pad entries chosen together: the first shapes, joined to the run
                 where it begins or a little further along it, that keep clear of
                 other copper and of the partner line. With a swap (the line
-                that hops, where along the run) the lines change sides there."""
+                that hops, where along the run) the lines change sides there.
+                With `loose` (True: the start, False: the far end) that end
+                gets no entries: the run stops short of it and each line is
+                finished there single-ended by the caller."""
                 runs_s, runs_e, middle, vias = {}, {}, {}, {}
                 total = run_length(points)
                 room = {True: total, False: total}
@@ -1826,6 +1869,9 @@ class Router:
                          for end in (True, False)}
                 ends = {}
                 for at_start, (a_cell, b_cell) in ((True, (ea1, eb1)), (False, (ea2, eb2))):
+                    if loose is not None and at_start == loose:
+                        ends[at_start] = None
+                        continue
                     best = None
                     options = {}
                     for net, code, cell in ((na, ca.net, a_cell), (nb, cb.net, b_cell)):
@@ -1887,10 +1933,11 @@ class Router:
                         return None, ("cross" if widest is not None and widest <= 0 else "close")
                     ends[at_start] = best
                 paths = []
+                loose_trim = min(LOOSE_TRIM_NM, total * 0.2)
                 for net, conn, e_key, cl_a, cl_b in ((na, ca, 0, ca.a, ca.b), (nb, cb, 1, cb_a, cb_b)):
                     s_end, g_end = ends[True], ends[False]
-                    ts, ent_s = s_end[1 + 2 * e_key], s_end[2 + 2 * e_key]
-                    tg, ent_g = g_end[1 + 2 * e_key], g_end[2 + 2 * e_key]
+                    ts, ent_s = (s_end[1 + 2 * e_key], s_end[2 + 2 * e_key]) if s_end else (loose_trim, [])
+                    tg, ent_g = (g_end[1 + 2 * e_key], g_end[2 + 2 * e_key]) if g_end else (loose_trim, [])
                     def piece(run, lay=layer_s):
                         return [(lay, run[i][0], run[i][1], run[i + 1][0], run[i + 1][1], w) for i in range(len(run) - 1)]
                     rs, re_ = runs_s[conn.net], runs_e[conn.net]
@@ -1973,6 +2020,26 @@ class Router:
                     swapped = swap is not None
                     break
                 closest = gap_ if closest is None else max(closest, gap_)
+            loose_end = None
+            if paths is None and self.opts.pair_loose_ends and (closest is not None or blocked) \
+                    and not (cancelled is not None and cancelled()):
+                # The run fits but an end does not let both lines in side by
+                # side: keep the coupled run and finish that end single-ended
+                # (the result notes it), rather than give the whole pair up.
+                for loose in (False, True):
+                    for sa in (first, -first):
+                        cand, why = build(sa, None, loose)
+                        if cand is None or pair_apart(cand[0][0], cand[1][0]) < need:
+                            continue
+                        if self._commit_loose(cand, loose, cells, via_cost, cap, on_path, cancelled):
+                            ends_refs = na.clusters[ca.a if loose else ca.b].refs
+                            where = "/".join(sorted(ends_refs)) or "?"
+                            self.pair_loose = getattr(self, "pair_loose", [])
+                            self.pair_loose.append({"nets": [na.name, nb.name], "end": where})
+                            self.pair_log.append((na.name, f"coupled; the {where} end connected single-ended "
+                                                           f"(no room to enter the pins side by side)"))
+                            return True
+                        break
             if paths is None:
                 if plain is not None:
                     closest, blocked = plain           # why the plain run failed, not the swaps
@@ -2750,6 +2817,7 @@ class Router:
         result.pairs = getattr(self, "pairs_routed", 0)
         result.pair_swaps = getattr(self, "pair_swaps", 0)
         result.pair_vias = getattr(self, "pair_vias", 0)
+        result.pair_loose = list(getattr(self, "pair_loose", []))
         result.pair_exceptions = list(getattr(self, "pair_exceptions", []))
         result.direct_links = getattr(self, "direct_links", 0)
         result.pair_log = getattr(self, "pair_log", [])
