@@ -51,6 +51,7 @@ PAIR_EXCEPTIONS = {
 PAIR_VIA_SPAN_NM = 8_000_000   # a coupled run shorter than this stays on one layer (two via pairs are not worth it)
 PAIR_VIA_STRETCH_NM = 2_000_000  # a coupled stretch between two via pairs is at least this long
 LOOSE_TRIM_NM = 1_000_000  # a coupled run finished single-ended at one end stops this far short of it
+LOOSE_TRIM_STEPS = (1, 1.5, 2, 3, 4)   # ...or this many times as far, when the lines would still touch the pins
 PAIR_BUDGET = 8          # a pair's share of the per-connection time: two lines, several runs tried (layers, swaps)
 PAIR_UNNECESSARY = ("short", "joined")          # no skew tuning or coupling rules for these either
 PROTECTED_GROUPS = ("pairs", "memory", "high_speed")          # routing groups lower groups may not rip up
@@ -1238,43 +1239,51 @@ class Router:
         return False
 
     def _commit_loose(self, cand, loose, cells, via_cost, cap, on_path, cancelled) -> bool:
-        """Commit a coupled run that stops short of one end, then finish each
-        line to its pad there single-ended. All or nothing: if either line
-        cannot be finished, everything goes again and the pair is left to the
-        caller's exception route."""
+        """Commit a coupled run that stops short of one end (loose True: the
+        start, False: the far end, "both": either end), then finish each line
+        to its pad there single-ended. All or nothing: if any line cannot be
+        finished, everything goes again and the pair is left to the caller's
+        exception route."""
         grid = self.grid
         before = set(self.paths)
         self.next_pid += 2
-        committed = []
+        sides = (True, False) if loose == "both" else (loose,)
+        committed = []                        # (conn, the loose end's cluster, the pad cluster it finishes to)
+        spans = []                            # (rp, conn, the run's two ends as clusters)
         for rp, conn, cl_a, cl_b in cand:
             w_ = rp.width
-            good = cl_b if loose else cl_a           # the end the run did enter
-            # the finish leaves from the run's loose end only (joining the line
-            # further along would leave its tail hanging)
-            sg = rp.segments[0] if loose else rp.segments[-1]
-            lx, ly = (sg[1], sg[2]) if loose else (sg[3], sg[4])
-            ccx, ccy = grid.cell_x(lx), grid.cell_y(ly)
-            own_cells = [grid.index(sg[0], ccx, ccy)]
-            gx_, gy_ = grid.nm_x(ccx), grid.nm_y(ccy)
-            if (gx_, gy_) != (lx, ly):
-                # a stub onto the cell centre, where the finishing search starts
-                tie = (sg[0], gx_, gy_, lx, ly, w_) if loose else (sg[0], lx, ly, gx_, gy_, w_)
-                rp.segments = ([tie] + rp.segments) if loose else (rp.segments + [tie])
-            # the run's loose end becomes a cluster of its own for the finishing
-            # search to reach (the line's far pad must not count as a goal);
-            # the run joins it to the entered end once the finish is in
             net = self.p.nets[conn.net]
-            k = len(net.clusters)
-            net.clusters.append(Cluster(cells=set(own_cells), anchors=[(ccx, ccy)]))
-            self.parent[conn.net].append(k)
-            path = _Path(rp.pid, dataclasses.replace(conn, a=k, b=k), rp, own_cells, paired=True)
-            path.joins = [(k, k)]
+            ks = {}
+            own_cells = []
+            for at_start in sides:
+                # the finish leaves from the run's loose end only (joining the
+                # line further along would leave its tail hanging)
+                sg = rp.segments[0] if at_start else rp.segments[-1]
+                lx, ly = (sg[1], sg[2]) if at_start else (sg[3], sg[4])
+                ccx, ccy = grid.cell_x(lx), grid.cell_y(ly)
+                cell = grid.index(sg[0], ccx, ccy)
+                gx_, gy_ = grid.nm_x(ccx), grid.nm_y(ccy)
+                if (gx_, gy_) != (lx, ly):
+                    # a stub onto the cell centre, where the finishing search starts
+                    tie = (sg[0], gx_, gy_, lx, ly, w_) if at_start else (sg[0], lx, ly, gx_, gy_, w_)
+                    rp.segments = ([tie] + rp.segments) if at_start else (rp.segments + [tie])
+                # the run's loose end becomes a cluster of its own for the
+                # finishing search to reach (the line's far pad must not count
+                # as a goal); the run joins its two ends once the finish is in
+                k = len(net.clusters)
+                net.clusters.append(Cluster(cells={cell}, anchors=[(ccx, ccy)]))
+                self.parent[conn.net].append(k)
+                ks[at_start] = k
+                own_cells.append(cell)
+                committed.append((conn, k, cl_a if at_start else cl_b))
+            k0 = ks[sides[0]]
+            path = _Path(rp.pid, dataclasses.replace(conn, a=k0, b=k0), rp, [], paired=True)
+            path.joins = [(k0, k0)]
             self.paths[rp.pid] = path
             self._claim(path)
-            loose_pad = cl_a if loose else cl_b
-            committed.append((rp, conn, k, good, loose_pad))
+            spans.append((rp, conn, ks.get(True, cl_a), ks.get(False, cl_b), own_cells))
         ok = True
-        for rp, conn, k, good, loose_pad in committed:
+        for conn, k, loose_pad in committed:
             if cancelled is not None and cancelled():
                 ok = False
                 break
@@ -1284,18 +1293,20 @@ class Router:
         new = [pid for pid in self.paths if pid not in before]
         if not ok:
             removed = [self.paths.pop(pid) for pid in new]
-            for rp, conn, k, good, loose_pad in reversed(committed):
+            for conn, k, loose_pad in reversed(committed):
                 net = self.p.nets[conn.net]
                 if len(net.clusters) == k + 1:
                     net.clusters.pop()
                     self.parent[conn.net].pop()
-            for code in {c[1].net for c in committed}:
+            for code in {c[0].net for c in committed}:
                 self._rebuild_union(code)
             self._unclaim(removed)
             return False
-        for rp, conn, k, good, loose_pad in committed:
-            self.paths[rp.pid].joins = [(k, good)]
-            self.parent[conn.net][self._find(conn.net, k)] = self._find(conn.net, good)
+        for rp, conn, ka, kb, own_cells in spans:
+            path = self.paths[rp.pid]
+            path.joins = [(ka, kb)]
+            path.cells = own_cells
+            self.parent[conn.net][self._find(conn.net, ka)] = self._find(conn.net, kb)
         for pid in new:
             self.paths[pid].paired = True        # the single-ended finishes stay with their run (no rip-up)
         if on_path:
@@ -1982,7 +1993,7 @@ class Router:
                          for end in (True, False)}
                 ends = {}
                 for at_start, (a_cell, b_cell) in ((True, (ea1, eb1)), (False, (ea2, eb2))):
-                    if loose is not None and at_start == loose:
+                    if loose is not None and (loose == "both" or at_start == loose):
                         ends[at_start] = None
                         continue
                     best = None
@@ -2045,45 +2056,61 @@ class Router:
                             return None, "blocked"
                         return None, ("cross" if widest is not None and widest <= 0 else "close")
                     ends[at_start] = best
-                paths = []
-                loose_trim = min(LOOSE_TRIM_NM, total * 0.2)
-                for net, conn, e_key, cl_a, cl_b in ((na, ca, 0, ca.a, ca.b), (nb, cb, 1, cb_a, cb_b)):
-                    s_end, g_end = ends[True], ends[False]
-                    ts, ent_s = (s_end[1 + 2 * e_key], s_end[2 + 2 * e_key]) if s_end else (loose_trim, [])
-                    tg, ent_g = (g_end[1 + 2 * e_key], g_end[2 + 2 * e_key]) if g_end else (loose_trim, [])
-                    def piece(run, lay=layer_s):
-                        return [(lay, run[i][0], run[i][1], run[i + 1][0], run[i + 1][1], w) for i in range(len(run) - 1)]
-                    rs, re_ = runs_s[conn.net], runs_e[conn.net]
-                    if rs is re_:
-                        run = rs
-                        if ts:
-                            run = trim(run, ts)
-                        if tg and run:
-                            run = trim(run[::-1], tg)
-                            run = run[::-1] if run else None
-                        if not run or len(run) < 2:
+                def assemble(ends, loose_trim):
+                    """The two lines from the chosen pad entries (an end without
+                    entries is left loose_trim short)."""
+                    paths = []
+                    for net, conn, e_key, cl_a, cl_b in ((na, ca, 0, ca.a, ca.b), (nb, cb, 1, cb_a, cb_b)):
+                        s_end, g_end = ends[True], ends[False]
+                        ts, ent_s = (s_end[1 + 2 * e_key], s_end[2 + 2 * e_key]) if s_end else (loose_trim, [])
+                        tg, ent_g = (g_end[1 + 2 * e_key], g_end[2 + 2 * e_key]) if g_end else (loose_trim, [])
+                        def piece(run, lay=layer_s):
+                            return [(lay, run[i][0], run[i][1], run[i + 1][0], run[i + 1][1], w) for i in range(len(run) - 1)]
+                        rs, re_ = runs_s[conn.net], runs_e[conn.net]
+                        if rs is re_:
+                            run = rs
+                            if ts:
+                                run = trim(run, ts)
+                            if tg and run:
+                                run = trim(run[::-1], tg)
+                                run = run[::-1] if run else None
+                            if not run or len(run) < 2:
+                                return None, "close"
+                            core = piece(run)
+                        else:
+                            # the line that hops: its run to the first via, the
+                            # crossing underneath, its run on from the second
+                            head = trim(rs, ts) if ts else rs
+                            tail = trim(re_[::-1], tg) if tg else re_[::-1]
+                            if not head or not tail or len(head) < 2 or len(tail) < 2:
+                                return None, "close"
+                            core = piece(head, layer_s) + middle[conn.net] + piece(tail[::-1], layer_e)
+                        if not all(seg_clear(sg, conn.net) for sg in core):
+                            return None, "blocked"
+                        back = [(l, x2, y2, x1, y1, ww) for l, x1, y1, x2, y2, ww in reversed(ent_g)]
+                        segs = ent_s + core + back
+                        if swap is not None and acute(core):
+                            if _DEBUG:
+                                print(f"[pair-swap] {net.name} {swap}: doubles back", flush=True)
                             return None, "close"
-                        core = piece(run)
-                    else:
-                        # the line that hops: its run to the first via, the
-                        # crossing underneath, its run on from the second
-                        head = trim(rs, ts) if ts else rs
-                        tail = trim(re_[::-1], tg) if tg else re_[::-1]
-                        if not head or not tail or len(head) < 2 or len(tail) < 2:
-                            return None, "close"
-                        core = piece(head, layer_s) + middle[conn.net] + piece(tail[::-1], layer_e)
-                    if not all(seg_clear(sg, conn.net) for sg in core):
-                        return None, "blocked"
-                    back = [(l, x2, y2, x1, y1, ww) for l, x1, y1, x2, y2, ww in reversed(ent_g)]
-                    segs = ent_s + core + back
-                    if swap is not None and acute(core):
-                        if _DEBUG:
-                            print(f"[pair-swap] {net.name} {swap}: doubles back", flush=True)
-                        return None, "close"
-                    rp = RoutedPath(net.code, w, _merge_collinear(segs), list(vias.get(conn.net, [])),
-                                    net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid + len(paths))
-                    paths.append((rp, conn, cl_a, cl_b))
-                return paths, ""
+                        rp = RoutedPath(net.code, w, _merge_collinear(segs), list(vias.get(conn.net, [])),
+                                        net.rules.via_diameter, net.rules.via_drill, pid=self.next_pid + len(paths))
+                        paths.append((rp, conn, cl_a, cl_b))
+                    return paths, ""
+
+                if loose is None:
+                    return assemble(ends, 0)
+                # the loose end: the run stops short of it, as little as lets
+                # both lines clear the pins there (big through-hole pads need more)
+                got = (None, "blocked")
+                for k in LOOSE_TRIM_STEPS:
+                    t = min(LOOSE_TRIM_NM, total * 0.2) if k == 1 else LOOSE_TRIM_NM * k
+                    if t > total * 0.35:
+                        break
+                    got = assemble(ends, t)
+                    if got[0] is not None:
+                        break
+                return got
 
             def pair_apart(ra, rb):
                 """How far apart two finished lines are, as a track-to-track
@@ -2140,17 +2167,21 @@ class Router:
                 # The run fits but an end does not let both lines in side by
                 # side: keep the coupled run and finish that end single-ended
                 # (the result notes it), rather than give the whole pair up.
-                for loose in (False, True):
+                for loose in (False, True, "both"):
                     for sa in (first, -first):
                         cand, why = build(sa, None, loose)
+                        if _DEBUG:
+                            print(f"[pair-loose] {na.name} loose {loose} side {sa}: "
+                                  f"{why or round(pair_apart(cand[0][0], cand[1][0]))}", flush=True)
                         if cand is None or pair_apart(cand[0][0], cand[1][0]) < need:
                             continue
                         if self._commit_loose(cand, loose, cells, via_cost, cap, on_path, cancelled):
-                            ends_refs = na.clusters[ca.a if loose else ca.b].refs
+                            at = [ca.a, ca.b] if loose == "both" else [ca.a if loose else ca.b]
+                            ends_refs = set().union(*(na.clusters[e].refs for e in at))
                             where = "/".join(sorted(ends_refs)) or "?"
                             self.pair_loose = getattr(self, "pair_loose", [])
                             self.pair_loose.append({"nets": [na.name, nb.name], "end": where})
-                            self.pair_log.append((na.name, f"coupled; the {where} end connected single-ended "
+                            self.pair_log.append((na.name, f"coupled; the {where} end{'s' if loose == 'both' else ''} connected single-ended "
                                                            f"(no room to enter the pins side by side)"))
                             return True
                         break
