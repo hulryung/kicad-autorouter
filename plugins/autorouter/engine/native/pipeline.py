@@ -11,7 +11,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from . import apply as native_apply, extract as native_extract, router as native_router, tuning as native_tuning
+from . import apply as native_apply, astar as native_astar, extract as native_extract, router as native_router, tuning as native_tuning
 from .problem import NativeOptions, SCOPE_SELECTION
 
 _REMOVED: list = []        # board items taken off headless; Python must not free them
@@ -85,13 +85,12 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out = JobResult()
     added: list = []                       # board items this job created (apply_paths)
     paired_items: list = []                # ...of which the coupled pairs' lines
-    import time as _time
-    job_started = _time.time()
+    job_started = native_astar.clock()        # the wall clock, or the search work done (benchmarks)
     limit = options.time_limit_s if options.time_limit_s and options.time_limit_s > 0 else 0.0
 
     def remaining() -> float:
         """Seconds left of the job's time limit (0 = no limit)."""
-        return max(0.0, limit - (_time.time() - job_started)) if limit else 0.0
+        return max(0.0, limit - (native_astar.clock() - job_started)) if limit else 0.0
 
     def one_pass(opts: NativeOptions):
         problem = extract(board, opts, status)

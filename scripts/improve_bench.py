@@ -142,6 +142,8 @@ def escape_sides(board, min_pads=8):
     return out
 
 
+WORK_RATE = 85000.0     # A* expansions per second for --work-rate (an M-series Mac, CM5 board: ~87k)
+
 INTENT_RULES = {"diff_pair_gap_out_of_range", "diff_pair_uncoupled_length_too_long", "length_out_of_range",
                 "skew_out_of_range", "track_width"}
 
@@ -361,6 +363,12 @@ class Renderer:
 
 # ---- the run ------------------------------------------------------------------
 
+def _search_work():
+    from autorouter.engine.native import astar
+    return {"expansions": astar.WORK[0], "searches": astar.TOTALS["searches"],
+            "rate": astar.WORK_RATE or None}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reference", required=True)
@@ -371,6 +379,9 @@ def main():
     ap.add_argument("--shove", action="store_true")
     ap.add_argument("--time-limit", type=float, default=0.0,
                     help="job time limit in minutes, as the dialog sets it (default: none, same input same result)")
+    ap.add_argument("--work-rate", type=float, default=WORK_RATE,
+                    help="with --time-limit: the limits count search work at this many A* expansions per second "
+                    "instead of the wall clock, so a busy or slower machine gives the same result (0 = wall clock)")
     ap.add_argument("--no-images", action="store_true")
     ap.add_argument("--focus", default="", help="extra close-ups: x,y[,half];x,y ... in mm")
     ap.add_argument("--intent", default="", help="design intent JSON (engine/si.py SiConfig): stackup, "
@@ -378,6 +389,8 @@ def main():
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(args.plugins).resolve()))
+    if args.time_limit > 0 and args.work_rate > 0:
+        os.environ["KICAD_AUTOROUTER_WORK_RATE"] = str(args.work_rate)     # read when the engine loads
     import pcbnew
     from autorouter.engine import session
     from autorouter.engine.native import pipeline
@@ -548,6 +561,7 @@ def main():
         "fanout_vias": job.fanout, "stitching_vias": job.stitched,
         "pass_errors": {k: v for k, v in job.stats.items() if k.endswith("_error")},
         "route_seconds": round(seconds, 1),
+        "search_work": _search_work(),
         "stages": stages,
         "unconnected_after": unconnected,
         "drc": {f"{t}/{s}": n for (t, s), n in sorted(violations.items())},

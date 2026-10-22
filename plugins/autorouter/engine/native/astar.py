@@ -7,6 +7,7 @@ plus a small turn penalty and the via cost. The heuristic is octile distance
 to the nearest target anchor, so it stays admissible for in-layer moves.
 """
 import heapq
+import os
 import time as _time
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -23,13 +24,38 @@ LANE_PENALTY = 60                               # per cell inside another pad's 
 BODY_PENALTY = 10                               # per cell under an IC body on its own layer: that run counts double
 LAST = {"expansions": 0, "capped": False}       # what the last search did (debugging)
 TOTALS = {"searches": 0, "expansions": 0, "capped": 0, "seconds": 0.0}   # over the process (profiling)
+# Search work over the process: expansions plus a share per search, and whether
+# a search is under way (its expansions so far are in LAST)
+WORK = [0, False]
+SEARCH_WORK = 50
+WORK_RATE = float(os.environ.get("KICAD_AUTOROUTER_WORK_RATE") or 0)
+
+
+def clock() -> float:
+    """Seconds for the time limits: the wall clock, or, with
+    KICAD_AUTOROUTER_WORK_RATE set (expansions per second), the search work
+    done so far at that rate. Benchmarks use it: the same input then gives the
+    same result on a busy, sleeping or slower machine."""
+    if WORK_RATE > 0:
+        return (WORK[0] + (LAST["expansions"] if WORK[1] else 0)) / WORK_RATE
+    return _time.time()
 
 # (dx, dy, is_diagonal)
 MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
          (1, 1, True), (1, -1, True), (-1, 1, True), (-1, -1, True))
 
 
-def route(grid: Grid, owners, via_block: bytearray, net: int,
+def route(*args, **kwargs) -> Optional[List[int]]:
+    """_route, counting its work for clock()."""
+    LAST["expansions"], WORK[1] = 0, True
+    try:
+        return _route(*args, **kwargs)
+    finally:
+        WORK[0] += LAST["expansions"] + SEARCH_WORK
+        WORK[1] = False
+
+
+def _route(grid: Grid, owners, via_block: bytearray, net: int,
           sources: Iterable[int], goals: Set[int], anchors: Sequence[Tuple[int, int]],
           horizontal: Sequence[bool], via_cost: int, allow_vias: bool, via_reach: int,
           max_expansions: int, turn_cost: int = 2,

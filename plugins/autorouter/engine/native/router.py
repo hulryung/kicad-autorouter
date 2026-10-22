@@ -2432,7 +2432,7 @@ class Router:
             on_remove: Optional[RemoveFn] = None, cancelled: Optional[Callable[[], bool]] = None) -> RouteResult:
         opts = self.opts
         result = RouteResult()
-        started = time.time()
+        started, clock_started = time.time(), astar.clock()
         # the routing groups in their order (pairs, memory, high speed, clocks,
         # power, the rest); within a group fine-pitch escapes first (they have
         # the least room), then shortest first
@@ -2458,10 +2458,10 @@ class Router:
             if progress:
                 progress(done, total, len(self.paths), len(failed), f"{stage}{name}")
 
-        deadline = started + opts.time_limit_s if opts.time_limit_s and opts.time_limit_s > 0 else None
+        deadline = clock_started + opts.time_limit_s if opts.time_limit_s and opts.time_limit_s > 0 else None
 
         def late():
-            if deadline is not None and time.time() > deadline:
+            if deadline is not None and astar.clock() > deadline:
                 result.timed_out = True
                 return True
             return False
@@ -2485,10 +2485,10 @@ class Router:
             took out) cannot hold up the whole job."""
             if not opts.conn_time_s or opts.conn_time_s <= 0:
                 return stop
-            until = time.time() + opts.conn_time_s * scale
+            until = astar.clock() + opts.conn_time_s * scale
 
             def over():
-                if time.time() > until:
+                if astar.clock() > until:
                     self.budget_cuts += 1
                     return True
                 return stop()
