@@ -464,6 +464,7 @@ class Router:
         # get a via again after the rip-up rounds, like the fanout list
         self.restore: List[Tuple[int, int]] = []
         self.ripped_existing: List[_Path] = []       # board pieces shove took out, in case they must come back
+        self.revived: List[_Path] = []               # ...and board pieces a rolled-back rip-up put back
         self._rip_planes = False          # the second tier of a rip-up search: plane vias may go too
         self.restore_possible = False     # ...there are such vias on the board
         # new paths get ids above every board piece's, even one that is not
@@ -1000,6 +1001,30 @@ class Router:
             self._rebuild_union(code)
         self._unclaim(removed)
         return conns
+
+    def _undo_rip(self, before: Dict[int, _Path], marks: Tuple[int, int, int], on_path, on_remove) -> None:
+        """Back to the paths of `before`: a rip-up attempt that cost more
+        connections than it won. The paths it added come off, the ones it
+        ripped go back where they were (their room is free again)."""
+        new = [self.paths.pop(pid) for pid in sorted(self.paths) if pid not in before]
+        for path in new:
+            if on_remove:
+                on_remove(path.pid)
+        self._unclaim(new)
+        back = [before[pid] for pid in sorted(before) if pid not in self.paths]
+        for path in back:
+            path.claims, path.via_cells = {}, []
+            self.paths[path.pid] = path
+            self._claim(path)
+            if path.existing:
+                self.revived.append(path)        # its board items were removed: it is drawn again
+            if on_path:
+                on_path(path.path)
+        n_restore, n_existing, self.shoved = marks
+        del self.restore[n_restore:]
+        del self.ripped_existing[n_existing:]
+        for code in {path.conn.net for path in new + back}:
+            self._rebuild_union(code)
 
     # ---- differential pairs ----------------------------------------------
 
@@ -2544,6 +2569,7 @@ class Router:
             return over
 
         self.budget_cuts = 0
+        self.undone = 0
 
         # 0. pads close together with a clear line between them: a direct
         # track. Drawn once the differential pairs have their runs: a wide
@@ -2668,12 +2694,12 @@ class Router:
                     still.append(conn)
                     continue
                 self._remember_conflict(conn, cells, set(blockers))
+                before = dict(self.paths)
+                marks = (len(self.restore), len(self.ripped_existing), self.shoved)
                 ripped = self._rip(blockers, on_remove)
-                result.ripped += len(ripped)
-                if self._try(conn, opts.via_cost, opts.max_expansions * 2, on_path, attempt):
-                    progressed = True
-                else:
-                    still.append(conn)
+                sizes = {c.net: len(self.p.nets[c.net].clusters) for c in [conn] + ripped}
+                won = self._try(conn, opts.via_cost, opts.max_expansions * 2, on_path, attempt)
+                lost = []
                 for other in ripped:
                     # each one ripped up gets its own time to find its way back
                     joined = self._find(other.net, other.a) == self._find(other.net, other.b)
@@ -2681,7 +2707,21 @@ class Router:
                     if _DEBUG:
                         print(f"[reroute] {self.p.nets[other.net].name} {other.a}-{other.b} joined-before={joined} -> {ok}", flush=True)
                     if not ok:
-                        still.append(other)
+                        lost.append(other)
+                lost = [c for c in lost if self._find(c.net, c.a) != self._find(c.net, c.b)]
+                if (0 if won else 1) + len(lost) > 1 and all(len(self.p.nets[n].clusters) == k for n, k in sizes.items()):
+                    # more open than before: put the board back as it was (a
+                    # reshuffle that costs nothing stays, it may make room)
+                    self._undo_rip(before, marks, on_path, on_remove)
+                    self.undone += 1
+                    still.append(conn)
+                    continue
+                result.ripped += len(ripped)
+                if won:
+                    progressed = True
+                else:
+                    still.append(conn)
+                still.extend(lost)
                 report(self.p.nets[conn.net].name, f"rip-up round {rnd + 1}/{rounds}: ")
             failed = still
             if not progressed:
@@ -2898,7 +2938,8 @@ class Router:
             result.failed = [c for c in result.failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
             result.failed_detail = [self._why_failed(c) for c in result.failed]
         new_paths = [self.paths[pid] for pid in sorted(self.paths) if not self.paths[pid].existing]
-        result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths + restored
+        revived = {path.pid: path.path for path in self.revived if self.paths.get(path.pid) is path}
+        result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths + restored + list(revived.values())
         result.paired_pids = {pid for pid, path in self.paths.items() if path.paired}
         result.stitched = len(stitch_paths)
         result.routed = len(new_paths)
