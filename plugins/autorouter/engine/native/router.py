@@ -25,7 +25,7 @@ import os
 
 from . import astar
 from .grid import BLOCKED, BODY_LANE, Grid, jog
-from .problem import Connection, NetInfo, RoutedPath, RoutingProblem
+from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem
 
 ProgressFn = Callable[[int, int, int, int, str], None]    # done, total, routed, failed, net name
 PathFn = Callable[[RoutedPath], None]
@@ -846,7 +846,18 @@ class Router:
         rp = RoutedPath(net.code, width, segments, vias, net.rules.via_diameter,
                         net.rules.via_drill, pid=self.next_pid)
         self.next_pid += 1
-        path = _Path(rp.pid, conn, rp, cells)
+        # The cells another route of the net may end on: the ones under the
+        # copper as drawn (acute corners cut, pad entries), not the search's
+        # cells, or a later route T-joins a spot the drawing left and dangles.
+        grid = self.grid
+        drawn: List[int] = []
+        for sg in segments:
+            drawn += grid.segment_cells(sg[0], sg[1], sg[2], sg[3], sg[4], grid.pitch // 2)
+        for vx, vy in vias:
+            vcx, vcy = grid.cell_x(vx), grid.cell_y(vy)
+            drawn += [grid.index(l, vcx, vcy) for l in range(grid.layers)]
+        drawn = list(dict.fromkeys([cells[0]] + drawn + [cells[-1]]))
+        path = _Path(rp.pid, conn, rp, drawn)
         # The clusters the path really joins: the pads its ends touch. A
         # search may end on any pad of the far component, not on the
         # connection's own cluster (three pads joined by one ripped-up piece
@@ -1161,30 +1172,58 @@ class Router:
         self.next_pid += 2
         committed = []
         for rp, conn, cl_a, cl_b in cand:
+            w_ = rp.width
             good = cl_b if loose else cl_a           # the end the run did enter
-            own_cells = []
-            for sg in rp.segments:
-                own_cells += grid.segment_cells(sg[0], sg[1], sg[2], sg[3], sg[4], grid.pitch // 2)
-            path = _Path(rp.pid, dataclasses.replace(conn, a=good, b=good), rp, own_cells, paired=True)
+            # the finish leaves from the run's loose end only (joining the line
+            # further along would leave its tail hanging)
+            sg = rp.segments[0] if loose else rp.segments[-1]
+            lx, ly = (sg[1], sg[2]) if loose else (sg[3], sg[4])
+            ccx, ccy = grid.cell_x(lx), grid.cell_y(ly)
+            own_cells = [grid.index(sg[0], ccx, ccy)]
+            gx_, gy_ = grid.nm_x(ccx), grid.nm_y(ccy)
+            if (gx_, gy_) != (lx, ly):
+                # a stub onto the cell centre, where the finishing search starts
+                tie = (sg[0], gx_, gy_, lx, ly, w_) if loose else (sg[0], lx, ly, gx_, gy_, w_)
+                rp.segments = ([tie] + rp.segments) if loose else (rp.segments + [tie])
+            # the run's loose end becomes a cluster of its own for the finishing
+            # search to reach (the line's far pad must not count as a goal);
+            # the run joins it to the entered end once the finish is in
+            net = self.p.nets[conn.net]
+            k = len(net.clusters)
+            net.clusters.append(Cluster(cells=set(own_cells), anchors=[(ccx, ccy)]))
+            self.parent[conn.net].append(k)
+            path = _Path(rp.pid, dataclasses.replace(conn, a=k, b=k), rp, own_cells, paired=True)
+            path.joins = [(k, k)]
             self.paths[rp.pid] = path
             self._claim(path)
-            committed.append((rp, conn))
+            loose_pad = cl_a if loose else cl_b
+            committed.append((rp, conn, k, good, loose_pad))
         ok = True
-        for rp, conn in committed:
+        for rp, conn, k, good, loose_pad in committed:
             if cancelled is not None and cancelled():
                 ok = False
                 break
-            if not self._try(conn, via_cost, cap, None, cancelled):
+            if not self._try(dataclasses.replace(conn, a=loose_pad, b=k, pair=0), via_cost, cap, None, cancelled):
                 ok = False
                 break
         new = [pid for pid in self.paths if pid not in before]
         if not ok:
             for pid in new:
                 self.paths.pop(pid, None)
-            for code in {conn.net for _, conn in committed}:
+            for rp, conn, k, good, loose_pad in reversed(committed):
+                net = self.p.nets[conn.net]
+                if len(net.clusters) == k + 1:
+                    net.clusters.pop()
+                    self.parent[conn.net].pop()
+            for code in {c[1].net for c in committed}:
                 self._rebuild_union(code)
             self._rebuild_maps()
             return False
+        for rp, conn, k, good, loose_pad in committed:
+            self.paths[rp.pid].joins = [(k, good)]
+            self.parent[conn.net][self._find(conn.net, k)] = self._find(conn.net, good)
+        for pid in new:
+            self.paths[pid].paired = True        # the single-ended finishes stay with their run (no rip-up)
         if on_path:
             for pid in sorted(new):
                 on_path(self.paths[pid].path)
@@ -2021,7 +2060,8 @@ class Router:
                     break
                 closest = gap_ if closest is None else max(closest, gap_)
             loose_end = None
-            if paths is None and self.opts.pair_loose_ends and (closest is not None or blocked) \
+            if paths is None and self.opts.pair_loose_ends and getattr(self, '_allow_swap', True) \
+                    and (closest is not None or blocked) \
                     and not (cancelled is not None and cancelled()):
                 # The run fits but an end does not let both lines in side by
                 # side: keep the coupled run and finish that end single-ended
@@ -2500,7 +2540,7 @@ class Router:
                     self._route_exception(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET), failed)
                 report(self.p.nets[ca.net].name)
 
-        self._allow_swap = not opts.pair_via_swap
+        self._allow_swap = not (opts.pair_via_swap or opts.pair_loose_ends)   # first pass: plain coupled runs only
         for conn in queue:
             if id(conn) in handled:
                 continue
@@ -2521,7 +2561,8 @@ class Router:
                     done += 2
                     report(self.p.nets[ca.net].name)
                     continue
-                if not self._allow_swap and self._pair_why in ("cross", "pinch"):
+                if not self._allow_swap and (self._pair_why in ("cross", "pinch")
+                                             or (opts.pair_loose_ends and self._pair_why == "blocked")):
                     deferred.append((ca, cb))
                     done += 2
                     continue
