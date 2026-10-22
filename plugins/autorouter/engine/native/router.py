@@ -52,6 +52,8 @@ PAIR_VIA_SPAN_NM = 8_000_000   # a coupled run shorter than this stays on one la
 PAIR_VIA_STRETCH_NM = 2_000_000  # a coupled stretch between two via pairs is at least this long
 LOOSE_TRIM_NM = 1_000_000  # a coupled run finished single-ended at one end stops this far short of it
 LOOSE_TRIM_STEPS = (1, 1.5, 2, 3, 4)
+PAIR_APPROACH_NM = 2_000_000     # in front of a pair's pins, other pairs' runs pay to pass (the pair's way in)
+PAIR_APPROACH_HALF_NM = 300_000   # ...this far either side of each pin's outlet line
 PAIR_EARLY_SWAP_NM = 50_000_000   # a pair run this long may swap / end single-ended in the first pass   # ...or this many times as far, when the lines would still touch the pins
 PAIR_BUDGET = 8          # a pair's share of the per-connection time: two lines, several runs tried (layers, swaps)
 PAIR_UNNECESSARY = ("short", "joined")          # no skew tuning or coupling rules for these either
@@ -1352,6 +1354,35 @@ class Router:
             cache[reach] = got
         return got
 
+    def _pair_guard(self, base, reach: int):
+        """The pair runs' lane guard: the wide outlet lanes, plus each pair
+        pin's approach, PAIR_APPROACH_NM straight out of its exits. Another
+        pair's run passing there takes the room the pair needs to come in
+        side by side; it pays the lane penalty, so a run that can go round
+        (or under, on another layer) does, as a designer keeps a second
+        pair's way to the same connector open."""
+        if base is None:
+            return None
+        cache = self.__dict__.setdefault('_pair_guard_cache', {})
+        got = cache.get(reach)
+        if got is None:
+            grid = self.grid
+            got = array("i", base)
+            for code, net in self.p.nets.items():
+                if not net.partner:
+                    continue
+                for idx, (ex, ey, px, py, _w) in net.endpoints.items():
+                    dx, dy = ex - px, ey - py
+                    span = math.hypot(dx, dy)
+                    if span == 0:
+                        continue
+                    tx, ty = int(ex + dx / span * PAIR_APPROACH_NM), int(ey + dy / span * PAIR_APPROACH_NM)
+                    for j in grid.segment_cells(idx // grid.plane, ex, ey, tx, ty, PAIR_APPROACH_HALF_NM):
+                        if got[j] == 0:
+                            got[j] = code
+            cache[reach] = got
+        return got
+
     def _try_pair_once(self, ca: Connection, cb: Connection, via_cost: int, cap: int, on_path, cancelled) -> bool:
         """Route two connections of a differential pair as one coupled track:
         a centreline as wide as both tracks and their gap is searched, then
@@ -1455,7 +1486,8 @@ class Router:
         g_cells = {c for k, c in g_list if kmin <= k <= kmin + 2}
         s_cells = set(s_costs)
         anchors = [grid.unpack(c)[1:] for c in list(g_cells)[:1]]
-        guard = self._wide_lane_guard(int(math.ceil(d / grid.pitch)))
+        reach = int(math.ceil(d / grid.pitch))
+        guard = self._pair_guard(self._wide_lane_guard(reach), reach)
         # A coupled run may change layers: the two lines flare apart to a via
         # each, side by side across the run, and close up again beyond (a
         # pair's way through a pin row it cannot cross on its own layer).
