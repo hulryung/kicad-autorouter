@@ -51,7 +51,8 @@ PAIR_EXCEPTIONS = {
 PAIR_VIA_SPAN_NM = 8_000_000   # a coupled run shorter than this stays on one layer (two via pairs are not worth it)
 PAIR_VIA_STRETCH_NM = 2_000_000  # a coupled stretch between two via pairs is at least this long
 LOOSE_TRIM_NM = 1_000_000  # a coupled run finished single-ended at one end stops this far short of it
-LOOSE_TRIM_STEPS = (1, 1.5, 2, 3, 4)   # ...or this many times as far, when the lines would still touch the pins
+LOOSE_TRIM_STEPS = (1, 1.5, 2, 3, 4)
+PAIR_EARLY_SWAP_NM = 50_000_000   # a pair run this long may swap / end single-ended in the first pass   # ...or this many times as far, when the lines would still touch the pins
 PAIR_BUDGET = 8          # a pair's share of the per-connection time: two lines, several runs tried (layers, swaps)
 PAIR_UNNECESSARY = ("short", "joined")          # no skew tuning or coupling rules for these either
 PROTECTED_GROUPS = ("pairs", "memory", "high_speed")          # routing groups lower groups may not rip up
@@ -1288,6 +1289,11 @@ class Router:
                 ok = False
                 break
             if not self._try(dataclasses.replace(conn, a=loose_pad, b=k, pair=0), via_cost, cap, None, cancelled):
+                if _DEBUG:
+                    cl_ = self.p.nets[conn.net].clusters[k]
+                    print(f"[loose-finish] {self.p.nets[conn.net].name} {loose}: no way from "
+                          f"{'/'.join(sorted(self.p.nets[conn.net].clusters[loose_pad].refs))} to the run end at "
+                          f"{[(round(self.grid.nm_x(x) / 1e6, 2), round(self.grid.nm_y(y) / 1e6, 2)) for x, y in cl_.anchors]}", flush=True)
                 ok = False
                 break
         new = [pid for pid in self.paths if pid not in before]
@@ -2646,7 +2652,8 @@ class Router:
                     self._route_exception(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET), failed)
                 report(self.p.nets[ca.net].name)
 
-        self._allow_swap = not (opts.pair_via_swap or opts.pair_loose_ends)   # first pass: plain coupled runs only
+        self._allow_swap = not (opts.pair_via_swap or opts.pair_loose_ends)   # first pass: plain coupled runs only...
+        early = PAIR_EARLY_SWAP_NM
         for conn in queue:
             if id(conn) in handled:
                 continue
@@ -2662,13 +2669,22 @@ class Router:
             if len(mates) == 2:
                 ca, cb = mates
                 handled.add(id(ca)); handled.add(id(cb))
-                if self._try_pair(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET)):
+                # ...but a long run (where coupling matters most) may swap or end
+                # single-ended at once: deferred, it finds the room taken
+                allow = self._allow_swap
+                self._allow_swap = allow or ca.estimate * self.grid.pitch >= early
+                try:
+                    ok = self._try_pair(ca, cb, opts.via_cost, opts.max_expansions, on_path, budget(PAIR_BUDGET))
+                finally:
+                    self._allow_swap = allow
+                if ok:
                     self.pairs_routed += 1
                     done += 2
                     report(self.p.nets[ca.net].name)
                     continue
-                if not self._allow_swap and (self._pair_why in ("cross", "pinch")
-                                             or (opts.pair_loose_ends and self._pair_why == "blocked")):
+                if not self._allow_swap and ca.estimate * self.grid.pitch < early \
+                        and (self._pair_why in ("cross", "pinch")
+                             or (opts.pair_loose_ends and self._pair_why == "blocked")):
                     deferred.append((ca, cb))
                     done += 2
                     continue
