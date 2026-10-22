@@ -591,6 +591,54 @@ class Router:
             path.via_cells = []
             self._claim(path)
 
+    def _unclaim(self, removed: List[_Path]) -> None:
+        """Take paths just dropped from self.paths off the maps: the cells
+        they claimed go back to the fixed copper, and the surviving paths
+        that claim any of those cells claim them again, in path id order.
+        The same maps _rebuild_maps draws (a cell's owner and first claimer
+        depend only on the paths claiming it, in id order), without redrawing
+        every path: that took seconds per rip-up on a big board, more on the
+        second pass's finer grid."""
+        if not removed:
+            return
+        p = self.p
+        survivors = [self.paths[pid] for pid in sorted(self.paths)]
+        for key, owners in p.owners.items():
+            touched: Set[int] = set()
+            for path in removed:
+                touched.update(path.claims.get(key, ()))
+            if not touched:
+                continue
+            fixed, routed = self.fixed[key], self.routed[key]
+            for idx in touched:
+                owners[idx] = fixed[idx]
+                routed[idx] = 0
+            for path in survivors:
+                cells = path.claims.get(key)
+                if not cells or touched.isdisjoint(cells):
+                    continue
+                code, pid = p.nets[path.conn.net].code, path.pid
+                for idx in cells:
+                    if idx not in touched:
+                        continue
+                    cur = owners[idx]
+                    if cur == 0:
+                        owners[idx] = code
+                        routed[idx] = pid
+                    elif cur != code and cur != BLOCKED:
+                        owners[idx] = BLOCKED
+        touched = set()
+        for path in removed:
+            touched.update(path.via_cells)
+        if touched:
+            for idx in touched:
+                p.via_block[idx] = self.fixed_via_block[idx]
+            for path in survivors:
+                if path.via_cells and not touched.isdisjoint(path.via_cells):
+                    for idx in path.via_cells:
+                        if idx in touched:
+                            p.via_block[idx] = 1
+
     # ---- routing one connection ------------------------------------------
 
     def _key(self, conn: Connection) -> Tuple[int, int]:
@@ -918,10 +966,12 @@ class Router:
 
     def _rip(self, pids: List[int], on_remove) -> List[Connection]:
         conns = []
+        removed: List[_Path] = []
         for pid in self._dependents(list(pids)):
             path = self.paths.pop(pid, None)
             if path is None:
                 continue
+            removed.append(path)
             if _DEBUG:
                 print(f"[rip] pid {pid} {self.p.nets[path.conn.net].name} existing={path.existing} vias={[(x/1e6, y/1e6) for x, y in path.path.vias]}", flush=True)
             if path.existing and not self.p.nets[path.conn.net].route:
@@ -948,7 +998,7 @@ class Router:
                 on_remove(pid)
         for code in {c.net for c in conns}:
             self._rebuild_union(code)
-        self._rebuild_maps()
+        self._unclaim(removed)
         return conns
 
     # ---- differential pairs ----------------------------------------------
@@ -1208,8 +1258,7 @@ class Router:
                 break
         new = [pid for pid in self.paths if pid not in before]
         if not ok:
-            for pid in new:
-                self.paths.pop(pid, None)
+            removed = [self.paths.pop(pid) for pid in new]
             for rp, conn, k, good, loose_pad in reversed(committed):
                 net = self.p.nets[conn.net]
                 if len(net.clusters) == k + 1:
@@ -1217,7 +1266,7 @@ class Router:
                     self.parent[conn.net].pop()
             for code in {c[1].net for c in committed}:
                 self._rebuild_union(code)
-            self._rebuild_maps()
+            self._unclaim(removed)
             return False
         for rp, conn, k, good, loose_pad in committed:
             self.paths[rp.pid].joins = [(k, good)]
