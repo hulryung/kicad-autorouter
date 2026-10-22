@@ -28,6 +28,12 @@ TOTALS = {"searches": 0, "expansions": 0, "capped": 0, "seconds": 0.0}   # over 
 # a search is under way (its expansions so far are in LAST)
 WORK = [0, False]
 SEARCH_WORK = 50
+# A search still going after PROBE_AT expansions checks whether its goal end
+# is walled in (a pin whose outlet other copper took): a flood back from the
+# goals of at most PROBE_CELLS cells. A walled-in goal then fails at once
+# instead of after the whole board is searched up to the cap.
+PROBE_AT = 20_000
+PROBE_CELLS = 20_000
 WORK_RATE = float(os.environ.get("KICAD_AUTOROUTER_WORK_RATE") or 0)
 
 
@@ -76,6 +82,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     flare out to its vias.
     """
     w, plane, nlayers = grid.w, grid.plane, grid.layers
+    sources = list(sources)
     via_step = via_cost * STRAIGHT
     soft = routed is not None and rippable is not None
     routable = list(routable) if routable is not None else [True] * nlayers
@@ -189,6 +196,43 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
                 return False
         return True
 
+    source_set = set(sources)
+
+    def enclosed() -> Tuple[bool, int]:
+        """(True, steps) when the cells the search could reach the goals
+        from are a closed pocket: a flood back from the goals, by the
+        search's own rules but looser (corners may be cut, vias go up to
+        the lead), runs out without meeting a source or a cell the search
+        has reached. (False, steps) when it meets one or grows past
+        PROBE_CELLS."""
+        seen = {c for c in goals if routable[c // plane]}
+        todo = list(seen)
+        steps = 0
+        while todo:
+            x = todo.pop()
+            steps += 1
+            if steps > PROBE_CELLS:
+                return False, steps
+            layer, rest = divmod(x, plane)
+            cy, cx = divmod(rest, w)
+            base = layer * plane
+            near = []
+            for dx, dy, _ in MOVES:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < w and 0 <= ny < gh:
+                    near.append(base + ny * w + nx)
+            if allow_vias and nlayers > 1 and via_ok(cx, cy):
+                near.extend(other * plane + rest for other in range(nlayers) if other != layer)
+            for y in near:
+                if y in seen:
+                    continue
+                if y in g or y in source_set:
+                    return False, steps            # the search's side is in reach
+                if routable[y // plane] and passable(y):
+                    seen.add(y)
+                    todo.append(y)
+        return True, steps
+
     TOTALS["searches"] += 1
     _t0 = _time.time()
     g: Dict[int, int] = {}
@@ -218,6 +262,18 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
             return path
         closed.add(idx)
         expansions += 1
+        if expansions == PROBE_AT:
+            # a long search: is the goal end walled in? Then no amount of
+            # searching from this side reaches it (it would wander the board
+            # to the cap); the flood's own steps count as search work
+            shut, steps = enclosed()
+            expansions += steps
+            if shut:
+                LAST["expansions"], LAST["capped"] = expansions, False
+                TOTALS["expansions"] += expansions
+                TOTALS["enclosed"] = TOTALS.get("enclosed", 0) + 1
+                TOTALS["seconds"] += _time.time() - _t0
+                return None
         LAST["expansions"], LAST["capped"] = expansions, False
         if expansions > max_expansions:
             LAST["capped"] = True
