@@ -142,7 +142,7 @@ def escape_sides(board, min_pads=8):
     return out
 
 
-WORK_RATE = 85000.0     # A* expansions per second for --work-rate (an M-series Mac, CM5 board: ~87k)
+WORK_RATE = 100000.0    # A* expansions per second for --work-rate (an M-series Mac on the CM5 board: ~107k)
 
 INTENT_RULES = {"diff_pair_gap_out_of_range", "diff_pair_uncoupled_length_too_long", "length_out_of_range",
                 "skew_out_of_range", "track_width"}

@@ -202,29 +202,63 @@ pairs running side by side at a constant gap."""
 
 
 def bench(args, plugins, out, images=True):
-    cmd = [args.kicad_py, str(args.bench_script), "--reference", str(args.reference), "--plugins", str(plugins),
-           "--out", str(out), "--skip", args.skip]
-    if args.intent:
-        cmd += ["--intent", str(args.intent_frozen)]
-    if args.shove:
-        cmd.append("--shove")
-    if args.time_limit:
-        cmd += ["--time-limit", str(args.time_limit)]
-    if not images:
-        cmd.append("--no-images")
-    env = dict(os.environ, PYTHONHASHSEED="0")
+    """One benchmark run, or with --work-rates one per rate, side by side (the
+    work clock makes a run's result independent of the machine's load): the
+    first rate's run, with the others under "_runs"."""
+    rates = [r for r in (args.work_rates or "").split(",") if r] if args.time_limit else []
+    procs = []
+    for i, rate in enumerate(rates or [""]):
+        o = Path(out) if i == 0 else Path(f"{out}-{rate}")
+        cmd = [args.kicad_py, str(args.bench_script), "--reference", str(args.reference), "--plugins", str(plugins),
+               "--out", str(o), "--skip", args.skip]
+        if args.intent:
+            cmd += ["--intent", str(args.intent_frozen)]
+        if args.shove:
+            cmd.append("--shove")
+        if args.time_limit:
+            cmd += ["--time-limit", str(args.time_limit)]
+        if rate:
+            cmd += ["--work-rate", rate]
+        if not images or i > 0:
+            cmd.append("--no-images")
+        env = dict(os.environ, PYTHONHASHSEED="0")
+        f = open(o.with_suffix(".log"), "w", encoding="utf-8")
+        procs.append((o, f, subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)))
     t0 = time.time()
-    with open(Path(out).with_suffix(".log"), "w", encoding="utf-8") as f:
-        r = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, timeout=args.bench_timeout, env=env)
-    metrics_file = Path(out) / "metrics.json"
-    if r.returncode != 0 or not metrics_file.exists():
-        raise RuntimeError(f"benchmark failed (exit {r.returncode}), see {Path(out).with_suffix('.log')}")
-    m = json.loads(metrics_file.read_text(encoding="utf-8"))
+    runs = []
+    for o, f, proc in procs:
+        try:
+            rc = proc.wait(timeout=max(1, args.bench_timeout - (time.time() - t0)))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            rc = -9
+        f.close()
+        metrics_file = o / "metrics.json"
+        if rc != 0 or not metrics_file.exists():
+            for _, _, other in procs:
+                if other.poll() is None:
+                    other.kill()
+            raise RuntimeError(f"benchmark failed (exit {rc}), see {o.with_suffix('.log')}")
+        runs.append(json.loads(metrics_file.read_text(encoding="utf-8")))
+    m = runs[0]
     m["_wall_seconds"] = round(time.time() - t0)
+    m["_runs"] = runs[1:]
     return m
 
 
+def unconnected(m):
+    """Open connections, over every run of the benchmark (the mean)."""
+    runs = [m] + m.get("_runs", [])
+    return sum(r.get("unconnected_after") or 0 for r in runs) / len(runs)
+
+
 def penalty(m, base_seconds):
+    """Lower is better (the mean over the benchmark's runs at several work rates)."""
+    runs = [m] + m.get("_runs", [])
+    return round(sum(_penalty(r, base_seconds) for r in runs) / len(runs), 1)
+
+
+def _penalty(m, base_seconds):
     """Lower is better. Hard problems dominate; the artwork terms break ties."""
     agree, total = (int(x) for x in m["escape_side_agreement"].split(" of "))
     own_vias = m["vias"] - m.get("fanout_vias", 0) - m.get("stitching_vias", 0)
@@ -258,6 +292,8 @@ def figures(m):
     f = {k: m.get(k) for k in ("routed", "unconnected_after", "drc_errors", "rule_errors", "dangling", "off_45",
                                "acute_corners",
                                "doubled_back", "length_mm", "vias", "route_seconds", "escape_side_agreement")}
+    if m.get("_runs"):
+        f["unconnected_per_rate"] = [r.get("unconnected_after") for r in [m] + m["_runs"]]
     it = m.get("intent") or {}
     if it:
         f["impedance_ok_pct"] = it.get("impedance_width_ok_pct")
@@ -359,6 +395,9 @@ def main():
     ap.add_argument("--time-limit", type=float, default=0.0,
                     help="minutes per benchmark route (the dialog's time limit); 0 = none, the deterministic default. "
                          "A big board that takes an hour untimed is measured within this instead")
+    ap.add_argument("--work-rates", default="100000,85000,115000",
+                    help="with --time-limit: one benchmark per work rate (A* expansions per second), side by side, "
+                         "judged on the mean; a single time-limited run swings with the budget. '' = one run")
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
     ap.add_argument("--no-final-eval", action="store_true")
     ap.add_argument("--intent", default="", help="design intent JSON (impedance classes, length groups, routing "
@@ -477,7 +516,7 @@ def main():
             continue
         p = penalty(m, base_seconds)
         rd["metrics"], rd["penalty"] = figures(m), p
-        worse_hard = ((m.get("unconnected_after") or 0) > (current.get("unconnected_after") or 0)
+        worse_hard = (unconnected(m) > unconnected(current)
                       or m.get("rule_errors", 0) > current.get("rule_errors", 0) + 2
                       or m.get("drc_errors", 0) > current.get("drc_errors", 0))
         if p < best - 0.5 and not worse_hard:
