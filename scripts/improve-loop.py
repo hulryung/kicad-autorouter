@@ -149,6 +149,10 @@ def run_claude(prompt, cwd, out_file, args, schema=None, tools=("Read",), edit=F
                 if subprocess.run(["curl", "-sI", "-m", "8", "https://api.anthropic.com"],
                                   capture_output=True).returncode == 0:
                     break
+            if edit:
+                # the call broke off midway: its half-made edits go, the retry starts clean
+                reset(cwd)
+                git("clean", "-fdq", cwd=cwd)
 
 
 def _run_claude(prompt, cwd, out_file, args, schema=None, tools=("Read",), edit=False, timeout=3600):
