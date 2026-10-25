@@ -728,17 +728,22 @@ def _assign_groups(board, nets: Dict[int, NetInfo], options: NativeOptions, plan
         n.group, n.rank = group, rank[group]
 
 
-def _main_pad_components(board, conn) -> Dict[int, Set[Tuple[int, int]]]:
+def _pad_component_key(pad) -> Tuple[int, int, int]:
+    # Opposite-side SMD pads can share XY and net without being connected.
+    return pad.GetPosition().x, pad.GetPosition().y, pad.GetLayer()
+
+
+def _main_pad_components(board, conn) -> Dict[int, Set[Tuple[int, int, int]]]:
     """Largest connected pad component per net, with a geometric tie-break."""
     main_components = {}
     visited = set()
     for pad in board.GetPads():
         code = pad.GetNetCode()
-        pos = (pad.GetPosition().x, pad.GetPosition().y)
+        pos = _pad_component_key(pad)
         if code <= 0 or (code, pos) in visited:
             continue
         try:
-            members = {(item.GetPosition().x, item.GetPosition().y)
+            members = {_pad_component_key(item)
                        for item in conn.GetConnectedItems(pad) if item.GetClass() == "PAD"}
         except Exception:
             continue
@@ -1680,7 +1685,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if not refilled or net_pads.get(pad.GetNetCode(), 0) < 2:
             return False
         main = main_components.get(pad.GetNetCode())
-        return main is not None and (pad.GetPosition().x, pad.GetPosition().y) not in main
+        return main is not None and _pad_component_key(pad) not in main
 
     def _pour_ties(pad) -> bool:
         """Is this pad on a filled pour of its net (as the board's
@@ -1758,7 +1763,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         representatives = {}
         for pad in board.GetPads():
             code = pad.GetNetCode()
-            pos = (pad.GetPosition().x, pad.GetPosition().y)
+            pos = _pad_component_key(pad)
             if code not in representatives and pos in main_components.get(code, set()):
                 representatives[code] = pad
         for code, pad in representatives.items():

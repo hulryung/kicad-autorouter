@@ -17,14 +17,18 @@ Point = namedtuple("Point", "x y")
 
 
 class Pad:
-    def __init__(self, code, x, y=0):
+    def __init__(self, code, x, y=0, layer=0):
         self.code, self.pos = code, Point(x, y)
+        self.layer = layer
 
     def GetNetCode(self):
         return self.code
 
     def GetPosition(self):
         return self.pos
+
+    def GetLayer(self):
+        return self.layer
 
     def GetClass(self):
         return "PAD"
@@ -49,18 +53,26 @@ class PlaneComponentTests(unittest.TestCase):
         main = [Pad(1, x) for x in (0, 1, 2)]
         island = [Pad(1, x) for x in (10, 11)]
         board = Board([island, main])
-        self.assertEqual(_main_pad_components(board, board)[1], {(0, 0), (1, 0), (2, 0)})
+        self.assertEqual(_main_pad_components(board, board)[1], {(0, 0, 0), (1, 0, 0), (2, 0, 0)})
 
     def test_equal_islands_choose_the_same_component_regardless_of_pad_order(self):
         groups = [[Pad(1, x) for x in (10, 11)], [Pad(1, x) for x in (0, 1)]]
         for reverse in (False, True):
             board = Board(groups, reverse)
-            self.assertEqual(_main_pad_components(board, board)[1], {(0, 0), (1, 0)})
+            self.assertEqual(_main_pad_components(board, board)[1], {(0, 0, 0), (1, 0, 0)})
+
+    def test_opposite_side_pads_at_same_xy_are_distinct(self):
+        front = Pad(1, 0, layer=0)
+        back = Pad(1, 0, layer=31)
+        board = Board([[front, Pad(1, 1)], [back]])
+        main = _main_pad_components(board, board)[1]
+        self.assertIn((0, 0, 0), main)
+        self.assertNotIn((0, 0, 31), main)
 
     def test_connected_net_and_overlapping_positions_of_different_nets(self):
-        board = Board([[Pad(1, x) for x in (0, 1, 2)], [Pad(2, 0), Pad(2, 5)], [Pad(0, 99)]])
+        board = Board([[Pad(1, x) for x in (0, 1, 2)], [Pad(2, 0, 0), Pad(2, 5)], [Pad(0, 99)]])
         self.assertEqual(_main_pad_components(board, board),
-                         {1: {(0, 0), (1, 0), (2, 0)}, 2: {(0, 0), (5, 0)}})
+                         {1: {(0, 0, 0), (1, 0, 0), (2, 0, 0)}, 2: {(0, 0, 0), (5, 0, 0)}})
 
 
 if __name__ == "__main__":

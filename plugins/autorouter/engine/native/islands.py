@@ -13,13 +13,15 @@ def stitch_candidates(board, grid, nets, main):
     The router checks every layer's copper and drill clearance. This only
     establishes that both ends of the via touch filled copper of its net.
     """
+    from .extract import _pad_component_key
+
     conn = board.GetConnectivity()
     candidates = []
     for code, positions in sorted(main.items()):
         if code not in nets:
             continue
         pads = [pad for pad in board.GetPads() if pad.GetNetCode() == code
-                and (pad.GetPosition().x, pad.GetPosition().y) in positions]
+                and _pad_component_key(pad) in positions]
         if not pads:
             continue
         anchors = {}

@@ -29,7 +29,7 @@ def fixture(attached=False, overlap=True):
     rules = NetRules(100_000, 100_000, 400_000, 200_000)
     nets = {1: NetInfo(1, "GND", rules, route=False)}
     pad = SimpleNamespace(GetNetCode=lambda: 1, GetPosition=lambda: pcbnew.VECTOR2I(500_000, 500_000),
-                          GetClass=lambda: "PAD", GetLayerSet=lambda: SimpleNamespace(CuStack=lambda: [1]))
+                          GetClass=lambda: "PAD", GetLayer=lambda: 1, GetLayerSet=lambda: SimpleNamespace(CuStack=lambda: [1]))
     via = SimpleNamespace(GetPosition=lambda: pcbnew.VECTOR2I(3_000_000, 3_000_000),
                           GetClass=lambda: "PCB_VIA", GetLayerSet=lambda: SimpleNamespace(CuStack=lambda: [0, 1]))
     fills = {0: rectangle(2_000_000, 2_000_000, 4_000_000, 4_000_000),
@@ -39,7 +39,7 @@ def fixture(attached=False, overlap=True):
                            GetFilledPolysList=lambda lid: fills[lid])
     conn = SimpleNamespace(GetConnectedItems=lambda p: [pad, via] if attached else [pad])
     board = SimpleNamespace(GetConnectivity=lambda: conn, GetPads=lambda: [pad], Zones=lambda: [zone])
-    return grid, nets, stitch_candidates(board, grid, nets, {1: {(500_000, 500_000)}})
+    return grid, nets, stitch_candidates(board, grid, nets, {1: {(500_000, 500_000, 1)}})
 
 
 class IslandStitchTests(unittest.TestCase):
