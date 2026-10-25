@@ -100,27 +100,41 @@ def run(binary: str, prompt: str, workdir: Path, schema: Optional[dict] = None, 
     import threading
 
     def pump():
-        for line in proc.stdout:
-            output.append(line.rstrip("\n"))
-            if on_output:
-                on_output(line.rstrip("\n"))
+        with (workdir / "codex-exec.log").open("w", encoding="utf-8") as stream:
+            for line in proc.stdout:
+                output.append(line.rstrip("\n"))
+                stream.write(line)
+                stream.flush()
+                if on_output:
+                    on_output(line.rstrip("\n"))
 
     t = threading.Thread(target=pump, daemon=True)
     t.start()
-    while proc.poll() is None:
-        if cancelled and cancelled():
+    try:
+        while proc.poll() is None:
+            if cancelled and cancelled():
+                raise CodexError("Cancelled.")
+            if time.time() - started > timeout:
+                raise CodexError(f"Codex did not answer within {timeout:.0f}s.")
+            if poll:
+                poll()
+            time.sleep(0.2)
+        t.join(timeout=5)
+        reply = last.read_text(encoding="utf-8") if last.exists() else ""
+        if proc.returncode != 0 or not reply.strip():
+            tail = "\n".join(output[-15:])
+            raise CodexError(f"Codex exited with code {proc.returncode} without a successful final message.\n{tail}")
+        (workdir / "codex-reply.txt").write_text(reply, encoding="utf-8")
+        return extract_json(reply)
+    finally:
+        # Do not leave a CLI process behind after Cancel, a timeout or a UI error.
+        if proc.poll() is None:
             proc.terminate()
-            raise CodexError("Cancelled.")
-        if time.time() - started > timeout:
-            proc.terminate()
-            raise CodexError(f"Codex did not answer within {timeout:.0f}s.")
-        if poll:
-            poll()
-        time.sleep(0.2)
-    t.join(timeout=5)
-    reply = last.read_text(encoding="utf-8") if last.exists() else ""
-    if not reply.strip():
-        tail = "\n".join(output[-15:])
-        raise CodexError(f"Codex exited with code {proc.returncode} and no final message.\n{tail}")
-    (workdir / "codex-reply.txt").write_text(reply, encoding="utf-8")
-    return extract_json(reply)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+        t.join(timeout=3)
+        if not t.is_alive():
+            proc.stdout.close()

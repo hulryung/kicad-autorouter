@@ -64,7 +64,7 @@ def copy_project(source, destination):
 
 class Optimizer:
     def __init__(self, source, workdir, *, binary='', model='', attempts=8,
-                 patience=4, min_gain=1, options=None, log=print, cancelled=None, poll=None):
+                 patience=4, min_gain=1, options=None, log=print, cancelled=None, poll=None, load_board=None, base=None):
         self.source, self.workdir = Path(source).resolve(), Path(workdir).resolve()
         if self.workdir == self.source.parent or self.workdir in self.source.parents:
             raise ValueError('Use a separate output directory')
@@ -76,6 +76,7 @@ class Optimizer:
         self.history = []
         self.cancelled, self.poll = cancelled, poll
         self.best_state = None
+        self.load_board, self.base = load_board, base
 
     def _assess(self, board, folder, request, options):
         reviewer = review.Reviewer(board, options, None, None, folder, self.log,
@@ -127,9 +128,12 @@ class Optimizer:
         if (self.workdir / 'optimization.json').exists():
             raise FileExistsError('Output already contains a run; choose a new directory')
         self.workdir.mkdir(parents=True, exist_ok=True)
+        from .board_copy import protected_state
         self.source_hash = hashlib.sha256(self.source.read_bytes()).hexdigest()
         best_path = copy_project(self.source, self.workdir / 'initial' / self.source.name)
-        board = pcbnew.LoadBoard(str(best_path))
+        load_board = self.load_board or pcbnew.LoadBoard
+        board = load_board(str(best_path))
+        protected = protected_state(board)
         session.refill_zones(board)
         board.BuildConnectivity()
         best = self._assess(board, self.workdir / 'initial' / 'review', request, self.options)
@@ -166,10 +170,11 @@ class Optimizer:
                 if errors:
                     raise ValueError('; '.join(errors))
                 candidate_path = copy_project(best_path, folder / self.source.name)
-                candidate = pcbnew.LoadBoard(str(candidate_path))
+                candidate = load_board(str(candidate_path))
                 candidate_options = copy.deepcopy(self.options)
                 cfg = si.load(candidate)
-                base = si.apply_to_options(headless.native_options_from(candidate_options), cfg, si.plan(candidate, cfg))
+                base = (copy.deepcopy(self.base) if self.base is not None else
+                        si.apply_to_options(headless.native_options_from(candidate_options), cfg, si.plan(candidate, cfg)))
                 route = headless.make_route_fn(candidate, base=base, log=self.log, cancelled=self.cancelled)
                 applier = actions.BoardActions(candidate, candidate_options, route,
                                               lambda: session.refill_zones(candidate), self.log)
@@ -181,6 +186,8 @@ class Optimizer:
                     raise RuntimeError('Cancelled before candidate validation')
                 if any(not r['ok'] for r in results):
                     raise RuntimeError('one or more actions failed')
+                if protected_state(candidate) != protected:
+                    raise RuntimeError('Candidate changed placement, pad nets, zones or locked copper')
                 session.refill_zones(candidate)
                 candidate.BuildConnectivity()
                 if not pcbnew.SaveBoard(str(candidate_path), candidate):
@@ -208,7 +215,7 @@ class Optimizer:
                 break
             if number < self.attempts:
                 # Re-propose from the accepted board, with rejection evidence.
-                board = pcbnew.LoadBoard(str(best_path))
+                board = load_board(str(best_path))
                 proposal = self._assess(board, folder / 'next-proposal', request, self.options)
         assert hashlib.sha256(self.source.read_bytes()).hexdigest() == self.source_hash, 'Input PCB changed'
         return self._write(best_path, best, status)

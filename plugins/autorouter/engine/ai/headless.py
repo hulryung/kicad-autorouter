@@ -29,6 +29,18 @@ def native_options_from(spec_options: dict, base: Optional[NativeOptions] = None
     return o
 
 
+def assistant_options(base):
+    """Expose the dialog's starting search options in the model's vocabulary."""
+    names = ('pitch_mm', 'via_cost', 'skip_nets', 'track_mode', 'neck_down', 'fanout_vias',
+             'stitch_vias', 'stitch_pitch_mm', 'diff_pairs', 'allow_vias', 'routable_layers',
+             'horizontal_layers', 'power_pours', 'rip_up', 'max_expansions', 'plane_nets',
+             'route_order', 'tune_lengths', 'protect_groups')
+    result = {name: copy.deepcopy(getattr(base, name)) for name in names}
+    result.update(move_existing=base.shove, time_limit_min=base.time_limit_s / 60,
+                  track_width_mm=base.track_width / 1e6, remove_existing=False)
+    return result
+
+
 def apply_hints(o: NativeOptions, spec: dict, layer_names: Optional[list] = None) -> NativeOptions:
     """Per-route hints from the assistant: allowed layers, a fixed width, a
     via cost, and rectangles to keep clear (mm)."""

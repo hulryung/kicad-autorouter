@@ -227,14 +227,15 @@ an action schema and executed by the plugin.
 | --- | --- |
 | **Ask the assistant** | Apply a natural-language routing or editing request over a bounded number of rounds. |
 | **Review current routing** | Ask the model for note-only feedback on the current routing. |
-| **Score and improve** | Score connectivity, DRC, geometry and other criteria, inspect full-board/close-up images, apply edits and re-score until a stopping condition or the round limit. |
+| **Score and improve** | Test routing experiments on isolated board copies, re-score with all copper-layer images and mandatory DRC, and apply only the best verified result at the end. |
 
 Actions include changing options; routing nets, selections or sheets with
 layer/width/avoid-area hints; adding or removing tracks and vias; moving
 footprints or nearby copper; resizing copper; inspecting a region; and
 refilling zones. The assistant can also leave notes or ask a question and stop.
 
-With verification enabled, edits are measured before and after. Supported
+In **Ask the assistant** mode, with verification enabled, edits are measured
+before and after. Supported
 add/move/resize edits that increase the DRC violation count are rolled back
 unless the action explicitly sets `force`. This is not a transaction-wide
 rollback guarantee: route and removal actions are not in that rollback set.
@@ -246,10 +247,18 @@ kept locally in the job folder. The built-in router works without this feature.
 
 ## Codex routing search (source checkout)
 
-The source checkout includes a guarded search loop that asks Codex for a routing
-experiment, applies it to a separate project copy, re-runs KiCad DRC, and asks
-Codex to score the resulting board. Rejected attempts never replace the best
-accepted board. This command is separate from the 0.3.0 dialog reviewer.
+The source checkout's **Score and improve** button and CLI use the same guarded
+search loop: Codex proposes a routing experiment, the plugin applies it to a
+project copy, re-runs KiCad DRC, and asks Codex to score the resulting board.
+Rejected attempts never replace the best accepted board. This replaces the
+earlier in-place reviewer shipped in release 0.3.0.
+
+In the dialog, **Rounds** limits the number of experiments. The open board's
+copper stays unchanged during the search; accepted tracks, vias, arcs and tuning
+groups are applied together at the end. Placement, pad assignments and locked
+copper are protected. **Cancel** leaves the open board's copper unchanged and
+keeps the saved candidates in the data folder. DRC is mandatory for this mode,
+including when the optional DRC checkbox for the ordinary assistant is off.
 
 ```bash
 /path/to/kicad-python scripts/route-with-codex.py /path/to/board.kicad_pcb \
@@ -270,7 +279,7 @@ are routing acceptance criteria, not proof of signal-integrity compliance.
 
 The loop retains the best PCB and its project/rule/intent sidecars, with the
 path and all attempt decisions in `optimization.json`. Each attempt retains its
-context, images and Codex replies for inspection. The input PCB is unchanged.
+context, images, CLI logs and Codex replies for inspection. The input PCB is unchanged.
 Use a new output directory for each run. A run stops at its attempt limit,
 patience limit, a request for missing information, or no further executable
 proposal; inspect its status rather than interpreting every stop as completion.
@@ -368,7 +377,7 @@ plugins/autorouter/
       problem.py          shared routing data models
     si.py, stackup.py      design intent and impedance estimates
     fab.py                fabrication-rule presets
-    ai/                   context, CLI bridge, actions, rendering and review
+    ai/                   context, CLI bridge, actions, rendering, review and guarded optimization
     options.py            routing options
     session.py, paths.py   board helpers, jobs and data locations
 ```
