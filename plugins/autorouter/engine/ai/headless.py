@@ -1,5 +1,6 @@
 """A route function for the assistant that works without the dialog: runs
 the built-in router on a loaded board (headless tests, scripts)."""
+import copy
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -9,7 +10,7 @@ from ..native.problem import NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_
 
 def native_options_from(spec_options: dict, base: Optional[NativeOptions] = None) -> NativeOptions:
     """Turn the assistant's option dict (mm, plain names) into NativeOptions."""
-    o = base or NativeOptions()
+    o = copy.deepcopy(base) if base is not None else NativeOptions()
     m = {"pitch_mm": "pitch_mm", "via_cost": "via_cost", "neck_down": "neck_down", "fanout_vias": "fanout_vias",
          "stitch_vias": "stitch_vias", "stitch_pitch_mm": "stitch_pitch_mm", "diff_pairs": "diff_pairs",
          "allow_vias": "allow_vias", "routable_layers": "routable_layers", "horizontal_layers": "horizontal_layers",
@@ -58,7 +59,8 @@ def apply_scope(o: NativeOptions, spec: dict, selection: Optional[dict] = None) 
 
 
 def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional[Callable] = None,
-                  log: Optional[Callable[[str], None]] = None, selection: Optional[dict] = None):
+                  log: Optional[Callable[[str], None]] = None, selection: Optional[dict] = None,
+                  cancelled: Optional[Callable[[], bool]] = None):
     """route_fn(spec) -> outcome dict, routing straight onto the given board."""
     def route_fn(spec: dict) -> dict:
         o = apply_scope(native_options_from(spec.get("options", {}), base), spec, selection)
@@ -69,7 +71,7 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
         from ..native import pipeline
         try:
             job = pipeline.run_job(board, o, on_path=on_path, apply_paths=on_path is None,
-                                   escalate=spec.get("options", {}).get("escalate", True))
+                                   escalate=spec.get("options", {}).get("escalate", True), cancelled=cancelled)
         except Exception as e:
             return {"error": f"could not read the board: {e}"}
         from .. import session

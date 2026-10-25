@@ -244,6 +244,37 @@ performs the returned board edits. Using AI supplies board context and images
 to the configured AI service. Prompts, replies, images and review results are
 kept locally in the job folder. The built-in router works without this feature.
 
+## Codex routing search (source checkout)
+
+The source checkout includes a guarded search loop that asks Codex for a routing
+experiment, applies it to a separate project copy, re-runs KiCad DRC, and asks
+Codex to score the resulting board. Rejected attempts never replace the best
+accepted board. This command is separate from the 0.3.0 dialog reviewer.
+
+```bash
+/path/to/kicad-python scripts/route-with-codex.py /path/to/board.kicad_pcb \
+  --out /path/to/new-output-folder --attempts 8 --patience 4 \
+  --request "Finish connectivity, then reduce detours and unnecessary vias."
+```
+
+Use KiCad's Python, an authenticated Codex CLI and `kicad-cli`. `--model` can
+select the CLI model; omitting it uses the CLI configuration. `--time-limit`
+sets minutes per native routing action, not a deadline for the complete search.
+
+Each candidate must increase the reviewer score by `--min-gain` (default 1),
+introduce no new DRC errors, and leave no additional unconnected items. It must
+also improve connectivity, remove an existing DRC error, or reduce measured
+copper cost (track length in mm plus 2 per via) without increasing non-octilinear
+straight segments. A higher model score alone is insufficient. These checks
+are routing acceptance criteria, not proof of signal-integrity compliance.
+
+The loop retains the best PCB and its project/rule/intent sidecars, with the
+path and all attempt decisions in `optimization.json`. Each attempt retains its
+context, images and Codex replies for inspection. The input PCB is unchanged.
+Use a new output directory for each run. A run stops at its attempt limit,
+patience limit, a request for missing information, or no further executable
+proposal; inspect its status rather than interpreting every stop as completion.
+
 ## Validation and examples
 
 For the **0.3.0 four-layer CM5 regression**, three deterministic search budgets
