@@ -108,20 +108,32 @@ class Reviewer:
 
     def __init__(self, board, options: dict, route_fn, refill_fn, workdir: Path, log, binary: str = "",
                  model: str = "", max_rounds: int = 3, poll=None, cancelled=None, verify: bool = True,
-                 min_gain: int = 2):
+                 min_gain: int = 2, previous_issues=None):
         self.board, self.options, self.route_fn, self.refill_fn = board, dict(options), route_fn, refill_fn
         self.workdir, self.log = workdir, log
         self.binary = binary or codex.find_codex()
         self.model, self.max_rounds, self.poll, self.cancelled = model, max_rounds, poll, cancelled
         self.verify, self.min_gain = verify, min_gain
         self.rounds: List[dict] = []
+        self.previous_issues = list(previous_issues or [])
 
     def _images(self, round_no: int, issues: List[dict]) -> List[Path]:
         images = []
-        full = render.render_board(self.board, self.workdir, name=f"review-round{round_no}.png", size=1800)
+        full = None
+        for index, layer in enumerate(self.board.GetEnabledLayers().CuStack()):
+            name = self.board.GetLayerName(layer)
+            silk = "B.SilkS" if name == "B.Cu" else "F.SilkS"
+            filename = (f"review-round{round_no}.png" if index == 0 else
+                        f"review-round{round_no}-{name.replace('.', '_')}.png")
+            view = render.render_board(self.board, self.workdir, name=filename,
+                                       layers=f"{name},{silk},Edge.Cuts", size=1800)
+            if view:
+                images.append(view)
+                if index == 0:
+                    full = view
         if full:
-            images.append(full)
-            for i, issue in enumerate([x for x in issues if x.get("x_mm") is not None][:4]):
+            for i, issue in enumerate([x for x in issues if x.get("x_mm") is not None
+                                      and x.get("y_mm") is not None][:4]):
                 crop = render.crop_at(self.board, full, issue["x_mm"], issue["y_mm"], 8.0,
                                       self.workdir / f"review-round{round_no}-closeup{i + 1}.png")
                 if crop:
@@ -139,7 +151,7 @@ class Reviewer:
         if not self.binary:
             raise codex.CodexError("The codex CLI was not found.")
         self.workdir.mkdir(parents=True, exist_ok=True)
-        last_issues: List[dict] = []
+        last_issues: List[dict] = list(self.previous_issues)
         best = None
         for round_no in range(1, self.max_rounds + 1):
             if self.cancelled and self.cancelled():
@@ -156,8 +168,8 @@ class Reviewer:
                                            "drc": ctx.get("drc"), "options": self.options}, indent=1)
                 context_text += ("\nFull board context is in "
                                  f"review-context-round{round_no}.json; read it for net/pad details.")
-            labels = [f"{p.name}" + (f" (close-up around issue {i})" if i else " (full board, top copper)")
-                      for i, p in enumerate(images)]
+            labels = [f"{p.name} ({'close-up' if 'closeup' in p.stem else 'copper layer view; not mirrored'})"
+                      for p in images]
             prompt = "\n".join([REVIEW_PROMPT, "\n## Images attached\n", "\n".join(labels),
                                 "\n## What the user asked for\n", request or "Score the routing and improve it.",
                                 "\n## Earlier rounds\n", json.dumps(self.rounds, indent=1, default=str)[:12000],

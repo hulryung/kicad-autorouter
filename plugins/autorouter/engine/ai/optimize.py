@@ -80,7 +80,8 @@ class Optimizer:
     def _assess(self, board, folder, request, options):
         reviewer = review.Reviewer(board, options, None, None, folder, self.log,
                                    binary=self.binary, model=self.model, max_rounds=1,
-                                   cancelled=self.cancelled, poll=self.poll)
+                                   cancelled=self.cancelled, poll=self.poll,
+                                   previous_issues=self.best_state[1].get("issues", []) if self.best_state else [])
         instructions = (
             '\nPropose one coherent, executable routing experiment. Do not move footprints. '
             'Ground nets without zones still need traces. Never invent a board outline. '
