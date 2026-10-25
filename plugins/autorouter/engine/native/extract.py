@@ -1475,7 +1475,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 cells = []
                 for k in range(len(pts) - 1):
                     cells += grid.segment_cells(layer, *pts[k], *pts[k + 1], pitch // 2)
-                if all(own[idx] in (0, code) for idx in cells):
+                # nor across another pin's outlet: a QFN pin's link to its
+                # resistor that cuts diagonally past the next pin's exit walls
+                # that pin in for good (the run is claimed as copper); the
+                # search then routes it, and the outlet lane's cost sends it
+                # straight out of the row first, as a designer draws it
+                if all(own[idx] in (0, code) and (lane_guard[idx] <= 0 or lane_guard[idx] == code) for idx in cells):
                     run = pts
                     break
             if run is None:
