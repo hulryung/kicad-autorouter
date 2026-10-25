@@ -68,7 +68,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
-          history=None, via_lead: int = 0, lead_from=None, layer_extra=None) -> Optional[List[int]]:
+          history=None, via_lead: int = 0, lead_from=None, layer_extra=None, via_goals_only: bool = False) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -80,6 +80,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     `lead_from` (a cell, or a pair of cells for the stretch between them; the
     first source when not given): a coupled pair needs a straight lead to
     flare out to its vias.
+    `via_goals_only` permits a layer change only directly into a goal cell:
+    a pad-to-plane fanout writes no tracks on the destination layer.
     `layer_extra` (per layer, per straight cell) is the surcharge for running
     on that layer (another net's plane); a diagonal pays it scaled like its step.
     """
@@ -321,7 +323,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
             # the layers a via here could go on to, before the costly barrel check
             targets = [nidx for nidx in (other * plane + rest for other in range(nlayers)
                                          if other != layer and routable[other])
-                       if nidx not in closed and passable(nidx) and gc + via_step < g.get(nidx, 1 << 60)]
+                       if nidx not in closed and (not via_goals_only or nidx in goals)
+                       and passable(nidx) and gc + via_step < g.get(nidx, 1 << 60)]
             if not targets or near_end(idx, cx, cy) or not via_ok(cx, cy):
                 continue
             for nidx in targets:

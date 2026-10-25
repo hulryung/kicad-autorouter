@@ -2550,7 +2550,7 @@ class Router:
         cells = astar.route(grid, owners, p.via_block, code, starts or {cell}, goals, anchors, self.horizontal,
                             max(5, self.opts.via_cost // 3), True, via_reach, self.opts.max_expansions // 4,
                             self.opts.turn_cost, cancelled, routable=self.routable,
-                            via_guard=p.via_guard, lane_guard=p.lane_guard)
+                            via_guard=p.via_guard, lane_guard=p.lane_guard, via_goals_only=True)
         if not cells or len(cells) < 2:
             return None
         segments, vias = _simplify(grid, cells)
