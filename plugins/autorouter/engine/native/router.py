@@ -658,7 +658,15 @@ class Router:
         b_cells, b_anchors = self._component(conn.net, conn.b)
         if not a_cells or not b_cells:
             return None
-        if len(a_cells) > len(b_cells):
+        # The search leaves from the fine-pitch end (a CM5 row pin, a QFN pin)
+        # when only one end is one: the hard part of the route, out of the
+        # crowded row, then costs a little flood around that pin, and the
+        # rest heads straight for the open end. From the open end, every
+        # detour the crowded end needs widens the flood along the whole run
+        # (a failing search wandered the board to its cap). Otherwise the
+        # smaller end leaves.
+        tight_a, tight_b = self._tight(conn.net, conn.a), self._tight(conn.net, conn.b)
+        if (tight_b if tight_a != tight_b else len(a_cells) > len(b_cells)):
             a_cells, b_cells, b_anchors = b_cells, a_cells, a_anchors
         routable = self.routable
         allow_vias = self.opts.allow_vias
@@ -692,6 +700,13 @@ class Router:
                            self.horizontal, via_cost, allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
                            history=self.history, **kwargs)
+
+    def _tight(self, code: int, i: int) -> bool:
+        """Does the component holding initial cluster i hold a fine-pitch
+        (necked) pad escape?"""
+        net = self.p.nets[code]
+        root = self._find(code, i)
+        return any(cl.tight for j, cl in enumerate(net.clusters) if self._find(code, j) == root)
 
     def _flat_route(self, conn: Connection, cells: List[int], cap: int, cancelled) -> List[int]:
         """A route that changes layers is tried again on one outer layer
