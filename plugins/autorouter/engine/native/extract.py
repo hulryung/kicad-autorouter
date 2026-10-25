@@ -981,11 +981,15 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Temporary keepouts for this run (the assistant's "avoid" areas).
     for x0, y0, x1, y1 in options.keepouts:
         for layer in layers:
-            cells = grid.cells_where(layer.index, (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
-                                     lambda x, y: True)
-            for own in owners.values():
+            bounds = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+            for (width, _), own in owners.items():
+                radius = width // 2 + safety
+                cells = grid.cells_where(layer.index,
+                                         (bounds[0] - radius, bounds[1] - radius,
+                                          bounds[2] + radius, bounds[3] + radius),
+                                         lambda x, y: True)
                 grid.mark(own, cells, BLOCKED)
-            for idx in cells:
+            for idx in grid.cells_where(layer.index, bounds, lambda x, y: True):
                 via_block[idx % grid.plane] = 1
 
     # Rule areas (keepouts).
