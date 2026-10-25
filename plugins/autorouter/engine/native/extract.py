@@ -698,6 +698,28 @@ def _assign_groups(board, nets: Dict[int, NetInfo], options: NativeOptions, plan
         n.group, n.rank = group, rank[group]
 
 
+def _main_pad_components(board, conn) -> Dict[int, Set[Tuple[int, int]]]:
+    """Largest connected pad component per net, with a geometric tie-break."""
+    main_components = {}
+    visited = set()
+    for pad in board.GetPads():
+        code = pad.GetNetCode()
+        pos = (pad.GetPosition().x, pad.GetPosition().y)
+        if code <= 0 or (code, pos) in visited:
+            continue
+        try:
+            members = {(item.GetPosition().x, item.GetPosition().y)
+                       for item in conn.GetConnectedItems(pad) if item.GetClass() == "PAD"}
+        except Exception:
+            continue
+        members.add(pos)
+        visited.update((code, xy) for xy in members)
+        previous = main_components.get(code, set())
+        if not previous or (-len(members), sorted(members)) < (-len(previous), sorted(previous)):
+            main_components[code] = members
+    return main_components
+
+
 def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     t0 = time.time()
     say = status or (lambda text: None)
@@ -1616,17 +1638,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     conn = board.GetConnectivity()
     net_pads: Dict[int, int] = Counter(p.GetNetCode() for p in board.GetPads()) if refilled else {}
 
+    main_components = _main_pad_components(board, conn) if refilled else {}
+
     def _stranded(pad, items) -> bool:
-        """With fresh fills: does the pad's copper (its stub, its via, the
-        pour island the via lands in) reach no other pad of the net? Tracks
-        on the plane layer can cut a pad's via off in an island of its own
-        after the via was dropped; the pad then needs a via that reaches the
-        plane proper."""
+        """A pour island may carry several pads and still miss the main net.
+
+        Compare to the largest connected pad component, not merely to one
+        neighbouring pad. All pads on a smaller island need a real plane
+        tie; pads on the main component must not acquire duplicate vias.
+        """
         if not refilled or net_pads.get(pad.GetNetCode(), 0) < 2:
             return False
-        me = (pad.GetPosition().x, pad.GetPosition().y)
-        return not any(item.GetClass() == "PAD" and (item.GetPosition().x, item.GetPosition().y) != me
-                       for item in items)
+        main = main_components.get(pad.GetNetCode())
+        return main is not None and (pad.GetPosition().x, pad.GetPosition().y) not in main
 
     def _pour_ties(pad) -> bool:
         """Is this pad on a filled pour of its net (as the board's
