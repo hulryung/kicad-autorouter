@@ -681,6 +681,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         raise RuntimeError("No routable copper layer is enabled.")
     layer_of: Dict[int, int] = {l.kicad_id: l.index for l in layers}
 
+    refilled = False                       # the fills (and connectivity) show this job's tracks
     if options.pours_only and options.fanout_vias and options.fanout_only_unconnected:
         # The pour pass decides which pads still need a via from the pours
         # as the tracks now on the board leave them: refilled, so an island
@@ -692,6 +693,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if zones:
                 pcbnew.ZONE_FILLER(board).Fill(board.Zones())
                 board.BuildConnectivity()
+                refilled = True
         except Exception:
             pass
 
@@ -1552,6 +1554,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     escape_stats["body_cells"] = body_cells
 
     conn = board.GetConnectivity()
+    net_pads: Dict[int, int] = Counter(p.GetNetCode() for p in board.GetPads()) if refilled else {}
+
+    def _stranded(pad, items) -> bool:
+        """With fresh fills: does the pad's copper (its stub, its via, the
+        pour island the via lands in) reach no other pad of the net? Tracks
+        on the plane layer can cut a pad's via off in an island of its own
+        after the via was dropped; the pad then needs a via that reaches the
+        plane proper."""
+        if not refilled or net_pads.get(pad.GetNetCode(), 0) < 2:
+            return False
+        me = (pad.GetPosition().x, pad.GetPosition().y)
+        return not any(item.GetClass() == "PAD" and (item.GetPosition().x, item.GetPosition().y) != me
+                       for item in items)
 
     def _pour_ties(pad) -> bool:
         """Is this pad on a filled pour of its net (as the board's
@@ -1564,7 +1579,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             items = list(conn.GetConnectedItems(pad))
         except Exception:
             return False
-        if not any(item.GetClass() == "ZONE" for item in items):
+        if not any(item.GetClass() == "ZONE" for item in items) or _stranded(pad, items):
             return False
         for item in items:
             if item.GetClass() == "PCB_VIA":
@@ -1580,6 +1595,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     fanout: List[Tuple[int, int]] = []           # (net code, exit cell)
     fanout_alt: Dict[int, List[int]] = {}        # exit cell -> the same pad's other exits
     fanout_goals: Dict[int, Set[int]] = {}       # exit cell -> cells on the net's pour layers within 3 mm
+    fanout_strict: Set[int] = set()              # exit cells whose via must land on those goals
+    stranded_pads = 0
 
     def _via_near(code: int, x: int, y: int, within: int) -> bool:
         """Is a via of this net already within the distance (nm)? Then a
@@ -1590,12 +1607,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 return True
         return False
 
-    def _has_via(pad) -> bool:
-        """Is the pad already joined to a via of its net by board copper?"""
+    def _via_tie(pad) -> int:
+        """0: no via of the net on the pad's copper; 1: a via that reaches
+        the rest of the net; 2: a via stranded with the pad alone (an island
+        of the pour), which does not count."""
         try:
-            return any(item.GetClass() == "PCB_VIA" for item in conn.GetConnectedItems(pad))
+            items = list(conn.GetConnectedItems(pad))
         except Exception:
-            return False
+            return 0
+        if not any(item.GetClass() == "PCB_VIA" for item in items):
+            return 0
+        return 2 if _stranded(pad, items) else 1
 
     scope_refs_set: Set[str] = set(options.scope_refs)
     scope_net_set: Set[str] = set(options.scope_nets)
@@ -1615,23 +1637,50 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         mine = [i for i, e in net.endpoints.items() if e[2] == pos.x and e[3] == pos.y]
         return [i for i in mine if (net.endpoints[i][0], net.endpoints[i][1]) != (pos.x, pos.y)] or mine
 
-    def _plane_goals(code: int, pos, pl) -> Set[int]:
+    def _main_fill(z, lid):
+        """The zone's fill on one layer and the islands of it that are the
+        plane proper (at least a quarter of its largest piece), or None."""
+        try:
+            polys = z.GetFilledPolysList(lid)
+            areas = [abs(polys.Outline(i).Area()) for i in range(polys.OutlineCount())]
+        except Exception:
+            return None
+        if not areas:
+            return None
+        big = max(areas)
+        return polys, [i for i, a in enumerate(areas) if a * 4 >= big]
+
+    def _plane_goals(code: int, pos, pl, filled: bool = False) -> Set[int]:
         """Cells on the net's pour (another layer) within 3 mm of the pad:
-        where a search may end with a via when no spot next to the pad fits one."""
+        where a search may end with a via when no spot next to the pad fits one.
+        With `filled`, only cells well inside the fill's main pieces (not an
+        island the tracks cut off)."""
         goals: Set[int] = set()
         r = int(3_000_000 / pitch)
         cx0, cy0 = grid.cell_x(pos.x), grid.cell_y(pos.y)
+        inset = 350_000
         for z in plane_zones.get(code, ()):
-            zl = {layer_of[l] for l in z.GetLayerSet().CuStack() if l in layer_of} - set(pl)
+            zl = [(layer_of[l], l) for l in z.GetLayerSet().CuStack() if l in layer_of and layer_of[l] not in pl]
             if not zl:
                 continue
+            fills = {li: _main_fill(z, lid) for li, lid in zl} if filled else {}
             for cy in range(max(0, cy0 - r), min(grid.h - 1, cy0 + r) + 1):
                 for cx in range(max(0, cx0 - r), min(grid.w - 1, cx0 + r) + 1):
                     if (cx - cx0) ** 2 + (cy - cy0) ** 2 > r * r:
                         continue
-                    if _zone_covers(z, grid.nm_x(cx), grid.nm_y(cy), -600_000):
-                        for li in zl:
-                            goals.add(grid.index(li, cx, cy))
+                    x, y = grid.nm_x(cx), grid.nm_y(cy)
+                    if not _zone_covers(z, x, y, -600_000):
+                        continue
+                    for li, _ in zl:
+                        if filled:
+                            if fills[li] is None:
+                                continue
+                            polys, keep = fills[li]
+                            if not any(all(polys.Contains(pcbnew.VECTOR2I(x + dx, y + dy), i)
+                                           for dx, dy in ((0, 0), (inset, 0), (-inset, 0), (0, inset), (0, -inset)))
+                                       for i in keep):
+                                continue
+                        goals.add(grid.index(li, cx, cy))
         return goals
 
     if job_items and not options.fanout_vias and zone_layers:
@@ -1658,7 +1707,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 ref = pcbnew.Cast_to_FOOTPRINT(fp).GetReference() if fp else ""
                 if ref not in scope_refs_set and nets[code].name not in scope_net_set:
                     continue                      # pours follow the routing scope
-            if _has_via(pad) if not options.shove else _via_near(code, pos.x, pos.y, 1_500_000 + nets[code].rules.via_diameter):
+            tie = _via_tie(pad) if not options.shove else int(_via_near(code, pos.x, pos.y, 1_500_000 + nets[code].rules.via_diameter))
+            if tie == 1:
                 continue                          # a via already fans this pad out
             if nets[code].route and not (options.power_pours and len(zone_layers[code]) >= 1):
                 continue                          # a routed net without a usable pour
@@ -1672,7 +1722,16 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if options.fanout_only_unconnected and _pour_ties(pad):
                 continue                          # the pour on its own layer already connects it, through-hole pins or vias tie that pour
             exits = _pad_exits(code, pos)
-            if exits:                             # no stub: the via is sought around the pad itself
+            if exits and tie == 2:
+                # its via sits in a pour island of its own: a second via,
+                # searched for, that lands on the plane's main fill
+                goals = _plane_goals(code, pos, pl, filled=True)
+                if goals:
+                    fanout.append((code, exits[0]))
+                    fanout_goals[exits[0]] = goals
+                    fanout_strict.add(exits[0])
+                    stranded_pads += 1
+            elif exits:                           # no stub: the via is sought around the pad itself
                 fanout.append((code, exits[0]))
                 if len(exits) > 1:
                     fanout_alt[exits[0]] = exits[1:]
@@ -1870,7 +1929,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
-                             fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, stitch=stitch, existing=existing, via_guard=via_guard,
+                             fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_strict=fanout_strict,
+                             stitch=stitch, existing=existing, via_guard=via_guard,
                              lane_guard=lane_guard, board_vias=existing_vias)
     problem.escape_sides = problem_escape_sides
     problem.stats = {"groups": dict(Counter(n.group for n in nets.values() if n.route)),
@@ -1878,7 +1938,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                      "extract_seconds": time.time() - t0, "cells": grid.size,
                      "nets": len(nets), "connections": len(connections), "movable_paths": len(existing),
                      "all_connections": all_connections, "owner_maps": len(owners),
-                     "fanout_vias": len(fanout), "plane_nets": len(plane_codes), "stitch_spots": sum(len(v) for v in stitch.values()),
+                     "fanout_vias": len(fanout), "stranded_pads": stranded_pads, "plane_nets": len(plane_codes), "stitch_spots": sum(len(v) for v in stitch.values()),
                      "escapes": dict(escape_stats)}
     return problem
 

@@ -198,6 +198,9 @@ class RoutingProblem:
     fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
     fanout_alt: Dict[int, List[int]] = field(default_factory=dict)   # exit cell -> the pad's other exits to try
     fanout_goals: Dict[int, Set[int]] = field(default_factory=dict)  # exit cell -> cells on the net's pour, within reach
+    # exit cells of pads whose via is stranded in a pour island: the new via
+    # must land on the goals (the filled plane), not next to the pad
+    fanout_strict: Set[int] = field(default_factory=set)
     stitch: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> candidate (cx, cy) via spots
     board_vias: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> via centres (nm) on the board already
     escape_sides: Dict[Tuple[str, str], Tuple[int, int]] = field(default_factory=dict)   # see NativeOptions

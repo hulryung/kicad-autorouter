@@ -2851,7 +2851,11 @@ class Router:
                     break
                 if i % 10 == 0:
                     report(f"{i}/{len(wanted)}", "fanout vias ")
-                for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
+                # a pad whose via is stranded in a pour island: a spot next to
+                # the pad would land in that island again, only the search
+                # to the plane's main fill helps
+                strict = cell in self.p.fanout_strict
+                for exit_cell in ([] if strict else [cell] + self.p.fanout_alt.get(cell, [])):
                     rp = self._fanout_via(code, exit_cell)
                     if _DEBUG and (code, cell) in self.restore:
                         print(f"[restore-via] net {self.p.nets[code].name} exit {self.grid.unpack(exit_cell)} -> {rp.vias if rp else None}", flush=True)
