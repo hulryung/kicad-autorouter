@@ -6,6 +6,7 @@ KiCad's DRC on the result. Needs KiCad's Python and kicad-cli; skips otherwise.
                                            [--sheet /Power/] [--refs R1,U2] [--track current|<nm>] [--via current]
 """
 import functools
+from collections import Counter
 import json
 import os
 import shutil
@@ -71,6 +72,7 @@ def doubled_back(segs):
 
 
 def main(argv):
+    fixture_gate = not argv[1:]  # the standard regression must fully route its fixture
     args = argv[1:]
     board_file = HERE / "fixtures" / "obd2-adapter.kicad_pcb"
     skip, pitch, out = [], 0.1, None
@@ -175,6 +177,11 @@ def main(argv):
     print(f"re-extract on the routed board: {again.stats['connections']} connections left in scope")
     print(f"board: {items} items added, unconnected {before} -> {after}, saved {target}")
 
+    if fixture_gate:
+        assert after == 0, f"default fixture has {after} unconnected items"
+        assert not job.failed, f"default fixture still has failed nets: {job.failed}"
+        assert again.stats['connections'] == 0, "incremental extraction found unfinished connections"
+
     cli = kicad_cli()
     summary = {"routed": result.routed, "failed": len(result.failed), "items": items,
                "unconnected_before": before, "unconnected_after": after,
@@ -183,6 +190,7 @@ def main(argv):
         report = out / "drc.json"
         subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--exit-code-violations",
                         "-o", str(report), str(target)], capture_output=True, text=True)
+        assert report.exists(), "KiCad DRC did not produce a report"
         if report.exists():
             drc = json.loads(report.read_text())
             kinds = {}
@@ -193,6 +201,19 @@ def main(argv):
             summary["drc_unconnected"] = len(drc.get("unconnected_items", []))
             print(f"drc: {summary['drc_violations']} violations {kinds}, "
                   f"{summary['drc_unconnected']} unconnected items")
+    if fixture_gate and cli:
+        assert summary['drc_unconnected'] == 0, "saved board failed KiCad connectivity check"
+        before_report = out / "drc-before.json"
+        subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error",
+                        "-o", str(before_report), str(board_file)], capture_output=True, text=True)
+        assert before_report.exists(), "KiCad DRC did not produce the baseline report"
+        original = json.loads(before_report.read_text())
+        def signature(v):
+            return (v['type'], v.get('severity'),
+                    tuple(sorted(i['description'] for i in v.get('items', []))))
+        added = (Counter(signature(v) for v in drc.get('violations', []))
+                 - Counter(signature(v) for v in original.get('violations', [])))
+        assert not added, f"routing introduced DRC errors: {added}"
     (out / "summary.json").write_text(json.dumps(summary, indent=2))
     assert job.routed + job.fanout + job.stitched > 0, "nothing was routed"
     assert after < before, "the board is not better connected than before"
