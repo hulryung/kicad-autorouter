@@ -253,10 +253,10 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             out.fanout += result3.fanout
             out.stitched = result3.stitched
             out.seconds += result3.seconds
-    # A long repair of a stranded power pad can split a surface ground
-    # pour. Refill once more, then stitch only those new copper islands.
+    # Signal rerouting as well as power repairs can split surface copper.
+    # Refill once more and reconnect isolated islands; extraction returns
+    # immediately when there are no stitch candidates.
     if (pours_later and problem3 is not None and options.stitch_vias
-            and result3.fanout and problem3.stats.get("stranded_pads", 0)
             and not (cancelled and cancelled())):
         islands = copy.deepcopy(options)
         islands.pours_only = True
