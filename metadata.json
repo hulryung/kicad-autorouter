@@ -13,7 +13,7 @@
   },
   "license": "MIT",
   "resources": {
-    "homepage": "https://github.com/hulryung/kicad-autorouter",
+    "homepage": "https://github.com/hulryung/kicad-autorouter-pcm",
     "repository": "https://github.com/hulryung/kicad-autorouter"
   },
   "tags": [
@@ -22,7 +22,7 @@
   ],
   "versions": [
     {
-      "version": "0.2.0",
+      "version": "0.3.0",
       "status": "testing",
       "kicad_version": "9.0",
       "kicad_version_max": "10.99"

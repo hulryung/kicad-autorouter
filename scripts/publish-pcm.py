@@ -53,18 +53,18 @@ def main(argv):
     out = REPO / "release"
     out.mkdir(exist_ok=True)
     version = build.version()
-    zip_path = out / f"kicad-autorouter-{version}.zip"
-    install_size = 0
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path, name in build.files():
-            zf.write(path, name)
-            install_size += path.stat().st_size
+    package = build.build_package(out)
+    zip_path = Path(package["zip"])
+    install_size = package["install_size"]
 
     # 2. the distribution checkout
     if not (dist_dir / ".git").exists():
         dist_dir.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["gh", "repo", "clone", dist_repo, str(dist_dir)], check=True)
-    subprocess.run(["git", "-C", str(dist_dir), "pull", "-q", "--ff-only"], check=False)
+    dirty = subprocess.check_output(["git", "-C", str(dist_dir), "status", "--porcelain"], text=True)
+    if dirty.strip():
+        raise RuntimeError(f"Distribution checkout has uncommitted changes: {dist_dir}")
+    subprocess.run(["git", "-C", str(dist_dir), "pull", "-q", "--ff-only"], check=True)
     packages_dir = dist_dir / "packages"
     packages_dir.mkdir(exist_ok=True)
     shutil.copy(zip_path, packages_dir / zip_path.name)
@@ -130,9 +130,11 @@ This repository only carries the installable packages and their metadata. Curren
     status = subprocess.run(["git", "-C", str(dist_dir), "status", "--porcelain"], capture_output=True, text=True).stdout
     if status.strip():
         subprocess.run(["git", "-C", str(dist_dir), "commit", "-q", "-m", f"Autorouter {version}"], check=True)
-        if push:
-            subprocess.run(["git", "-C", str(dist_dir), "push", "-q", "origin", "HEAD:main"], check=True)
-    print(f"published {zip_path.name} ({zip_path.stat().st_size:,} bytes) to {dist_repo}")
+    if push:
+        subprocess.run(["git", "-C", str(dist_dir), "push", "-q", "origin", "HEAD:main"], check=True)
+        print(f"Published {zip_path.name} ({zip_path.stat().st_size:,} bytes) to {dist_repo}")
+    else:
+        print(f"Prepared {zip_path.name} ({zip_path.stat().st_size:,} bytes) locally; not pushed to {dist_repo}")
     print(f"PCM repository URL: {raw}/repository.json")
     return 0
 

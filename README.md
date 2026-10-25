@@ -18,6 +18,21 @@ button opens a dialog with the router and an AI assistant:
 
 ![The Routing tab](docs/images/tab-routing.png)
 
+## 0.3.0 routing improvements
+
+- Check signal vias against their actual barrel-sized clearance maps, avoiding
+  a second grid-radius expansion that could close legal escape sites.
+- Reconnect isolated copper after signal routing and power-plane repairs.
+- Include the copper footprint when applying temporary keepouts, and preserve
+  fine-pitch pin via sites during rip-up searches.
+
+On the four-layer regression board, the three deterministic search budgets
+went from **20 / 15 / 13 unconnected items to 0 / 0 / 0**, with no added KiCad
+physical or rule errors and identical final geometry. Four pre-existing hole
+clearance errors remained. This is a routing regression result, not fabrication
+or signal-integrity approval. The offline and GUI suites passed on KiCad 10.0.7
+on macOS; live AI service tests were not part of this release check.
+
 ## Requirements
 
 - KiCad 9.0 or 10.0 (the SWIG action-plugin API). KiCad 11 drops that API; an
@@ -90,8 +105,18 @@ when a newer version is out and updates it for you.
 5. 새 버전이 나오면 관리자에 **업데이트** 버튼이 표시됩니다.
 
 The source repository is private; the PCM repository above holds only the
-installable packages and their metadata. Maintainers publish a new version with
-`python3 scripts/publish-pcm.py` after bumping `__version__` and `metadata.json`.
+installable packages and their metadata. After updating `__version__` and
+`metadata.json`, maintainers can prepare a release locally:
+
+```bash
+python3 scripts/build-package.py
+python3 scripts/publish-pcm.py --no-push  # build and commit the local PCM checkout
+```
+
+Review the package and the distribution commit before running
+`python3 scripts/publish-pcm.py` to publish. `--no-push` does not make the new
+version available in other users' PCM catalogues. The ZIP can already be shared
+and installed directly; its build summary includes the SHA-256 checksum.
 
 ### From a zip
 
