@@ -848,6 +848,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if skipped and not ((options.fanout_vias or options.repair_islands_only) and code in zone_layers) and code not in job_codes and not stray_plane:
             continue
         nets[code] = NetInfo(code, net.GetNetname(), net_rules(board, net, options, hints), route=not skipped)
+    island_stitch = None
+    if options.repair_islands_only:
+        from .islands import stitch_candidates
+        main = _main_pad_components(board, board.GetConnectivity()) if refilled else {}
+        island_stitch = (stitch_candidates(board, grid, nets, main)
+                         if refilled and options.scope == SCOPE_BOARD else [])
+        if not island_stitch:
+            say("No isolated copper needs a stitch.")
+            # No path will be searched or emitted, so there is no need to
+            # rasterize all of the board's existing tracks into owner maps.
+            return RoutingProblem(grid, layers, {}, bytearray(grid.plane), {}, [], options,
+                                  stats={"stranded_pads": 0, "island_stitch": 0})
+
     # Controlled impedance: the width each layer needs for the net's target.
     # The search clears for the widest of them; each segment is drawn at its
     # own layer's width. It overrides every other width choice (the finer
@@ -2099,8 +2112,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         problem.connections = []
         problem.fanout = []
         problem.stitch = {}
-        if refilled and options.scope == SCOPE_BOARD:
-            problem.island_stitch = stitch_candidates(board, grid, nets, main_components)
+        problem.island_stitch = island_stitch or []
     problem.escape_sides = problem_escape_sides
     problem.stats = {"groups": dict(Counter(n.group for n in nets.values() if n.route)),
                      "net_groups": {n.name: n.group for n in nets.values() if n.route},
