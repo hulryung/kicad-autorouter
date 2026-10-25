@@ -597,6 +597,32 @@ def ground_plane_layers(board) -> List[int]:
                 break
     return out
 
+
+def mark_plane_layers(board, layers: List[LayerInfo]) -> None:
+    """Set plane_net on the inner layers one net's pour covers most of
+    (a power plane, say +3.3V on In2): the search charges other nets for
+    running there."""
+    try:
+        box = board.GetBoardEdgesBoundingBox()
+        area = float(box.GetWidth()) * float(box.GetHeight())
+    except Exception:
+        return
+    if area <= 0:
+        return
+    zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
+    for layer in layers[1:-1]:
+        cover: Dict[int, float] = {}
+        for zone in zones:
+            if not zone.IsOnLayer(layer.kicad_id):
+                continue
+            try:
+                cover[zone.GetNetCode()] = cover.get(zone.GetNetCode(), 0.0) + float(zone.Outline().Area()) / area
+            except Exception:
+                continue
+        best = max(cover.items(), key=lambda kv: (kv[1], -kv[0]), default=None)
+        if best and best[1] >= 0.7:
+            layer.plane_net = best[0]
+
 def _zone_covers(zone, x: int, y: int, margin: int = 0) -> bool:
     """Is the point inside (or within margin of) the zone's outline?"""
     try:
@@ -679,6 +705,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     layers = copper_layers(board, options)
     if not layers:
         raise RuntimeError("No routable copper layer is enabled.")
+    mark_plane_layers(board, layers)
     layer_of: Dict[int, int] = {l.kicad_id: l.index for l in layers}
 
     refilled = False                       # the fills (and connectivity) show this job's tracks

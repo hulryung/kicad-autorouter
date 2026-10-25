@@ -68,7 +68,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
-          history=None, via_lead: int = 0, lead_from=None) -> Optional[List[int]]:
+          history=None, via_lead: int = 0, lead_from=None, layer_extra=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -80,6 +80,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     `lead_from` (a cell, or a pair of cells for the stretch between them; the
     first source when not given): a coupled pair needs a straight lead to
     flare out to its vias.
+    `layer_extra` (per layer, per straight cell) is the surcharge for running
+    on that layer (another net's plane); a diagonal pays it scaled like its step.
     """
     w, plane, nlayers = grid.w, grid.plane, grid.layers
     sources = list(sources)
@@ -87,6 +89,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     soft = routed is not None and rippable is not None
     routable = list(routable) if routable is not None else [True] * nlayers
     anchors = list(anchors) or [grid.unpack(next(iter(goals)))[1:]]
+    layer_extra = list(layer_extra) if layer_extra and any(layer_extra) else [0] * nlayers
+    diag_extra = [(e * DIAGONAL + STRAIGHT // 2) // STRAIGHT for e in layer_extra]
 
     def h(idx: int) -> int:
         rest = idx % plane
@@ -288,6 +292,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
         cy, cx = divmod(rest, w)
         base = layer * plane
         horiz = horizontal[layer]
+        lx, dx_extra = layer_extra[layer], diag_extra[layer]
         if not routable[layer]:
             continue                       # a pad exit on an excluded layer: nowhere to go
         for m, (dx, dy, diag) in enumerate(MOVES):
@@ -301,10 +306,10 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
                 # no corner cutting: both orthogonal neighbours must be free
                 if not (passable(base + cy * w + nx) and passable(base + ny * w + cx)):
                     continue
-                step = DIAGONAL
+                step = DIAGONAL + dx_extra
             else:
                 along = (dy == 0) if horiz else (dx == 0)
-                step = STRAIGHT if along else AGAINST_STRAIGHT
+                step = (STRAIGHT if along else AGAINST_STRAIGHT) + lx
             if move != -1 and move != m:
                 step += turn_cost
             ng = gc + step + extra(nidx)

@@ -446,6 +446,7 @@ class Router:
         self.opts = problem.options
         self.horizontal = [l.horizontal for l in problem.layers]
         self.routable = [l.routable for l in problem.layers]
+        self.plane_nets = [l.plane_net for l in problem.layers]
         # fixed copper as read from the board; the live maps start as copies
         self.fixed = {key: array("i", own) for key, own in problem.owners.items()}
         self.fixed_via_block = bytearray(problem.via_block)
@@ -699,7 +700,13 @@ class Router:
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
-                           history=self.history, **kwargs)
+                           history=self.history, layer_extra=self._layer_extra(net.code), **kwargs)
+
+    def _layer_extra(self, code: int) -> List[int]:
+        """Per layer, what a cell of track costs the net beyond its step:
+        an inner plane of another net is the last resort."""
+        cost = self.opts.plane_layer_cost
+        return [cost if pn and pn != code else 0 for pn in self.plane_nets]
 
     def _tight(self, code: int, i: int) -> bool:
         """Does the component holding initial cluster i hold a fine-pitch
@@ -1682,7 +1689,7 @@ class Router:
                                 self.horizontal, pair_via_cost, allow, via_reach, pair_cap, self.opts.turn_cost, cancelled,
                                 also_ok=cb.net, source_costs=s_costs, routable=self.routable, via_guard=p.via_guard,
                                 lane_guard=guard, via_lead=int(math.ceil(lead_nm / grid.pitch)),
-                                lead_from=lead_from)
+                                lead_from=lead_from, layer_extra=self._layer_extra(ca.net))
             if not cells or len(cells) < 2:
                 if _DEBUG:
                     print(f"[pair-path] {na.name} vias {allow}: no path after {astar.LAST['expansions']} expansions"

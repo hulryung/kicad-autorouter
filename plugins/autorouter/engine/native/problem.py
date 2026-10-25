@@ -12,6 +12,7 @@ class LayerInfo:
     name: str
     horizontal: bool        # preferred direction
     routable: bool = True   # False: copper is modelled (vias must clear it) but no track may go there
+    plane_net: int = 0      # an inner layer poured over most of the board by this net: other nets pay to run there
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,8 @@ class NativeOptions:
     via_diameter: int = 0
     via_drill: int = 0
     via_cost: int = 25                 # in straight cells
+    plane_layer_cost: int = 8          # per straight cell (10) extra on another net's inner plane layer: a track
+                                       # there cuts up the pour, so a designer uses the plane only as a last resort
     allow_vias: bool = True
     flat_first: bool = True            # a route with vias is tried on one outer layer alone; the flat route wins when nearly direct
     max_expansions: int = 400_000
