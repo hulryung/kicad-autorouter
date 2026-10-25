@@ -31,6 +31,36 @@ def _poly_rings(poly) -> List[Tuple[List[Tuple[int, int]], List[List[Tuple[int, 
     return out
 
 
+def _filled_goal_cells(grid, poly, keep, inset):
+    """Rasterize the five-point landing margin once per connected fill.
+
+    Shift the sampling grid instead of walking a detailed filled polygon
+    separately for every point and every pad of an isolated component.
+    """
+    goals = set()
+    for index in keep:
+        # Scanline filling includes some hole boundary cells that KiCad's
+        # containment test excludes. A 10 nm erosion keeps those out while
+        # leaving the physical landing margin effectively unchanged.
+        interior = pcbnew.SHAPE_POLY_SET(poly.Outline(index))
+        for hole in range(poly.HoleCount(index)):
+            interior.AddHole(poly.Hole(index, hole), 0)
+        interior.Inflate(-10, pcbnew.CORNER_STRATEGY_ALLOW_ACUTE_CORNERS, 1)
+        for outline, holes in _poly_rings(interior):
+            inside = None
+            for dx, dy in ((0, 0), (inset, 0), (-inset, 0), (0, inset), (0, -inset)):
+                sample = Grid(grid.ox + dx, grid.oy + dy, grid.pitch, grid.w, grid.h, grid.layers)
+                cells = set(sample.polygon_cells(0, outline, holes))
+                if inside is None:
+                    inside = cells
+                else:
+                    inside.intersection_update(cells)
+                if not inside:
+                    break
+            goals.update(inside or ())
+    return goals
+
+
 def _box(shape) -> Tuple[int, int, int, int]:
     bb = shape.BBox()
     return bb.GetX(), bb.GetY(), bb.GetX() + bb.GetWidth(), bb.GetY() + bb.GetHeight()
@@ -1765,6 +1795,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         big = max(areas)
         return polys, [i for i, a in enumerate(areas) if a * 4 >= big]
 
+    filled_goal_cells = {}
+
     def _plane_goals(code: int, pos, pl, filled: bool = False, reach_nm: int = 3_000_000) -> Set[int]:
         """Cells on the net's pour within reach_nm of the pad:
         where a search may end with a via when no spot next to the pad fits one.
@@ -1795,12 +1827,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                         continue
                     for li, _ in zl:
                         if filled:
-                            if fills[li] is None:
-                                continue
-                            polys, keep = fills[li]
-                            if not any(all(polys.Contains(pcbnew.VECTOR2I(x + dx, y + dy), i)
-                                           for dx, dy in ((0, 0), (inset, 0), (-inset, 0), (0, inset), (0, -inset)))
-                                       for i in keep):
+                            key = (id(z), li)
+                            if key not in filled_goal_cells:
+                                polys, keep = fills[li]
+                                filled_goal_cells[key] = _filled_goal_cells(grid, polys, keep, inset)
+                            if cy * grid.w + cx not in filled_goal_cells[key]:
                                 continue
                         goals.add(grid.index(li, cx, cy))
         return goals
