@@ -1249,6 +1249,33 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 # a two-row connector: the channel between the rows is the
                 # other row's way out too; the pins leave outward when they can
                 escapes.reverse()
+        if escapes and len(escapes) >= 2 and net.route and fp is not None:
+            # An exit must not land on another pad of the net on the same
+            # part: a flow-through ESD array has each line on two pins facing
+            # each other across the body, and a pin that followed its pair
+            # partner's side pointed straight into its twin. The search then
+            # met the twin's copper at the exit cell and counted the two pins
+            # joined with no track between them (TRD0 left open at U202). Such
+            # a pin leaves the other way; the twins are joined straight
+            # across, pad to pad, as a designer runs the line through the part.
+            twins = [q for q in fp.Pads() if q.GetNetCode() == code
+                     and (q.GetPosition().x, q.GetPosition().y) != (pos.x, pos.y)]
+
+            def _lands_on_twin(e):
+                stub = pcbnew.SHAPE_SEGMENT(pcbnew.VECTOR2I(pos.x, pos.y), pcbnew.VECTOR2I(e[0], e[1]), stub_w)
+                for q in twins:
+                    for li in pl:
+                        kid = layers[li].kicad_id
+                        if q.IsOnLayer(kid) and _collides(q.GetEffectiveShape(kid), stub, 0):
+                            return True
+                return False
+            if twins:
+                free = [e for e in escapes if not _lands_on_twin(e)]
+                if free and len(free) < len(escapes):
+                    if _DEBUG:
+                        print(f"[escape] {net.name} {ref}.{pad.GetNumber()} exit would land on a twin pad: "
+                              f"leaves by ({free[0][0] / 1e6:.2f},{free[0][1] / 1e6:.2f})", flush=True)
+                    escapes = free
         if escapes:
             problem_escape_sides[pad_key] = escapes[0]
             if net.partner and ref and (ref, code) not in pair_sides:
