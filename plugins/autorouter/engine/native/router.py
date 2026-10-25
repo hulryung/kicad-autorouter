@@ -700,7 +700,8 @@ class Router:
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
-                           history=self.history, layer_extra=self._layer_extra(net.code), **kwargs)
+                           history=self.history, layer_extra=self._layer_extra(net.code),
+                           site_guard=self.p.site_guard, **kwargs)
 
     def _layer_extra(self, code: int) -> List[int]:
         """Per layer, what a cell of track costs the net beyond its step:

@@ -68,7 +68,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
-          history=None, via_lead: int = 0, lead_from=None, layer_extra=None, via_goals_only: bool = False, goal_bounds=None) -> Optional[List[int]]:
+          history=None, via_lead: int = 0, lead_from=None, layer_extra=None,
+          via_goals_only: bool = False, goal_bounds=None, site_guard=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -84,6 +85,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     a pad-to-plane fanout writes no tracks on the destination layer.
     `layer_extra` (per layer, per straight cell) is the surcharge for running
     on that layer (another net's plane); a diagonal pays it scaled like its step.
+    `site_guard` (cell -> net whose pin via site it is) keeps other nets off
+    those cells, even in a rip-up search.
     """
     w, plane, nlayers = grid.w, grid.plane, grid.layers
     sources = list(sources)
@@ -117,6 +120,11 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
         # near a fine-pitch pin the track is narrower: judge those cells by
         # the neck-width owner map
         o = neck_owners[idx] if (necked and idx in neck_region) else owners[idx]
+        if site_guard is not None and o != net:
+            # another pin's via site, kept for that pin alone
+            s = site_guard[idx]
+            if s > 0 and s != net and s != also_ok and idx not in goals:
+                return False
         if o == 0 or o == net or o == also_ok or idx in goals:
             return True
         if soft:

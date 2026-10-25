@@ -1174,6 +1174,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # (per layer cell: the net it is kept for), so a neighbour's track hugging
     # the pad row cannot wall a pin in. Clearance zones may still overlap it.
     lane_guard = array("i", [0]) * grid.size
+    # A fine-pitch IC pin's via site: the spot right at its exit where a
+    # designer drops the pin's via (a USB hub's PWR_EN / nOC pins go down
+    # there and run on an inner layer). The outlet lane above is a soft
+    # charge, so a neighbour's track with no cheaper way past (a power stub
+    # bending across the next pin's exit, a signal squeezed between the pin
+    # row and a capacitor) took that spot and walled the pin in for good.
+    # No other net's centreline may come within a via's reach of the exit
+    # cell on the pad's layer; where two pins' sites meet, the cell stays
+    # soft (the outlet lanes' charge).
+    site_guard = array("i", [0]) * grid.size
+    pin_sites: List[Tuple[int, int, int, int, int]] = []    # (net, layer, exit x, exit y, radius)
     max_width = max([n.rules.width for n in nets.values()] or [0])
     positions_by_net: Dict[int, List[Tuple[int, int]]] = {}
     refs_by_net: Dict[int, List[str]] = {}
@@ -1546,6 +1557,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                         for idx in grid.segment_cells(li, gx, gy, fx, fy, r):
                             cur = lane_guard[idx]
                             lane_guard[idx] = code if cur in (0, code) else -1
+                    if body_pin and not coarse_by_fp.get(ref) and dense_info is None and len(pl) == 1:
+                        site_r = net.rules.via_diameter // 2 + max(net.rules.clearance, ds.m_MinClearance) \
+                            + stub_w // 2 + safety
+                        pin_sites.append((code, pl[0], gx, gy, site_r))
             target_cells = exit_cells
             centre = (chosen[0][2], chosen[0][3])
         else:
@@ -1559,6 +1574,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     net.endpoints[grid.index(li, *centre)] = (pos.x, pos.y, pos.x, pos.y, stub_w)
         pad_cells.setdefault(code, []).append((pad, target_cells, centre, fp.GetReference() if fp else "",
                                                stub_w < net.rules.width))
+
+    for code, li, gx, gy, site_r in pin_sites:
+        for idx in grid.disc_cells(li, gx, gy, site_r):
+            cur = site_guard[idx]
+            site_guard[idx] = code if cur in (0, code) else -1
+    escape_stats["via_sites"] = len(pin_sites)
 
     # Outlet guards: the first 0.6 mm past each exit must stay free of other
     # nets' via barrels (and their holes), or a neighbour's via dropped right
@@ -2106,9 +2127,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
                              fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_strict=fanout_strict,
                              stitch=stitch, existing=existing, via_guard=via_guard,
-                             lane_guard=lane_guard, board_vias=existing_vias)
+                             lane_guard=lane_guard, site_guard=site_guard, board_vias=existing_vias)
     if options.repair_islands_only:
-        from .islands import stitch_candidates
         problem.connections = []
         problem.fanout = []
         problem.stitch = {}

@@ -215,3 +215,4 @@ class RoutingProblem:
     existing: List[ExistingPath] = field(default_factory=list)   # shove mode: movable board copper
     via_guard: Optional["array"] = None           # per 2-D cell: net whose pad outlet a via here would block (-1: several)
     lane_guard: Optional["array"] = None          # per cell: net whose pad outlet this is; other centrelines keep out
+    site_guard: Optional["array"] = None          # per cell: net whose pin via site this is (no other centreline; -1: several)
