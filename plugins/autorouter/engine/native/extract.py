@@ -1463,6 +1463,25 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         for idx in grid.segment_cells(0, gx, gy, fx, fy, reach):
             cur = via_guard[idx]
             via_guard[idx] = code if cur in (0, code) else -1
+    # ...but a pin keeps the line of its own outlet as a via site where its
+    # guard overlaps a neighbour's: at a 0.5 mm QFN pitch the guards of
+    # adjacent pins cover each other's outlets end to end, and a cell marked
+    # nobody's (-1) refused the pin its own via too (a USB hub's PWR_EN / nOC
+    # pins, which a designer takes down through staggered vias right past the
+    # pad, were left open). A via centred on its own outlet line leaves the
+    # neighbour's straight outlet its clearance; where two lines' cells meet,
+    # the cell stays nobody's.
+    core: Dict[int, int] = {}
+    for code, px, py, gx, gy, stub_w, outlet_len in outlets:
+        dx, dy = gx - px, gy - py
+        norm = math.hypot(dx, dy) or 1.0
+        fx, fy = int(round(gx + dx / norm * outlet_len)), int(round(gy + dy / norm * outlet_len))
+        for idx in grid.segment_cells(0, gx, gy, fx, fy, pitch // 2):
+            cur = core.get(idx, 0)
+            core[idx] = code if cur in (0, code) else -1
+    for idx, code in core.items():
+        if code > 0 and via_guard[idx] == -1:
+            via_guard[idx] = code
 
     # Short links: two exits of a net on different parts, on one layer and
     # within LINK_NM of each other, whose octilinear run between them is
