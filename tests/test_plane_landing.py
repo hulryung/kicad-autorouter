@@ -10,7 +10,7 @@ from autorouter.engine.native.problem import (Cluster, LayerInfo, NativeOptions,
                                               NetInfo, NetRules, RoutingProblem)
 
 
-def fanout(blocked=False):
+def fanout(blocked=False, strict=True):
     grid = Grid(0, 0, 100_000, 50, 40, 2)
     rules = NetRules(100_000, 100_000, 500_000, 300_000)
     problem = RoutingProblem(
@@ -22,6 +22,8 @@ def fanout(blocked=False):
     net.clusters = [Cluster(cells={source}, anchors=[(10, 20)])]
     problem.nets[1] = net
     problem.fanout_goals[source] = {goal}
+    if strict:
+        problem.fanout_strict.add(source)
     if blocked:
         for y in range(grid.h):
             problem.owners[rules.key][grid.index(0, 22, y)] = BLOCKED
@@ -47,6 +49,9 @@ class PlaneLandingTests(unittest.TestCase):
                     seen.add(node)
                     todo.append(node)
         self.assertIn(goal, seen, "the emitted copper must reach the actual plane goal")
+
+    def test_ordinary_fanout_keeps_direct_plane_landing(self):
+        self.assertIsNone(fanout(blocked=True, strict=False))
 
     def test_emitted_copper_reaches_plane(self):
         self.assert_connected(fanout())
