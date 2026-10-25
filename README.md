@@ -104,8 +104,8 @@ when a newer version is out and updates it for you.
    보이지 않으면 **도구 → 외부 플러그인 → 플러그인 새로 고침** 또는 KiCad 재시작.
 5. 새 버전이 나오면 관리자에 **업데이트** 버튼이 표시됩니다.
 
-The source repository is private; the PCM repository above holds only the
-installable packages and their metadata. After updating `__version__` and
+The source is available under the MIT license. The PCM repository above holds
+the installable packages and their metadata. After updating `__version__` and
 `metadata.json`, maintainers can prepare a release locally:
 
 ```bash
@@ -120,8 +120,31 @@ and installed directly; its build summary includes the SHA-256 checksum.
 
 ### From a zip
 
-`python3 scripts/build-package.py` writes `release/kicad-autorouter-<version>.zip`;
-**Plugin and Content Manager → Install from File…** installs it.
+Download `kicad-autorouter-0.3.0.zip` from the
+[GitHub release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.3.0),
+then use **Plugin and Content Manager → Install from File…**. This is the same
+ZIP offered by the PCM repository. To build it yourself, run
+`python3 scripts/build-package.py`.
+
+### Using it with LCSC Manager
+
+[LCSC Manager](https://github.com/hulryung/kicad-lcsc-manager) imports parts;
+Autorouter routes the placed board. Install both plugins in KiCad **9 or 10**
+by adding both PCM repository URLs:
+
+- Autorouter: `https://raw.githubusercontent.com/hulryung/kicad-autorouter-pcm/main/repository.json`
+- LCSC Manager: `https://raw.githubusercontent.com/hulryung/kicad-lcsc-manager/main/repository.json`
+
+Restart KiCad after installation. Use LCSC Manager to import symbols,
+footprints and 3D models, connect the schematic, update the PCB from the
+schematic, and place the footprints. Set the board outline, layers and design
+rules, then run Autorouter in the PCB editor and review KiCad's DRC results.
+The plugins operate through the KiCad project; no direct plugin-to-plugin
+connection is required. Autorouter 0.3.0 does not support KiCad 11.
+
+한국어: KiCad 9/10의 PCM에 위 두 저장소를 추가해 각각 설치하세요.
+LCSC Manager로 부품을 가져온 뒤 회로 연결과 PCB 배치를 완료하고,
+Autorouter로 배선한 다음 DRC 결과를 검토하면 됩니다.
 
 ### For development
 
