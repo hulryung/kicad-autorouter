@@ -1328,6 +1328,20 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     print(f"[escape] {net.name} {fp.GetReference() if fp else '?'}.{pad.GetNumber()} exit cell "
                           f"({gx / 1e6:.2f},{gy / 1e6:.2f}) taken by {[nets[h].name if h in nets else h for h in holder]}", flush=True)
                 continue
+            # nor may it be another pad's exit cell of the same net: two
+            # resistors end to end (R511.2 facing R514.1, 0.6 mm apart) both
+            # snapped onto the cell between them, the two pads' clusters
+            # shared it, the search joined them with a zero-length path, and
+            # the cell keeps one pad's stub only: the other pad was left
+            # unconnected with no open connection reported (RADAR_TX_OUT).
+            # This pin leaves the other way, or from its centre, and the
+            # search draws the short link between the two.
+            if any(grid.index(li, ecx, ecy) in net.endpoints
+                   and net.endpoints[grid.index(li, ecx, ecy)][2:4] != (pos.x, pos.y) for li in pl):
+                if _DEBUG:
+                    print(f"[escape] {net.name} {fp.GetReference() if fp else '?'}.{pad.GetNumber()} exit cell "
+                          f"({gx / 1e6:.2f},{gy / 1e6:.2f}) is another pad's exit of the net", flush=True)
+                continue
             # The stub is checked exactly, as the DRC would (the escape lane may
             # legally be narrower than what the owner maps assume). A single
             # straight piece from the pad centre to the grid cell is preferred,
