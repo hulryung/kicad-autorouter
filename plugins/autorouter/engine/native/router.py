@@ -2531,10 +2531,12 @@ class Router:
 
     def _fanout_search(self, code: int, cell: int, cancelled, starts: Optional[Set[int]] = None,
                        goals: Optional[Set[int]] = None) -> Optional[RoutedPath]:
-        """When no via fits next to the pad: a short search from the exit
-        (or from every cell of a tie the pad is on) that may drop a via
-        anywhere within 3 mm where the net's pour lies under it (the via lands
-        on the pour layer, the refilled pour joins it)."""
+        """Find a complete copper path from the pad exit to a plane goal.
+
+        Ordinary fanout goals are local. A proven isolated component may
+        need a longer bridge; every searched segment is emitted, including
+        any track needed between the via and the connected fill.
+        """
         p, grid = self.p, self.grid
         goals = goals or p.fanout_goals.get(cell)
         if not goals:
@@ -2545,18 +2547,23 @@ class Router:
         goals = {g for g in goals if owners[g] in (0, code)}
         if not goals:
             return None
+        xy = [grid.unpack(g)[1:] for g in goals]
+        bounds = (min(x for x, y in xy), min(y for x, y in xy),
+                  max(x for x, y in xy), max(y for x, y in xy))
         anchors = [(cx, cy)]
         via_reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / grid.pitch))) + 1
         cells = astar.route(grid, owners, p.via_block, code, starts or {cell}, goals, anchors, self.horizontal,
                             max(5, self.opts.via_cost // 3), True, via_reach, self.opts.max_expansions // 4,
                             self.opts.turn_cost, cancelled, routable=self.routable,
-                            via_guard=p.via_guard, lane_guard=p.lane_guard, via_goals_only=True)
+                            via_guard=p.via_guard, lane_guard=p.lane_guard, goal_bounds=bounds)
         if not cells or len(cells) < 2:
             return None
         segments, vias = _simplify(grid, cells)
         if not vias:
             return None                             # it never left the pad's layer
-        segments = [s for s in segments if s[0] == layer]   # the pour takes over after the via
+        # Keep every segment up to the verified plane goal. A via may land
+        # in a local island and need a track on another layer to reach the
+        # main fill; omitting that track falsely claims the pad is tied.
         segments = _with_pad_entries(grid, net, cells, segments, int(self.opts.neck_length_mm * 1_000_000))
         if self.opts.cut_acute:
             own_cells = set(cells)
@@ -2852,10 +2859,18 @@ class Router:
         fanned: Set[int] = set()                       # primary exit cells of pads that got a via
         # the pads a rip-up took the via from come after the fanout list
         wanted = list(self.p.fanout) + [rc for rc in self.restore if rc not in self.p.fanout]
+        strict_groups = {}
+        for code, net in self.p.nets.items():
+            for cluster in net.clusters:
+                members = cluster.cells & self.p.fanout_strict
+                for cell in members:
+                    strict_groups[(code, cell)] = members
         if not halted():
             for i, (code, cell) in enumerate(wanted):
                 if halted():
                     break
+                if cell in fanned:
+                    continue
                 if i % 10 == 0:
                     report(f"{i}/{len(wanted)}", "fanout vias ")
                 # a pad whose via is stranded in a pour island: a spot next to
@@ -2879,6 +2894,7 @@ class Router:
                     if rp is not None:
                         fanout_paths.append(rp)
                         fanned.add(cell)
+                        fanned.update(strict_groups.get((code, cell), ()))
                         if on_path:
                             on_path(rp)
 
@@ -2954,6 +2970,18 @@ class Router:
                         mine.extend(rp.vias)
                         if on_path:
                             on_path(rp)
+
+        # A filled island needs a connection even with no nearby signal via.
+        for code, spots in self.p.island_stitch:
+            if halted():
+                break
+            for cx, cy in spots:
+                rp = self._stitch_via(code, cx, cy)
+                if rp is not None:
+                    stitch_paths.append(rp)
+                    if on_path:
+                        on_path(rp)
+                    break
 
         # 6. pour-net pads that got no via: a short track to the nearest
         # copper of their net (a via, another pad, a stub) instead

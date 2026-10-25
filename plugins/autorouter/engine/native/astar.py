@@ -68,7 +68,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
-          history=None, via_lead: int = 0, lead_from=None, layer_extra=None, via_goals_only: bool = False) -> Optional[List[int]]:
+          history=None, via_lead: int = 0, lead_from=None, layer_extra=None, via_goals_only: bool = False, goal_bounds=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -97,6 +97,11 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     def h(idx: int) -> int:
         rest = idx % plane
         cy, cx = divmod(rest, w)
+        if goal_bounds is not None:
+            x0, y0, x1, y1 = goal_bounds
+            dx = max(x0 - cx, 0, cx - x1)
+            dy = max(y0 - cy, 0, cy - y1)
+            return STRAIGHT * max(dx, dy) + (DIAGONAL - STRAIGHT) * min(dx, dy)
         best = None
         for ax, ay in anchors:
             dx = ax - cx if ax >= cx else cx - ax

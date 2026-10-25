@@ -29,18 +29,32 @@ def fanout(blocked=False):
 
 
 class PlaneLandingTests(unittest.TestCase):
-    def test_via_lands_in_plane(self):
-        path = fanout()
+    def assert_connected(self, path):
         self.assertIsNotNone(path)
-        self.assertEqual(path.vias, [(3_500_000, 2_000_000)])
-        self.assertTrue(path.segments)
-        self.assertTrue(all(segment[0] == 0 for segment in path.segments))
+        graph = {}
+        def link(a, b):
+            graph.setdefault(a, set()).add(b)
+            graph.setdefault(b, set()).add(a)
+        for layer, x1, y1, x2, y2, *width in path.segments:
+            link((layer, x1, y1), (layer, x2, y2))
+        for x, y in path.vias:
+            link((0, x, y), (1, x, y))
+        source, goal = (0, 1_000_000, 2_000_000), (1, 3_500_000, 2_000_000)
+        seen, todo = {source}, [source]
+        while todo:
+            for node in graph.get(todo.pop(), ()):
+                if node not in seen:
+                    seen.add(node)
+                    todo.append(node)
+        self.assertIn(goal, seen, "the emitted copper must reach the actual plane goal")
 
-    def test_does_not_claim_connection_through_an_omitted_track(self):
-        # A source-layer wall forces the old search to change layers before
-        # the target, then walk along the plane layer. That walk is never
-        # emitted, so the resulting via cannot connect to the target fill.
-        self.assertIsNone(fanout(blocked=True))
+    def test_emitted_copper_reaches_plane(self):
+        self.assert_connected(fanout())
+
+    def test_other_layer_track_is_kept_when_source_layer_is_blocked(self):
+        path = fanout(blocked=True)
+        self.assert_connected(path)
+        self.assertTrue(any(segment[0] == 1 for segment in path.segments))
 
 
 if __name__ == "__main__":

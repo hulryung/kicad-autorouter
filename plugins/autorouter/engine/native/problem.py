@@ -127,6 +127,7 @@ class NativeOptions:
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     plane_nets: bool = True         # nets whose pour covers their pads are planes: vias to the pour, no tracks
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
+    repair_islands_only: bool = False  # final refill: join isolated copper, no other routing
     pours_only: bool = False          # the pipeline's last pass: fanout/stitch, no signal routing
     shove: bool = False             # existing (unlocked) tracks of routable nets may be ripped up and rerouted
     # UUIDs of tracks and vias an earlier pass of the same job dropped (the plane
@@ -205,6 +206,7 @@ class RoutingProblem:
     # must land on the goals (the filled plane), not next to the pad
     fanout_strict: Set[int] = field(default_factory=set)
     stitch: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> candidate (cx, cy) via spots
+    island_stitch: List[Tuple[int, List[Tuple[int, int]]]] = field(default_factory=list)
     board_vias: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> via centres (nm) on the board already
     escape_sides: Dict[Tuple[str, str], Tuple[int, int]] = field(default_factory=dict)   # see NativeOptions
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum

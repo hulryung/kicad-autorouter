@@ -236,6 +236,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             if result2.timed_out and limit and remaining() <= 1.0:
                 out.timed_out = True
 
+    problem3 = None
     if pours_later and not (cancelled and cancelled()):
         if status:
             status("Pour nets: fanout vias, ties and stitching in the remaining room...")
@@ -252,6 +253,24 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             out.fanout += result3.fanout
             out.stitched = result3.stitched
             out.seconds += result3.seconds
+    # A long repair of a stranded power pad can split a surface ground
+    # pour. Refill once more, then stitch only those new copper islands.
+    if (pours_later and problem3 is not None and options.stitch_vias
+            and result3.fanout and problem3.stats.get("stranded_pads", 0)
+            and not (cancelled and cancelled())):
+        islands = copy.deepcopy(options)
+        islands.pours_only = True
+        islands.repair_islands_only = True
+        islands.fanout_vias = False
+        islands.stitch_vias = False
+        islands.movable_uuids = []
+        islands.time_limit_s = 0
+        if status:
+            status("Checking repaired pours for isolated copper...")
+        problem4, result4 = one_pass(islands)
+        if problem4 is not None:
+            out.stitched += result4.stitched
+            out.seconds += result4.seconds
     if apply_paths and added:
         # SWIG wrappers do not compare by item: tell the ripped-up ones apart by UUID
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
