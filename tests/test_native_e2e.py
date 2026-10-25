@@ -203,9 +203,19 @@ def main(argv):
                   f"{summary['drc_unconnected']} unconnected items")
     if fixture_gate and cli:
         assert summary['drc_unconnected'] == 0, "saved board failed KiCad connectivity check"
+        # KiCad writes a project-local .kicad_prl even for read-only DRC.
+        # Validate a copy so the fixture directory remains untouched.
+        before_dir = out / "input"
+        before_dir.mkdir(exist_ok=True)
+        before_board = before_dir / board_file.name
+        shutil.copy2(board_file, before_board)
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            companion = board_file.with_suffix(suffix)
+            if companion.exists():
+                shutil.copy2(companion, before_board.with_suffix(suffix))
         before_report = out / "drc-before.json"
         subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error",
-                        "-o", str(before_report), str(board_file)], capture_output=True, text=True)
+                        "-o", str(before_report), str(before_board)], capture_output=True, text=True)
         assert before_report.exists(), "KiCad DRC did not produce the baseline report"
         original = json.loads(before_report.read_text())
         def signature(v):
