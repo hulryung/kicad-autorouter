@@ -910,6 +910,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # the escapes and the tracks between the pins have room. Those widths
     # need owner maps of their own.
     keys = {n.rules.key for n in nets.values()}
+    # Signal vias need their own clearance footprint; growing the rounded
+    # track map a second time can close otherwise legal narrow via sites.
+    if options.allow_vias and not options.pours_only:
+        keys.update((n.rules.via_diameter, n.rules.clearance) for n in nets.values())
     for n in nets.values():
         if n.partner:
             keys.add((2 * (n.pair_width or n.rules.width) + n.pair_gap, n.rules.clearance))

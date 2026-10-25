@@ -69,7 +69,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
           history=None, via_lead: int = 0, lead_from=None, layer_extra=None,
-          via_goals_only: bool = False, goal_bounds=None, site_guard=None) -> Optional[List[int]]:
+          via_goals_only: bool = False, goal_bounds=None, site_guard=None, via_owners=None) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -85,6 +85,9 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     a pad-to-plane fanout writes no tracks on the destination layer.
     `layer_extra` (per layer, per straight cell) is the surcharge for running
     on that layer (another net's plane); a diagonal pays it scaled like its step.
+    `via_owners` optionally supplies obstacles inflated by the via diameter.
+    Hard searches check its centre on every layer, avoiding a second radius
+    rounding; soft searches retain the track-map checks for rip-up ownership.
     `site_guard` (cell -> net whose pin via site it is) keeps other nets off
     those cells, even in a rip-up search.
     """
@@ -206,6 +209,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
                 return False
         if cx < via_reach or cy < via_reach or cx >= w - via_reach or cy >= gh - via_reach:
             return False
+        if via_owners is not None and not soft:
+            return all(via_owners[layer * plane + rest] in (0, net, also_ok) for layer in range(nlayers))
         for off in disc_offsets:
             i = rest + off
             o = owners[i]
