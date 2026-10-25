@@ -909,7 +909,12 @@ class Router:
         for vx, vy in vias:
             vcx, vcy = grid.cell_x(vx), grid.cell_y(vy)
             drawn += [grid.index(l, vcx, vcy) for l in range(grid.layers)]
-        drawn = list(dict.fromkeys([cells[0]] + drawn + [cells[-1]]))
+        # The route's own ends stay first and last: _dependents reads them
+        # there to find the route a T-joint hangs on (dict.fromkeys alone
+        # keeps a cell's first place, and the far end is under the drawing
+        # already, so a route ending on another one was not ripped with it)
+        ends = {cells[0], cells[-1]}
+        drawn = [cells[0]] + [c for c in dict.fromkeys(drawn) if c not in ends] + ([cells[-1]] if len(ends) > 1 else [])
         path = _Path(rp.pid, conn, rp, drawn)
         # The clusters the path really joins: the pads its ends touch. A
         # search may end on any pad of the far component, not on the

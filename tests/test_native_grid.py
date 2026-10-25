@@ -105,6 +105,21 @@ def main():
     assert g.index(0, 5, 5) in inside and g.index(0, 9, 9) not in inside and g.index(0, 0, 0) not in inside
     outside = set(g.outside_polygon_cells(0, square, [hole], PITCH))
     assert g.index(0, 0, 0) in outside and g.index(0, 3, 3) in outside and g.index(0, 5, 5) not in outside
+
+    # 8. A route that T-joins another route of its net is ripped up with it:
+    #    its far end stays the last of its cells, where _dependents looks.
+    p = make_problem(layers=1)
+    g = p.grid
+    net = NetInfo(1, "N1", RULES)
+    for (cx, cy) in ((5, 20), (50, 20), (30, 35)):
+        net.clusters.append(Cluster(cells={g.index(0, cx, cy)}, anchors=[(cx, cy)]))
+        g.mark(p.owners[RULES.key], [g.index(0, cx, cy)], 1)
+    p.nets[1] = net
+    rt = router.Router(p)
+    trunk = rt._commit(Connection(1, 0, 1, 45), [g.index(0, x, 20) for x in range(5, 51)], None)
+    tee = rt._commit(Connection(1, 2, 0, 15), [g.index(0, 30, y) for y in range(35, 19, -1)], None)
+    assert tee.cells[-1] == g.index(0, 30, 20), g.unpack(tee.cells[-1])
+    assert tee.pid in rt._dependents([trunk.pid])
     print("test_native_grid: ok")
 
 
