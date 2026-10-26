@@ -442,6 +442,7 @@ class AutorouterDialog(wx.Dialog):
             try:
                 live = [t for t in self._run_added if str(t.m_Uuid.AsString()) not in self._run_removed]
                 native_apply.trim_overlaps(self.board, live)
+                native_apply.weld_junctions(self.board, live)
                 report = native_pipeline.tune_lengths(self.board, o, status=self._status_now,
                                                       pair_exceptions=job.pair_exceptions)
                 if report is not None:
@@ -818,6 +819,9 @@ class AutorouterDialog(wx.Dialog):
                 n = native_apply.trim_overlaps(self.board, live)
                 if n:
                     self._append_log(f"[plugin] {n} overlapping segments merged")
+                welded = native_apply.weld_junctions(self.board, live)
+                if welded:
+                    self._append_log("[plugin] junctions welded: " + ", ".join(f"{k} {v}" for k, v in welded.items()))
             except Exception as e:
                 logger.exception("Trimming overlaps failed")
                 self._append_log(f"[plugin] could not merge overlapping segments: {e!r}")

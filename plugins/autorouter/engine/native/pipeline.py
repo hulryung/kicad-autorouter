@@ -276,6 +276,10 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
         live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
         out.stats["trimmed"] = native_apply.trim_overlaps(board, live)
+        try:
+            out.stats["welded"] = native_apply.weld_junctions(board, live)
+        except Exception as e:                 # cosmetic: never lose a routed board over it
+            out.stats["weld_error"] = repr(e)
     if apply_paths and not (cancelled and cancelled()):
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
