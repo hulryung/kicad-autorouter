@@ -83,6 +83,9 @@ class SiConfig:
     rounded: bool = True                         # meander corners as arc fillets (else 45-degree chamfers)
     pair_min_span_mm: float = 3.0                # pair ends closer than this: connected directly, not coupled
     pair_uncoupled_max_mm: float = 5.0           # uncoupled length a pair may have (KiCad rule); shorter pairs: no skew
+    # pairs found by name (USB_DP/DN, TRD0_P/N...) but in no impedance class
+    # still get their P/N lengths matched to this skew (0 = leave them as routed)
+    pair_skew_mm: float = 0.1
 
     @classmethod
     def from_dict(cls, d: dict) -> "SiConfig":
@@ -102,6 +105,7 @@ class SiConfig:
         cfg.rounded = bool(d.get("rounded", True))
         cfg.pair_min_span_mm = float(d.get("pair_min_span_mm", 3.0))
         cfg.pair_uncoupled_max_mm = float(d.get("pair_uncoupled_max_mm", 5.0))
+        cfg.pair_skew_mm = float(d.get("pair_skew_mm", 0.1))
         return cfg
 
     def to_dict(self) -> dict:
@@ -218,6 +222,26 @@ def plan(board, cfg: SiConfig, net_names: Optional[List[str]] = None) -> SiPlan:
                     out.length_groups.append({"name": f"{zc.name} skew {n.rsplit('/', 1)[-1]}",
                                               "nets": sorted([n, other]),
                                               "tolerance": int(zc.skew_mm * MM), "target": 0, "pair": True})
+    # Differential pairs the router recognises by name but no impedance class
+    # covers: the designer still matches P and N (a coupled run that ends
+    # single-ended, or hops through a TVS, leaves millimetres of skew). The
+    # tuner meanders the shorter line; pairs whose coupling was waived as
+    # unnecessary and that are short overall are skipped after routing.
+    if cfg.pair_skew_mm > 0:
+        grouped = {n for g in out.length_groups if g.get("pair") for n in g["nets"]}
+        done = set()
+        for n in sorted(names):
+            if n in grouped or n in done or n.startswith("unconnected-"):
+                continue
+            other = pair_partner(n, names)
+            if not other or other in grouped or other in done:
+                continue
+            done |= {n, other}
+            out.length_groups.append({"name": f"pair skew {n.rsplit('/', 1)[-1]}", "nets": sorted([n, other]),
+                                      "tolerance": int(cfg.pair_skew_mm * MM), "target": 0, "pair": True})
+        if done:
+            out.lines.append(f"{len(done) // 2} pair(s) without an impedance class: "
+                             f"P/N matched to {cfg.pair_skew_mm:g} mm")
     for lg in cfg.length_groups:
         members = sorted(n for n in names if matches(n, lg.nets))
         if len(members) < 2 and not lg.target_mm:
