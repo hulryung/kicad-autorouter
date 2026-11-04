@@ -2278,7 +2278,30 @@ class Router:
                 # The run fits but an end does not let both lines in side by
                 # side: keep the coupled run and finish that end single-ended
                 # (the result notes it), rather than give the whole pair up.
+                def finish_order(cand, loose):
+                    """How the single-ended finishes at the loose end(s) lie:
+                    (how many cross each other, their total straight length).
+                    A run whose lines arrive in the opposite order to their
+                    pads makes one finish cross its partner, through a via."""
+                    crossings, total_ = 0, 0.0
+                    for at_start in ((True, False) if loose == "both" else (loose,)):
+                        legs = []
+                        for rp, conn, cl_a, cl_b in cand:
+                            sg = rp.segments[0] if at_start else rp.segments[-1]
+                            ex, ey = (sg[1], sg[2]) if at_start else (sg[3], sg[4])
+                            anchors = self.p.nets[conn.net].clusters[cl_a if at_start else cl_b].anchors
+                            if not anchors:
+                                return (0, 0.0)
+                            px, py = min(((self.grid.nm_x(x), self.grid.nm_y(y)) for x, y in anchors),
+                                         key=lambda q: math.hypot(q[0] - ex, q[1] - ey))
+                            legs.append((ex, ey, px, py))
+                            total_ += math.hypot(px - ex, py - ey)
+                        if len(legs) == 2 and _segment_distance(legs[0], legs[1]) <= 0:
+                            crossings += 1
+                    return (crossings, total_)
+
                 for loose in (False, True, "both"):
+                    built = []
                     for sa in (first, -first):
                         cand, why = build(sa, None, loose)
                         if _DEBUG:
@@ -2286,6 +2309,10 @@ class Router:
                                   f"{why or round(pair_apart(cand[0][0], cand[1][0]))}", flush=True)
                         if cand is None or pair_apart(cand[0][0], cand[1][0]) < need:
                             continue
+                        built.append(cand)
+                    # the side whose lines reach their pads without crossing first
+                    built.sort(key=lambda c: finish_order(c, loose))
+                    for cand in built:
                         if self._commit_loose(cand, loose, cells, via_cost, cap, on_path, cancelled):
                             at = [ca.a, ca.b] if loose == "both" else [ca.a if loose else ca.b]
                             ends_refs = set().union(*(na.clusters[e].refs for e in at))
