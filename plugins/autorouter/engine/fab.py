@@ -71,10 +71,11 @@ def _nm(mm: float) -> int:
     return int(round(mm * MM))
 
 
-def apply(board, name: str) -> List[str]:
+def apply(board, name: str, dry_run: bool = False) -> List[str]:
     """Raise the board's constraints and net classes to the template;
     returns what changed. Nothing is ever lowered: a stricter rule, a wider
-    impedance track or a larger clearance the designer chose stays."""
+    impedance track or a larger clearance the designer chose stays. With
+    dry_run, nothing is changed: the list says what would be."""
     rules = get(name)
     if rules is None:
         return []
@@ -87,7 +88,8 @@ def apply(board, name: str) -> List[str]:
         old = int(getattr(ds, attr))
         new = _nm(mm)
         if old < new:                  # a stricter rule the designer set stays
-            setattr(ds, attr, new)
+            if not dry_run:
+                setattr(ds, attr, new)
             out.append(f"{label} {old / MM:.3f} -> {mm:.3f} mm")
 
     setting("m_MinClearance", rules.min_clearance, "minimum clearance")
@@ -121,33 +123,41 @@ def apply(board, name: str) -> List[str]:
         if nc is None:
             continue
         changed = []
+
+        def put(setter, value):
+            if not dry_run:
+                getattr(nc, setter)(value)
+
         if has(nc, "Clearance") and nc.GetClearance() < _nm(rules.net_clearance):
-            nc.SetClearance(_nm(rules.net_clearance))
+            put("SetClearance", _nm(rules.net_clearance))
             changed.append(f"clearance {rules.net_clearance}")
         if has(nc, "TrackWidth") and nc.GetTrackWidth() < _nm(rules.min_track):
-            nc.SetTrackWidth(_nm(rules.min_track))
+            put("SetTrackWidth", _nm(rules.min_track))
             changed.append(f"track {rules.min_track}")
         # the via: at least the template's, and never a drill the fab charges extra for
         if has(nc, "ViaDiameter") and has(nc, "ViaDrill") and \
                 (nc.GetViaDiameter() < _nm(rules.via_diameter) or nc.GetViaDrill() < _nm(rules.via_drill)):
-            nc.SetViaDiameter(max(nc.GetViaDiameter(), _nm(rules.via_diameter)))
-            nc.SetViaDrill(max(nc.GetViaDrill(), _nm(rules.via_drill)))
-            changed.append(f"via {nc.GetViaDiameter() / MM:.2f}/{nc.GetViaDrill() / MM:.2f}")
+            dia = max(nc.GetViaDiameter(), _nm(rules.via_diameter))
+            drill = max(nc.GetViaDrill(), _nm(rules.via_drill))
+            put("SetViaDiameter", dia)
+            put("SetViaDrill", drill)
+            changed.append(f"via {dia / MM:.2f}/{drill / MM:.2f}")
         try:
             if nc.HasDiffPairWidth() and nc.GetDiffPairWidth() < _nm(rules.min_track):
-                nc.SetDiffPairWidth(_nm(rules.min_track))
+                put("SetDiffPairWidth", _nm(rules.min_track))
                 changed.append("pair width")
             if nc.HasDiffPairGap() and nc.GetDiffPairGap() < _nm(rules.min_clearance):
-                nc.SetDiffPairGap(_nm(rules.min_clearance))
+                put("SetDiffPairGap", _nm(rules.min_clearance))
                 changed.append("pair gap")
         except Exception:
             pass
         if changed:
             out.append(f"net class {cname}: " + ", ".join(changed))
-    try:
-        ns.RecomputeEffectiveNetclasses()
-    except Exception:
-        pass
+    if not dry_run:
+        try:
+            ns.RecomputeEffectiveNetclasses()
+        except Exception:
+            pass
     return out
 
 

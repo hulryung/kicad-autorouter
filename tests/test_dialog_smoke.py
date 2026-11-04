@@ -51,6 +51,21 @@ def main():
     assert len(PRESETS) >= 5
     dialog._show_progress("x", 0.5)
     assert dialog.gauge.GetValue() == 500
+    # the Board setup tab: the fixture has no outline and empty pre-defined sizes;
+    # the fab choice lives there and reaches the intent file through the SI tab
+    setup = dialog.setup_page
+    keys = [f.key for f in setup.findings]
+    assert "outline" in keys and "predefined_sizes" in keys, keys
+    assert setup.items.GetCount() == len(setup.findings)
+    titles = [dialog.notebook.GetPageText(i) for i in range(dialog.notebook.GetPageCount())]
+    assert any(t.startswith("Board setup (") for t in titles), titles
+    setup.fab.SetSelection(setup.fabs.index("JLCPCB 2-layer standard"))
+    setup._on_fab(None)
+    assert page.config().fab == "JLCPCB 2-layer standard"
+    assert "fab" in [f.key for f in setup.findings]
+    dialog.pitch.SetValue(0.05)
+    dialog._on_reset(None)
+    assert dialog._collect_options().native_pitch_mm == RouteOptions().native_pitch_mm
     dialog.Destroy()
     app.Destroy()
     print("test_dialog_smoke: ok")

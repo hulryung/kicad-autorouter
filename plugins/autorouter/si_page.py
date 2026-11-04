@@ -65,15 +65,8 @@ class SiPage(wx.Panel):
                                 "standard 1.6 mm stackups; order the board with impedance control for exact widths.")
         self.stackup.Bind(wx.EVT_CHOICE, lambda e: self.compute())
         sbox.Add(self.stackup, 0, wx.EXPAND | wx.ALL, 4)
-        self.fabs = [fab.NONE] + list(fab.TEMPLATES)
-        self.fab = wx.Choice(self, choices=["Fabrication rules: the board's own (Board Setup > Constraints)"] + [
-            f"Fabrication rules: {n} ({fab.TEMPLATES[n].description})" for n in fab.TEMPLATES])
-        self.fab.SetToolTip("Raise the board's constraints (clearance, track width, vias, hole and edge clearances) "
-                            "and the net classes to the board house's standard, no-extra-cost capabilities "
-                            "before routing (a stricter value already set stays); the rules the Constraints page "
-                            "cannot express go to the .kicad_dru.")
-        self.fab.SetSelection(0)
-        sbox.Add(self.fab, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 4)
+        # the fabrication template is chosen on the Board setup tab (setup_page.py)
+        self.fab_name = fab.NONE
         self.sizes = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL)
         self.sizes.SetFont(wx.Font(wx.FontInfo(9).Family(wx.FONTFAMILY_TELETYPE)))
         self.sizes.SetMinSize((-1, 90))
@@ -228,7 +221,7 @@ class SiPage(wx.Panel):
 
     def set_config(self, cfg: si.SiConfig):
         self.stackup.SetSelection(self.stackups.index(cfg.stackup) if cfg.stackup in self.stackups else 0)
-        self.fab.SetSelection(self.fabs.index(cfg.fab) if cfg.fab in self.fabs else 0)
+        self.fab_name = cfg.fab if fab.get(cfg.fab) is not None else fab.NONE
         for grid in (self.zgrid, self.lgrid):
             if grid.GetNumberRows():
                 grid.DeleteRows(0, grid.GetNumberRows())
@@ -250,7 +243,7 @@ class SiPage(wx.Panel):
     def config(self) -> si.SiConfig:
         cfg = si.SiConfig()
         cfg.stackup = self.stackups[max(0, self.stackup.GetSelection())]
-        cfg.fab = self.fabs[max(0, self.fab.GetSelection())]
+        cfg.fab = self.fab_name
         for grid in (self.zgrid, self.lgrid):
             # commit a cell being typed into; with no editor open there is nothing to commit
             # (committing then writes the editor's stale text into the cursor cell)

@@ -11,7 +11,7 @@ from typing import Optional
 import pcbnew
 import wx
 
-from .engine import fab, session, si
+from .engine import board_setup, session, si
 from .engine.options import RouteOptions
 from .engine.native import (apply as native_apply, extract as native_extract, kicad_tuning as native_kicad_tuning,
                             pipeline as native_pipeline, router as native_router)
@@ -21,6 +21,7 @@ from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION,
 from .engine.paths import data_dir
 from .log import get_logger
 from .settings import Settings
+from .setup_page import SetupPage
 from .si_page import SiPage
 
 logger = get_logger("dialog")
@@ -68,6 +69,10 @@ class AutorouterDialog(wx.Dialog):
         self.notebook = wx.Notebook(self)
         self.notebook.AddPage(self._routing_page(self.notebook), "Routing")
         self.si_page = SiPage(self.notebook, self.board, self._append_log)
+        self.setup_page = SetupPage(self.notebook, self.board, self._append_log, self.si_page,
+                                    on_change=self._setup_changed)
+        self.notebook.AddPage(self.setup_page, "Board setup")
+        self._setup_changed(self.setup_page.findings)
         self.notebook.AddPage(self.si_page, "Signal integrity")
         self.notebook.AddPage(self._layers_page(self.notebook), "Layers && nets")
         self.notebook.AddPage(self._ai_page(self.notebook), "AI assistant")
@@ -89,6 +94,11 @@ class AutorouterDialog(wx.Dialog):
         self.open_jobs.Bind(wx.EVT_BUTTON, lambda e: self._open_folder(
             self.job.directory if self.job else data_dir()))
         buttons.Add(self.open_jobs, 0, wx.RIGHT, 8)
+        reset = wx.Button(self, label="Reset options")
+        reset.SetToolTip("Put the Routing and Layers && nets options back to their defaults "
+                         "(the Signal integrity and Board setup tabs are kept).")
+        reset.Bind(wx.EVT_BUTTON, self._on_reset)
+        buttons.Add(reset, 0, wx.RIGHT, 8)
         buttons.AddStretchSpacer()
         self.route_btn = wx.Button(self, label="Route")
         self.route_btn.SetDefault()
@@ -350,6 +360,8 @@ class AutorouterDialog(wx.Dialog):
         if not binary:
             wx.MessageBox("The codex CLI was not found. Install it with  npm i -g @openai/codex  and log in once.",
                           "Autorouter", wx.ICON_ERROR, self)
+            return None
+        if not self._preflight():
             return None
         self._save_settings()
         options = self._collect_options()
@@ -621,17 +633,8 @@ class AutorouterDialog(wx.Dialog):
                    for i, (_, name) in enumerate(self.layers) if i < len(o.routable_layers) and not o.routable_layers[i]]
             self._append_log("[plugin] no tracks on " + ", ".join(off) + " (Layers tab)")
         # the Signal integrity tab: impedance widths, length groups, routing order
+        # (the fab's rules, which they read, are applied by _preflight when the user agrees)
         cfg = self.si_page.config()
-        if cfg.fab:
-            # the fab's rules first: the net classes they raise are what the
-            # impedance plan and the router read
-            try:
-                for line in fab.apply(self.board, cfg.fab):
-                    self._append_log(f"[plugin] {cfg.fab}: {line}")
-                fab.write_drc_rules(self.board, cfg.fab)
-            except Exception as e:
-                logger.exception("Fabrication rules")
-                self._append_log(f"[plugin] fabrication rules not applied: {e!r}")
         try:
             plan = si.plan(self.board, cfg)
         except Exception as e:
@@ -654,12 +657,71 @@ class AutorouterDialog(wx.Dialog):
     # ---- starting a run -----------------------------------------------------
 
     def _on_route(self, event):
-        self._save_settings()
         options = self._collect_options()
         if options.routable_layers and not any(options.routable_layers):
             wx.MessageBox("Enable at least one routable layer.", "Autorouter", wx.ICON_WARNING, self)
             return
+        if not self._preflight():
+            return
+        self._save_settings()
         self._start_native()
+
+    def _preflight(self) -> bool:
+        """Before a run: the board setup check. Rules below the chosen fab's are
+        raised when the user agrees (they decide what the router may place);
+        errors (no outline, net classes below the minimums) stop the run
+        unless the user routes anyway. False: do not start."""
+        try:
+            findings = self.setup_page.refresh()
+        except Exception:
+            logger.exception("Board setup check")
+            return True
+        pending = [f for f in findings if f.key == "fab"]
+        if pending:
+            f = pending[0]
+            answer = wx.MessageBox(f"{f.title}:\n\n{f.detail}\n\nApply them before routing? (No routes with the "
+                                   "board's current rules.)", "Autorouter",
+                                   wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION, self)
+            if answer == wx.CANCEL:
+                return False
+            if answer == wx.YES:
+                self.setup_page.apply([f])
+                findings = self.setup_page.findings
+        errors = board_setup.blocking(findings)
+        if errors:
+            listed = "\n".join(f"  \u2022 {f.title}" for f in errors)
+            if wx.MessageBox(f"The board setup check found problems the router cannot work around:\n\n{listed}"
+                             "\n\nRoute anyway?", "Autorouter", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+                             self) != wx.YES:
+                self._show_page(self.setup_page)
+                return False
+        return True
+
+    def _setup_changed(self, findings):
+        """The Board setup tab's title counts what needs attention."""
+        n = sum(1 for f in findings if f.severity in (board_setup.ERROR, board_setup.WARNING))
+        for i in range(self.notebook.GetPageCount()):
+            if self.notebook.GetPage(i) is getattr(self, "setup_page", None):
+                self.notebook.SetPageText(i, f"Board setup ({n})" if n else "Board setup")
+
+    def _show_page(self, page):
+        for i in range(self.notebook.GetPageCount()):
+            if self.notebook.GetPage(i) is page:
+                self.notebook.SetSelection(i)
+
+    def _on_reset(self, event):
+        defaults = RouteOptions()
+        self._load_options(defaults)
+        for i in range(self.routable.GetCount()):
+            self.routable.Check(i, True)
+        for i in self._ground_planes():
+            self.routable.Check(i, False)
+        self.override_dirs.SetValue(False)
+        self.horizontal.Disable()
+        for i in range(self.horizontal.GetCount()):
+            self.horizontal.Check(i, i % 2 == 0)
+        self._show_progress("Options reset to their defaults (saved when you route or close).", None)
+        self.gauge.SetValue(0)
 
     def _prepare(self, options: RouteOptions) -> bool:
         self.log.Clear()

@@ -22,7 +22,8 @@ service or AI account is required.
 | Ground and power | Plane-net detection, pad fanout, power ties, via stitching, zone refill and repair of isolated copper after routing. |
 | Signal integrity | Stackup-based width estimates, impedance classes, length groups, routing priority, fabrication presets and KiCad tuning patterns. |
 | AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex CLI. |
-| Workflow | Live routing display, cancellation, undo through KiCad, persistent options, per-board design intent and job logs. |
+| Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
+| Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
 
 ### New in 0.3.0
 
@@ -86,10 +87,15 @@ KiCad 9/10을 지원하며, 기본 자동배선에는 AI 계정이 필요하지 
 3. Set the routing scope, layers and sizes. If particular nets should use
    pours, enter their names or patterns, such as `GND,GND1,*_PLANE`, in
    **Nets to leave unrouted** and configure their zones.
-4. Set any impedance or length constraints on **Signal integrity**, then click
-   **Route**. Tracks appear as connections are found; the log reports progress,
+4. Open **Board setup**: pick the board house's fabrication rules, read the
+   check, tick the fixes you want and click **Apply ticked fixes**. The tab
+   title counts the errors and warnings left.
+5. Set any impedance or length constraints on **Signal integrity**, then click
+   **Route**. Route runs the same check first: it offers to apply the chosen
+   fabrication rules and stops on errors (such as a missing outline) unless you
+   route anyway. Tracks appear as connections are found; the log reports progress,
    pair exceptions, retry passes and unfinished connections.
-5. Inspect the result and run KiCad's DRC. Review any uncoupled pair ends and
+6. Inspect the result and run KiCad's DRC. Review any uncoupled pair ends and
    unmet length targets before treating the board as finished.
 
 The default grid is **0.1 mm**, the search budget is **400,000 expansions per
@@ -107,7 +113,8 @@ design-intent files and written project rules are separate from copper undo.
 | Tab | Controls |
 | --- | --- |
 | **Routing** | Grid, via cost, search budget, time limit, track/via sizes, retries, coupled pairs, fanout, stitching, plane nets, existing copper, scope and zone refill. |
-| **Signal integrity** | Stackup and fabrication presets, impedance classes, pair limits, length groups, tuning options, routing order, **Compute sizes** and **Write to KiCad**. |
+| **Board setup** | Fabrication rules preset, the board and project check, details per item, **Check again** and **Apply ticked fixes**. |
+| **Signal integrity** | Stackup, impedance classes, pair limits, length groups, tuning options, routing order, **Compute sizes** and **Write to KiCad**. |
 | **Layers & nets** | Routable copper layers, preferred horizontal/vertical directions and net classes to skip. |
 | **AI assistant** | Request, model, round limit, DRC feedback, **Ask the assistant**, **Review current routing** and **Score and improve**. |
 
@@ -185,6 +192,30 @@ or power connection.
 Filled zones are refilled around new copper. The router uses through vias;
 blind and buried vias are not implemented.
 
+## Board setup check
+
+The **Board setup** tab reads Board Setup and the saved project file and lists
+what keeps the router, the DRC or KiCad's interactive router from using the
+right sizes. Fixes only add or raise; nothing the designer set is lowered or
+removed.
+
+| Check | Fix |
+| --- | --- |
+| No closed outline on Edge.Cuts (error) | Explained only: draw the outline. |
+| Net class via, drill, track or clearance below the Constraints minimums (error) | Raise the class values to the minimums. |
+| Board rules below the chosen fabrication preset | Raise them and write the hole rules to the `.kicad_dru`. |
+| Copper-to-edge clearance under 0.2 mm (no preset chosen) | Set it to 0.3 mm. |
+| Net class patterns that match no net, typically a stale sheet path (`/USB2*` for global `USB2_P`) | Add the corrected pattern beside the old one. |
+| Differential pairs, found by name, in Default | Assign them to an existing class named for their impedance (90R for USB, 100R for Ethernet). |
+| Power nets at the Default width | Opt in: create a **Power** class (0.4 mm tracks) and assign them. |
+| Net class sizes missing from Pre-defined Sizes | Add them, so the editor's drop-downs offer them. |
+| Copper zones not filled | Fill all zones. |
+| No physical stackup on a multilayer board | Explained only: set it, or pick a template on Signal integrity. |
+
+Board Setup changes are not on KiCad's undo list. They reach the `.kicad_pro`
+when the board is saved. Pattern checks read the saved project file, so save
+after editing net classes in Board Setup before checking again.
+
 ## Signal integrity and fabrication settings
 
 Design intent is saved beside the board as **`<board>.autorouter.json`**.
@@ -205,9 +236,10 @@ The [examples](examples) show the same format used by the benchmarks.
 - **Routing order:** reorder differential pairs, memory, high-speed nets,
   clocks, routed power and other signals. Higher-priority protected routes
   constrain later rip-up searches.
-- **Fabrication presets:** bundled JLCPCB 2-, 4- and 6-layer rule templates
-  raise board and net-class constraints while preserving stricter existing
-  values. Check them against the fabrication service selected for your order.
+- **Fabrication presets** (chosen on **Board setup**): bundled JLCPCB 2-, 4-
+  and 6-layer rule templates raise board and net-class constraints while
+  preserving stricter existing values. They are applied when you confirm, from
+  the check or before a run, never silently. Check them against the fabrication service selected for your order.
 - **Write to KiCad:** write calculated net classes and DRC rules, including
   per-layer width, pair gap/skew and length constraints, into the project.
 
@@ -323,6 +355,7 @@ Use `./scripts/install-dev.sh --remove` to remove the development links.
 plugins/autorouter/
   plugin.py, dialog.py     action plugin, routing UI and live updates
   si_page.py              signal-integrity UI
+  setup_page.py           board setup check UI
   settings.py             persistent user options
   engine/
     native/
@@ -337,6 +370,7 @@ plugins/autorouter/
       problem.py          shared routing data models
     si.py, stackup.py      design intent and impedance estimates
     fab.py                fabrication-rule presets
+    board_setup.py        board and project checks and their fixes
     ai/                   context, CLI bridge, actions, rendering and review
     options.py            routing options
     session.py, paths.py   board helpers, jobs and data locations
