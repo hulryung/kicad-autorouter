@@ -255,6 +255,206 @@ def prune_dangling_vias(board, items) -> int:
     return removed
 
 
+def _is45(dx: float, dy: float) -> bool:
+    a = math.degrees(math.atan2(dy, dx)) % 45
+    return min(a, 45 - a) <= 0.25
+
+
+_DIRS45 = [(math.cos(math.radians(45 * k)), math.sin(math.radians(45 * k))) for k in range(8)]
+
+
+def _line_cross(p, d, q, e):
+    """Where the line through p along d meets the line through q along e
+    (None when parallel)."""
+    den = d[0] * e[1] - d[1] * e[0]
+    if abs(den) < 1e-9:
+        return None
+    t = ((q[0] - p[0]) * e[1] - (q[1] - p[1]) * e[0]) / den
+    return (p[0] + t * d[0], p[1] + t * d[1])
+
+
+def snap_tiny_joins(board, items, tiny: int = 100_000, reach: int = 100_000) -> int:
+    """After a run: a coupled run or a grid path that ends a few micrometres
+    off the grid is joined to the next segment by a tiny piece at an odd
+    angle (often turning back: an acute corner). Such a piece (with any
+    other tiny pieces chained to it) is taken out, and the two 45-degree
+    segments on either side are cut or stretched to meet where their lines
+    cross. When one side ends at a via or pad (it cannot move), the other
+    segment is cut where a short 45-degree join from that end meets it. Every
+    end moves by at most `reach`, along the segment's own line. A piece lying
+    wholly inside one pad of its net is simply removed. Only the run's own
+    tracks are touched. Returns how many pieces were fixed."""
+    uid = lambda item: str(item.m_Uuid.AsString())
+    own = {uid(t) for t in items if t.GetClass() == "PCB_TRACK"}
+    if not own:
+        return 0
+    nets = {t.GetNetCode() for t in items if t.GetClass() == "PCB_TRACK"}
+    pads_by_net = {}
+    for fp in board.GetFootprints():
+        for p in fp.Pads():
+            if p.GetNetCode() in nets:
+                pads_by_net.setdefault(p.GetNetCode(), []).append(p)
+
+    def seg_len(t):
+        s, e = t.GetStart(), t.GetEnd()
+        return math.hypot(e.x - s.x, e.y - s.y)
+
+    def off45(t):
+        s, e = t.GetStart(), t.GetEnd()
+        return seg_len(t) >= 1000 and not _is45(e.x - s.x, e.y - s.y)
+
+    fixed = 0
+    tried = set()
+    for _ in range(200):
+        tracks, vias, ends = {}, {}, {}
+        for t in board.GetTracks():
+            if t.GetNetCode() not in nets:
+                continue
+            if t.GetClass() == "PCB_VIA":
+                vias.setdefault(t.GetNetCode(), []).append(t)
+            elif t.GetClass() == "PCB_TRACK":
+                tracks[uid(t)] = t
+                for p in (t.GetStart(), t.GetEnd()):
+                    ends.setdefault((t.GetNetCode(), t.GetLayer(), p.x, p.y), []).append(uid(t))
+        cand = [t for k, t in tracks.items() if k in own and k not in tried and seg_len(t) < tiny and off45(t)]
+        if not cand:
+            break
+        seg = cand[0]
+        tried.add(uid(seg))
+        net, layer = seg.GetNetCode(), seg.GetLayer()
+
+        def pinned(x, y):
+            pt = pcbnew.VECTOR2I(int(x), int(y))
+            # a via's centre (the join keeps leading to it; an end merely
+            # inside the via's copper may move, the chain still reaches it)
+            for v in vias.get(net, []):
+                q = v.GetPosition()
+                if math.hypot(q.x - x, q.y - y) <= 1000:
+                    return True
+            return any(p.IsOnLayer(layer) and p.HitTest(pt) for p in pads_by_net.get(net, []))
+
+        def walk(start_uid, x, y):
+            """From the chain end (x, y): the chain's tiny pieces met on the way
+            and the movable neighbour (track uid) or None when the end is fixed."""
+            chain, cur = [], start_uid
+            while True:
+                others = [k for k in ends.get((net, layer, x, y), []) if k != cur]
+                if len(others) != 1 or pinned(x, y):
+                    return chain, None, (x, y)
+                k = others[0]
+                if k in chain or k == uid(seg):
+                    return chain, None, (x, y)
+                t = tracks[k]
+                if k not in own:
+                    return chain, None, (x, y)
+                s, e = t.GetStart(), t.GetEnd()
+                far = (e.x, e.y) if (s.x, s.y) == (x, y) else (s.x, s.y)
+                if seg_len(t) < tiny:
+                    chain.append(k)
+                    cur = k
+                    x, y = far
+                    continue
+                if not _is45(far[0] - x, far[1] - y):
+                    return chain, None, (x, y)
+                return chain, k, (x, y)
+
+        s, e = seg.GetStart(), seg.GetEnd()
+        chain_a, ka, pa = walk(uid(seg), s.x, s.y)
+        chain_b, kb, pb = walk(uid(seg), e.x, e.y)
+        chain = [uid(seg)] + chain_a + chain_b
+
+        def far_end(k, node):
+            t = tracks[k]
+            s, e = t.GetStart(), t.GetEnd()
+            return (e.x, e.y) if (s.x, s.y) == node else (s.x, s.y)
+
+        def unit(a, b):
+            d = math.hypot(b[0] - a[0], b[1] - a[1])
+            return ((b[0] - a[0]) / d, (b[1] - a[1]) / d)
+
+        def keeps_way(far, node, x):
+            # the stretched/cut segment still runs from far towards node, long enough
+            return ((x[0] - far[0]) * (node[0] - far[0]) + (x[1] - far[1]) * (node[1] - far[1]) > 0
+                    and math.hypot(x[0] - far[0], x[1] - far[1]) >= 10_000)
+
+        def obtuse(x, p, q):
+            u, w = unit(x, p), unit(x, q)
+            return u[0] * w[0] + u[1] * w[1] <= 0.05
+
+        def move_end(k, node, x):
+            t = tracks[k]
+            st = t.GetStart()
+            pt = pcbnew.VECTOR2I(int(round(x[0])), int(round(x[1])))
+            if (st.x, st.y) == node:
+                t.SetStart(pt)
+            else:
+                t.SetEnd(pt)
+
+        def drop(keys):
+            for k in keys:
+                t = tracks[k]
+                board.Remove(t)
+                t.thisown = 0
+                _REMOVED.append(t)
+
+        done = False
+        if ka and kb and ka != kb:
+            fa, fb = far_end(ka, pa), far_end(kb, pb)
+            x = _line_cross(pa, unit(fa, pa), pb, unit(fb, pb))
+            if (x is not None and math.hypot(x[0] - pa[0], x[1] - pa[1]) <= reach
+                    and math.hypot(x[0] - pb[0], x[1] - pb[1]) <= reach
+                    and keeps_way(fa, pa, x) and keeps_way(fb, pb, x) and obtuse(x, fa, fb)):
+                move_end(ka, pa, x)
+                move_end(kb, pb, x)
+                drop(chain)
+                done = True
+        if not done:
+            # one end stays put: a short 45-degree join from it to the other segment
+            for k, node, fixed_pt in ((ka, pa, pb), (kb, pb, pa)):
+                if not k:
+                    continue
+                f = far_end(k, node)
+                best = None
+                for d in _DIRS45:
+                    x = _line_cross(fixed_pt, d, node, unit(f, node))
+                    if x is None:
+                        continue
+                    t_along = (x[0] - fixed_pt[0]) * d[0] + (x[1] - fixed_pt[1]) * d[1]
+                    if t_along < -1 or t_along > reach or math.hypot(x[0] - node[0], x[1] - node[1]) > reach:
+                        continue
+                    if not keeps_way(f, node, x):
+                        continue
+                    if t_along > 1000 and not obtuse(x, fixed_pt, f):
+                        continue
+                    score = math.hypot(x[0] - node[0], x[1] - node[1])
+                    if best is None or score < best[0]:
+                        best = (score, x, t_along)
+                if best is None:
+                    continue
+                _, x, t_along = best
+                move_end(k, node, x)
+                keep = tracks[chain[0]]
+                if t_along > 1000:
+                    keep.SetStart(pcbnew.VECTOR2I(int(fixed_pt[0]), int(fixed_pt[1])))
+                    keep.SetEnd(pcbnew.VECTOR2I(int(round(x[0])), int(round(x[1]))))
+                    drop(chain[1:])
+                else:
+                    move_end(k, (int(round(x[0])), int(round(x[1]))), fixed_pt)
+                    drop(chain)
+                done = True
+                break
+        if not done and not ka and not kb:
+            # nothing to stretch: a piece inside one pad of its net is not needed
+            pts = [pa, pb]
+            if any(p.IsOnLayer(layer) and all(p.HitTest(pcbnew.VECTOR2I(int(q[0]), int(q[1]))) for q in pts)
+                   for p in pads_by_net.get(net, [])):
+                drop(chain)
+                done = True
+        if done:
+            fixed += 1
+    return fixed
+
+
 def add_path(board, layers: List[LayerInfo], path: RoutedPath, trim: bool = False) -> List[object]:
     """Create the items for one path and add them to the board; returns them.
     With trim, segments are cut where the board already has the same copper
