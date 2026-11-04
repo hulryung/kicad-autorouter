@@ -278,7 +278,11 @@ def _penalty(m, base_seconds):
         if it.get("impedance_width_ok_pct") is not None:
             p += 3 * (100 - it["impedance_width_ok_pct"])
         for pr in it.get("pairs", []):
-            if not pr.get("exception"):           # a pair connected directly on purpose is not penalised
+            # a pair connected directly on purpose is not penalised, but
+            # "ends too close" is no reason to leave a long pair uncoupled
+            waived = pr.get("exception") and not (
+                "too close" in pr["exception"] and pr.get("length_mm", 0) > 10)
+            if not waived:
                 p += 1.0 * (100 - pr["coupled_pct"])
             if not pr.get("exception_waives_skew"):
                 # P/N length mismatch: the reviewer marks every millimetre down
