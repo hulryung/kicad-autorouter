@@ -276,6 +276,15 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
         live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
         out.stats["trimmed"] = native_apply.trim_overlaps(board, live)
+        if not (cancelled and cancelled()):
+            # vias that ended up joining nothing (a pad via that missed the
+            # plane's fill, a fanout via a route made unnecessary): off the board
+            gone = {str(item.m_Uuid.AsString()) for item in _REMOVED + native_apply._REMOVED}
+            live = [t for t in live if str(t.m_Uuid.AsString()) not in gone]
+            try:
+                out.stats["dangling_vias_removed"] = native_apply.prune_dangling_vias(board, live)
+            except Exception as e:
+                out.stats["prune_error"] = repr(e)
     if apply_paths and not (cancelled and cancelled()):
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:

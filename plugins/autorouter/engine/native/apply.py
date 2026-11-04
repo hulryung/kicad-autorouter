@@ -99,6 +99,162 @@ def trim_overlaps(board, items) -> int:
 _REMOVED: list = []        # items taken off the board; Python must not free them
 
 
+def _collide(a, b, layer) -> bool:
+    try:
+        return bool(a.GetEffectiveShape(layer).Collide(b.GetEffectiveShape(layer), 0))
+    except Exception:
+        return True                                # unsure: count it as a contact (keeps the via)
+
+
+def _via_layers(via, tracks, pads, zones, layers) -> int:
+    """On how many copper layers the via touches other copper of its net
+    (tracks, arcs and other vias, pads, zone fills)."""
+    pos = via.GetPosition()
+    box = via.GetBoundingBox()
+    uid = str(via.m_Uuid.AsString())
+    touched = 0
+    for layer in layers:
+        if not via.IsOnLayer(layer):
+            continue
+        hit = False
+        for t in tracks:
+            if t.GetClass() == "PCB_VIA":
+                if str(t.m_Uuid.AsString()) != uid and t.IsOnLayer(layer) \
+                        and t.GetBoundingBox().Intersects(box) and _collide(via, t, layer):
+                    hit = True
+            elif t.GetLayer() == layer and t.GetBoundingBox().Intersects(box) and _collide(via, t, layer):
+                hit = True
+            if hit:
+                break
+        if not hit:
+            hit = any(p.IsOnLayer(layer) and p.GetBoundingBox().Intersects(box) and _collide(via, p, layer)
+                      for p in pads)
+        if not hit:
+            for z in zones:
+                if not z.IsOnLayer(layer):
+                    continue
+                try:
+                    filled = z.GetFilledPolysList(layer)
+                    if filled.OutlineCount() and filled.Collide(via.GetEffectiveShape(layer), 0):
+                        hit = True
+                        break
+                except Exception:
+                    hit = True
+                    break
+        if hit:
+            touched += 1
+            if touched >= 2:
+                break
+    return touched
+
+
+def prune_dangling_vias(board, items) -> int:
+    """After a job: a via of the job's own that touches copper of its net on
+    one layer only (a plane-net pad via that missed the plane's fill, a
+    fanout via a route made unnecessary) joins nothing; KiCad flags it as
+    dangling. It comes off the board, and so does any of the job's tracks
+    it leaves ending in the air (the stub that led to it). Removing such a
+    via never breaks a connection. The pours are refilled first when a
+    candidate turns up, so the check sees the copper DRC will see. Returns
+    how many vias were removed."""
+    vias = [t for t in items if t.GetClass() == "PCB_VIA"]
+    if not vias:
+        return 0
+    copper = [l for l in board.GetEnabledLayers().CuStack()]
+    nets = {v.GetNetCode() for v in vias}
+    by_net_tracks, by_net_pads, by_net_zones = {}, {}, {}
+
+    def collect():
+        by_net_tracks.clear(), by_net_pads.clear(), by_net_zones.clear()
+        for t in board.GetTracks():
+            if t.GetNetCode() in nets:
+                by_net_tracks.setdefault(t.GetNetCode(), []).append(t)
+        for fp in board.GetFootprints():
+            for p in fp.Pads():
+                if p.GetNetCode() in nets:
+                    by_net_pads.setdefault(p.GetNetCode(), []).append(p)
+        for z in board.Zones():
+            if not z.GetIsRuleArea() and z.GetNetCode() in nets:
+                by_net_zones.setdefault(z.GetNetCode(), []).append(z)
+
+    def lonely(cands):
+        return [v for v in cands
+                if _via_layers(v, by_net_tracks.get(v.GetNetCode(), []), by_net_pads.get(v.GetNetCode(), []),
+                               by_net_zones.get(v.GetNetCode(), []), copper) < 2]
+
+    collect()
+    cands = lonely(vias)
+    if not cands:
+        return 0
+    try:
+        if any(not z.GetIsRuleArea() for z in board.Zones()):
+            pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    except Exception:
+        return 0                                   # no fresh fills: leave the vias
+    collect()
+    cands = lonely(cands)
+    own = {str(t.m_Uuid.AsString()) for t in items if t.GetClass() in ("PCB_TRACK", "PCB_ARC")}
+    removed = 0
+    for via in cands:
+        net = via.GetNetCode()
+        uid = str(via.m_Uuid.AsString())
+        pos = via.GetPosition()
+        r = via.GetBoundingBox().GetWidth() // 2
+        # the job's tracks with an end inside the via: once it is gone, an end
+        # touching nothing else (no other track, via or pad) is a stub
+        stubs = []
+        for t in by_net_tracks.get(net, []):
+            if str(t.m_Uuid.AsString()) not in own or t.GetClass() != "PCB_TRACK":
+                continue
+            for end in (t.GetStart(), t.GetEnd()):
+                if math.hypot(end.x - pos.x, end.y - pos.y) <= r:
+                    stubs.append((t, end))
+                    break
+        board.Remove(via)
+        via.thisown = 0
+        _REMOVED.append(via)
+        by_net_tracks[net] = [t for t in by_net_tracks.get(net, []) if str(t.m_Uuid.AsString()) != uid]
+        removed += 1
+        for t, end in stubs:
+            tid = str(t.m_Uuid.AsString())
+            layer = t.GetLayer()
+            pt = pcbnew.VECTOR2I(end.x, end.y)
+            reach = t.GetWidth() // 2
+            joined = False
+            for o in by_net_tracks.get(net, []):
+                if str(o.m_Uuid.AsString()) == tid or not o.IsOnLayer(layer):
+                    continue
+                try:
+                    joined = bool(o.HitTest(pt, reach))
+                except Exception:
+                    joined = True
+                if joined:
+                    break
+            if not joined:
+                for p in by_net_pads.get(net, []):
+                    try:
+                        joined = bool(p.IsOnLayer(layer) and p.HitTest(pt, reach))
+                    except Exception:
+                        joined = True
+                    if joined:
+                        break
+            if not joined:
+                for z in by_net_zones.get(net, []):
+                    try:
+                        if z.IsOnLayer(layer) and z.GetFilledPolysList(layer).Contains(pt):
+                            joined = True
+                            break
+                    except Exception:
+                        joined = True
+                        break
+            if not joined:
+                board.Remove(t)
+                t.thisown = 0
+                _REMOVED.append(t)
+                by_net_tracks[net] = [o for o in by_net_tracks.get(net, []) if str(o.m_Uuid.AsString()) != tid]
+    return removed
+
+
 def add_path(board, layers: List[LayerInfo], path: RoutedPath, trim: bool = False) -> List[object]:
     """Create the items for one path and add them to the board; returns them.
     With trim, segments are cut where the board already has the same copper
