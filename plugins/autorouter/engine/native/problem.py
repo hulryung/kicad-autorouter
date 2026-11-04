@@ -208,6 +208,10 @@ class RoutingProblem:
     stitch: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> candidate (cx, cy) via spots
     island_stitch: List[Tuple[int, List[Tuple[int, int]]]] = field(default_factory=list)
     board_vias: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> via centres (nm) on the board already
+    # net -> cell boxes (x0, y0, x1, y1) round a dense-row connector whose
+    # pairs fan outward: there that net (a signal, not power or a pair) pays
+    # less to run on a plane layer
+    plane_relief: Dict[int, List[Tuple[int, int, int, int]]] = field(default_factory=dict)
     escape_sides: Dict[Tuple[str, str], Tuple[int, int]] = field(default_factory=dict)   # see NativeOptions
     hole_to_hole: int = 0                         # nm, board's hole-to-hole minimum
     max_via_drill: int = 0                        # nm, the largest via drill any net uses

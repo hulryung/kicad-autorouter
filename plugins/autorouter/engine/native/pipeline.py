@@ -43,7 +43,13 @@ class JobResult:
     pair_loose: List[dict] = field(default_factory=list)        # pairs coupled but finished single-ended at one end
 
 
-FIRST_PASS_SHARE = 0.7          # of the time limit; the finer second pass gets the rest
+# Of the time limit; the finer second pass gets the rest. The rip-up rounds
+# of the first pass close more of the last few opens than the finer grid
+# does (its failures are capped open searches): on a CM5 whose outward pair
+# fans wall in row pins, rip-up round 2 routes I2C_SDA/SCL once it has the
+# budget, while a pass cut at 0.7 of a slower work rate left both to the
+# finer pass, which joined neither. 0.15 still gives that pass 90 s of 10 min.
+FIRST_PASS_SHARE = 0.85
 
 
 def fine_options(options: NativeOptions, failed_nets: List[str], board) -> NativeOptions:

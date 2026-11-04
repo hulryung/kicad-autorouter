@@ -398,7 +398,36 @@ def _dense_rows(fp) -> Dict[str, Tuple[int, Optional[Tuple[float, float]]]]:
     return out
 
 
-BODY_MIN_PADS = 6            # an IC body: this many SMD pins or more round a package
+def _faces_pair(fp, pos, inward: Tuple[float, float], nets) -> bool:
+    """Does the pad at pos face a pin of a differential pair across the
+    channel of a two-row connector (the nearest pad of the facing row, in
+    line with this one within half a millimetre)?"""
+    best = None
+    for other in fp.Pads():
+        q = other.GetPosition()
+        vx, vy = q.x - pos.x, q.y - pos.y
+        along = vx * inward[0] + vy * inward[1]
+        beside = abs(vx * inward[1] - vy * inward[0])
+        if 300_000 < along <= DENSE_ROW_GAP_NM and beside < 500_000:
+            if best is None or (beside, along) < best[0]:
+                best = ((beside, along), other)
+    if best is None:
+        return False
+    net = nets.get(best[1].GetNetCode())
+    return bool(net is not None and net.partner and net.route)
+
+
+# At a dense-row connector whose pair pins fan outward (see _faces_pair), a
+# signal pays only a quarter of the plane-layer surcharge inside the box of
+# the connector's rows plus DENSE_RELIEF_MARGIN_NM: the pins the fans wall
+# in drop to the inner plane layer right there and pass under the fans, as a
+# designer runs GNSS_TX / RS485_DE on In2 at a CM5. Power nets, pairs and
+# plane nets keep the full surcharge (a +5v run that took the cheap plane
+# layer east past the connector left two +5v joins open).
+DENSE_RELIEF_MARGIN_NM = 1_500_000   # (the share: astar's relief_share)
+
+
+BODY_MIN_PADS = 6           # an IC body: this many SMD pins or more round a package
 BODY_BEHIND_NM = 1_500_000   # a body pin's target this far behind the pad (on the body's side) keeps the inward exit
 BODY_ROUND_GROUPS = ("signal", "power")   # ...except for these routing groups: they go round the body outside
 # A coarse body (an SOIC, not a QFP or a SOT-23): its pin ring spans this
@@ -1015,6 +1044,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     pad_cells: Dict[int, List[Tuple[object, Set[int], Tuple[int, int], str]]] = {}
     tight_by_fp: Dict[int, Set[str]] = {}
     dense_by_fp: Dict[str, Dict[str, Tuple[int, Optional[Tuple[float, float]]]]] = {}
+    fanned_out: Dict[str, List[Tuple[int, int]]] = {}   # ref -> pair pins _faces_pair sent outward
     ring_by_fp: Dict[str, Optional[Tuple[int, int, int, int]]] = {}   # IC bodies: the pad ring, by reference
     coarse_by_fp: Dict[str, bool] = {}                                # ...which of them are SOIC-like
     body_layers: Dict[str, Set[int]] = {}                             # ...and the layers the coarse ones' pins are on
@@ -1270,6 +1300,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             dense_by_fp[ref] = _dense_rows(fp)
         dense_info = dense_by_fp.get(ref, {}).get(pad.GetNumber()) if fp is not None else None
         outlet_len = OUTLET_NM
+        if dense_info is not None and dense_info[1] is not None and net.partner and dense_info[0] % 2 == 1 \
+                and _faces_pair(fp, pos, dense_info[1], nets):
+            # a pair pin sent outward below (_faces_pair), noted whichever
+            # way its side is settled (a later pass keeps the remembered one)
+            fanned_out.setdefault(ref, []).append((pos.x, pos.y))
         if dense_info is not None:
             outlet_len = DEEP_OUTLET_NM if (dense_info[0] // 2) % 2 else OUTLET_NM
         partner_side = pair_sides.get((ref, net.partner)) if (net.partner and ref and escapes) else None
@@ -1312,6 +1347,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 norm = math.hypot(dx, dy) or 1.0
                 return (dx * inward[0] + dy * inward[1]) / norm
             want_in = dense_info[0] % 2 == 1
+            if want_in and net.partner and _faces_pair(fp, pos, inward, nets):
+                # a pair whose pin faces another pair's pin across the
+                # channel: both would share the one 3 mm channel and one
+                # loses its coupling (TRD2 against TRD0 on a CM5); the
+                # designer fans both outward, side by side
+                want_in = False
             escapes.sort(key=lambda e: (-_inward(e) if want_in else _inward(e)))
             if _DEBUG:
                 print(f"[dense] {net.name} {ref}.{pad.GetNumber()} pin {dense_info[0]} leaves "
@@ -2136,6 +2177,25 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                              fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_strict=fanout_strict,
                              stitch=stitch, existing=existing, via_guard=via_guard,
                              lane_guard=lane_guard, site_guard=site_guard, board_vias=existing_vias)
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        fans = fanned_out.get(ref)
+        rows = dense_by_fp.get(ref)
+        if not fans or not rows:
+            continue
+        m = DENSE_RELIEF_MARGIN_NM
+        pts = [p.GetPosition() for p in fp.Pads() if p.GetNumber() in rows]
+        box = (grid.cell_x(min(p.x for p in pts) - m), grid.cell_y(min(p.y for p in pts) - m),
+               grid.cell_x(max(p.x for p in pts) + m), grid.cell_y(max(p.y for p in pts) + m))
+        planes = {lay.plane_net for lay in layers if lay.plane_net}
+        for code, net in nets.items():
+            if not net.route or net.partner or net.group == "power" or code in planes:
+                continue
+            boxes = problem.plane_relief.setdefault(code, [])
+            if box not in boxes:
+                boxes.append(box)
+        if _DEBUG:
+            print(f"[relief] {ref}: plane layer relief in {box} for {len(problem.plane_relief)} nets", flush=True)
     if options.repair_islands_only:
         problem.connections = []
         problem.fanout = []

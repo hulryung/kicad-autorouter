@@ -69,7 +69,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
           also_ok: int = 0, source_costs=None, routable=None,
           neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
           history=None, via_lead: int = 0, lead_from=None, layer_extra=None,
-          via_goals_only: bool = False, goal_bounds=None, site_guard=None, via_owners=None) -> Optional[List[int]]:
+          via_goals_only: bool = False, goal_bounds=None, site_guard=None, via_owners=None,
+          relief=None, relief_share: int = 4) -> Optional[List[int]]:
     """The cell path (grid indices, source to goal) or None.
 
     With `routed` (cell -> path id of routed copper, 0 for none) and
@@ -85,6 +86,10 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     a pad-to-plane fanout writes no tracks on the destination layer.
     `layer_extra` (per layer, per straight cell) is the surcharge for running
     on that layer (another net's plane); a diagonal pays it scaled like its step.
+    `relief` (cell boxes) are spots where `layer_extra` is cut to a
+    `relief_share`-th: beside a dense-row connector's outward pair fans, a
+    pin those fans wall in on the outer layers passes under them on the
+    plane layer.
     `via_owners` optionally supplies obstacles inflated by the via diameter.
     Hard searches check its centre on every layer, avoiding a second radius
     rounding; soft searches retain the track-map checks for rip-up ownership.
@@ -99,6 +104,10 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
     anchors = list(anchors) or [grid.unpack(next(iter(goals)))[1:]]
     layer_extra = list(layer_extra) if layer_extra and any(layer_extra) else [0] * nlayers
     diag_extra = [(e * DIAGONAL + STRAIGHT // 2) // STRAIGHT for e in layer_extra]
+    relief = list(relief) if relief and any(layer_extra) else None
+    if relief:
+        relief_extra = [e // relief_share for e in layer_extra]
+        relief_diag = [(e * DIAGONAL + STRAIGHT // 2) // STRAIGHT for e in relief_extra]
 
     def h(idx: int) -> int:
         rest = idx % plane
@@ -313,6 +322,11 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
         base = layer * plane
         horiz = horizontal[layer]
         lx, dx_extra = layer_extra[layer], diag_extra[layer]
+        if relief and lx:
+            for rx0, ry0, rx1, ry1 in relief:
+                if rx0 <= cx <= rx1 and ry0 <= cy <= ry1:
+                    lx, dx_extra = relief_extra[layer], relief_diag[layer]
+                    break
         if not routable[layer]:
             continue                       # a pad exit on an excluded layer: nowhere to go
         for m, (dx, dy, diag) in enumerate(MOVES):

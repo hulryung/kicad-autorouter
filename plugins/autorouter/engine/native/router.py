@@ -702,7 +702,7 @@ class Router:
                            self.horizontal, via_cost, allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
                            history=self.history, layer_extra=self._layer_extra(net.code),
-                           site_guard=self.p.site_guard,
+                           site_guard=self.p.site_guard, relief=self.p.plane_relief.get(net.code),
                            via_owners=self.p.owners.get((net.rules.via_diameter, net.rules.clearance)), **kwargs)
 
     def _layer_extra(self, code: int) -> List[int]:
