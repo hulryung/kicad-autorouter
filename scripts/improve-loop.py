@@ -280,6 +280,9 @@ def _penalty(m, base_seconds):
         for pr in it.get("pairs", []):
             if not pr.get("exception"):           # a pair connected directly on purpose is not penalised
                 p += 1.0 * (100 - pr["coupled_pct"])
+            if not pr.get("exception_waives_skew"):
+                # P/N length mismatch: the reviewer marks every millimetre down
+                p += 40 * min(10.0, max(0.0, pr.get("skew_mm", 0) - 0.1))
         for g in it.get("length_groups", []):
             if not g["ok"]:
                 p += 150 + 50 * min(10.0, sum(abs(v) for v in g["off_by_mm"].values()))
