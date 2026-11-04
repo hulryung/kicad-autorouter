@@ -52,6 +52,7 @@ PAIR_VIA_SPAN_NM = 8_000_000   # a coupled run shorter than this stays on one la
 PAIR_VIA_STRETCH_NM = 2_000_000  # a coupled stretch between two via pairs is at least this long
 LOOSE_TRIM_NM = 1_000_000  # a coupled run finished single-ended at one end stops this far short of it
 LOOSE_TRIM_STEPS = (1, 1.5, 2, 3, 4)
+EARLY_TURNS = 4            # a pair's pad entry may also turn this many places along the stub, short of its exit cell
 PAIR_APPROACH_NM = 2_000_000     # in front of a pair's pins, other pairs' runs pay to pass (the pair's way in)
 PAIR_APPROACH_HALF_NM = 300_000   # ...this far either side of each pin's outlet line
 PAIR_EARLY_SWAP_NM = 50_000_000   # a pair run this long may swap / end single-ended in the first pass   # ...or this many times as far, when the lines would still touch the pins
@@ -1897,35 +1898,78 @@ class Router:
                     return [pad]
                 out, seen = [], set()
 
-                def add(bends):
-                    pts = [(gx, gy)] + [b for b in bends if b not in ((gx, gy), (jx, jy))] + [(jx, jy)]
-                    key_ = tuple(pts)
-                    if key_ in seen:
-                        return
-                    seen.add(key_)
-                    out.append(pad + [(layer, a[0], a[1], b[0], b[1], ew) for a, b in zip(pts, pts[1:])])
-
                 if ex is not None and (gx, gy) != (px, py):
                     ux, uy = gx - px, gy - py
                 else:
                     ux, uy = jx - gx, jy - gy
                 norm = math.hypot(ux, uy) or 1.0
                 ux, uy = ux / norm, uy / norm
-                along = (jx - gx) * ux + (jy - gy) * uy
-                perp = math.hypot((jx - gx) - along * ux, (jy - gy) - along * uy)
-                straight = along - perp
-                if straight > grid.pitch:
-                    add([(int(round(gx + ux * straight)), int(round(gy + uy * straight)))])
-                dx, dy = jx - gx, jy - gy
-                sx, sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
-                m = min(abs(dx), abs(dy))
-                if octilinear(gx, gy, jx, jy):
-                    add([])
-                else:
-                    # diagonal first, then straight on; and straight first, then the diagonal
-                    add([(gx + sx * m, gy + sy * m)])
-                    add([(jx - sx * m, jy - sy * m)])
-                    add([])
+
+                def shapes(ox, oy, pad_):
+                    """The bends from (ox, oy), where the pad's stub ends, onto the run."""
+                    def add(bends):
+                        pts = [(ox, oy)] + [b for b in bends if b not in ((ox, oy), (jx, jy))] + [(jx, jy)]
+                        key_ = tuple(pts)
+                        if key_ in seen:
+                            return
+                        seen.add(key_)
+                        out.append(pad_ + [(layer, a[0], a[1], b[0], b[1], ew) for a, b in zip(pts, pts[1:])])
+
+                    along = (jx - ox) * ux + (jy - oy) * uy
+                    perp = math.hypot((jx - ox) - along * ux, (jy - oy) - along * uy)
+                    straight = along - perp
+                    if straight > grid.pitch:
+                        add([(int(round(ox + ux * straight)), int(round(oy + uy * straight)))])
+                    dx, dy = jx - ox, jy - oy
+                    sx, sy = (1 if dx > 0 else -1), (1 if dy > 0 else -1)
+                    m = min(abs(dx), abs(dy))
+                    if octilinear(ox, oy, jx, jy):
+                        add([])
+                    else:
+                        # diagonal first, then straight on; and straight first, then the diagonal
+                        add([(ox + sx * m, oy + sy * m)])
+                        add([(jx - sx * m, jy - sy * m)])
+                        add([])
+
+                shapes(gx, gy, pad)
+                # ...and, last, the same bends taken earlier: from a point on
+                # the stub between the pad and its exit cell. A fine-pitch
+                # pin's exit cell sits well out from the pad; a designer turns
+                # the pair just past the pad edge, which is what lets it pass
+                # a part sitting in front of the pins (a decoupling cap's pad).
+                # Only where no other pin's outlet is crossed.
+                lane = p.lane_guard
+                mate = cb.net if net.code == ca.net else ca.net
+                if ex is not None and (gx, gy) != (px, py):
+                    # the stub's last straight stretch: exit point (or the pad) to the cell
+                    bx, by = (ex, ey) if (ex, ey) != (gx, gy) else (px, py)
+                    head = pad[:1] if len(pad) == 2 else []
+                    sl = math.hypot(gx - bx, gy - by)
+                    vx, vy = (gx - bx) / sl, (gy - by) / sl
+                    step_ = max(grid.pitch, sl / (EARLY_TURNS + 1))
+                    for k_ in range(1, EARLY_TURNS + 1):
+                        s_ = sl - k_ * step_
+                        if s_ < 0:
+                            break
+                        ox, oy = int(round(bx + vx * s_)), int(round(by + vy * s_))
+                        pad_ = head + ([(layer, bx, by, ox, oy, sw)] if (ox, oy) != (bx, by) else [])
+                        n0 = len(out)
+                        shapes(ox, oy, pad_)
+                        if lane is not None:
+                            keep = []
+                            for ent in out[n0:]:
+                                ok_ = True
+                                for sg in ent[len(pad_):]:
+                                    for idx in grid.segment_cells(sg[0], sg[1], sg[2], sg[3], sg[4], grid.pitch // 2):
+                                        v_ = lane[idx]
+                                        if v_ > 0 and v_ != net.code and v_ != mate:
+                                            ok_ = False
+                                            break
+                                    if not ok_:
+                                        break
+                                if ok_:
+                                    keep.append(ent)
+                            out[n0:] = keep
                 return out
 
             # a via swap: where the pins are in opposite order at the two ends,
