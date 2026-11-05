@@ -77,6 +77,11 @@ def main(argv):
     board_file = HERE / "fixtures" / "obd2-adapter.kicad_pcb"
     skip, pitch, out = [], 0.1, None
     options = NativeOptions()
+    # power widening: supply rails, not control signals that carry a power word
+    for name, rail in (("+5v", True), ("VBUS_IN", True), ("/USB_Hub/+3V3_USBHUB", True), ("GND", True),
+                       ("/USB_Hub/HUB_PWR_EN1", False), ("PWR_BUT", False), ("nPWR_LED", False),
+                       ("/USB_Hub/HUB_nOC4", False), ("SDA", False)):
+        assert apply._is_rail(name.split("/")[-1], options.power_patterns) == rail, name
     while args:
         a = args.pop(0)
         if a == "--skip":

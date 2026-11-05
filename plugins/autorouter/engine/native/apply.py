@@ -518,6 +518,151 @@ def snap_tiny_joins(board, items, tiny: int = 100_000, reach: int = 100_000) -> 
     return fixed
 
 
+_CONTROL_WORDS = {"EN", "BUT", "LED", "OC", "NOC", "GOOD", "PG", "SENSE", "FAULT", "FLT", "ALERT", "INT", "RST", "NRST", "DET"}
+
+
+def _is_rail(name: str, patterns) -> bool:
+    """A supply net by name (the power patterns), not a control signal that
+    only carries a power word (HUB_PWR_EN1, PWR_BUT, nPWR_LED)."""
+    import fnmatch
+    if not any(fnmatch.fnmatchcase(name.upper(), p.upper()) for p in patterns):
+        return False
+    words = {w for w in name.upper().replace("-", "_").replace("/", "_").split("_") if w}
+    return not (words & _CONTROL_WORDS or any(w.rstrip("0123456789") in _CONTROL_WORDS for w in words))
+
+
+def widen_power(board, items, patterns, cap: int = 500_000, neck: int = 750_000,
+                fine_pitch: int = 800_000, fine_margin: int = 500_000) -> int:
+    """After a run: the run's power-rail segments get as wide as the room
+    around them allows, up to `cap` (pre-defined widths only). Routing keeps
+    a rail at the width its narrowest pad fits so that it never takes room a
+    signal needs; with every route in place, widening only where nothing of
+    another net comes within clearance cannot open or short anything. A
+    segment too close to something along its whole length keeps its width;
+    one that is only tight at an end (a fine-pitch pad, a via between pins)
+    keeps a narrow neck there. Returns how many segments were widened."""
+    widths = sorted({int(w) for w in board.GetDesignSettings().m_TrackWidthList if 0 < int(w) <= cap}, reverse=True)
+    if not widths:
+        return 0
+    rails = {c for c, n in board.GetNetsByNetcode().items() if c > 0 and _is_rail(n.GetNetname(), patterns)}
+    segs = [t for t in items if t.GetClass() == "PCB_TRACK" and t.GetNetCode() in rails]
+    if not segs:
+        return 0
+    hole_clear = int(board.GetDesignSettings().m_HoleClearance)
+    edge_clear = int(board.GetDesignSettings().m_CopperEdgeClearance)
+    others = [t for t in board.GetTracks()]
+    pads = list(board.GetPads())
+    edges = [d for d in board.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts]
+    for fp in board.GetFootprints():
+        edges += [d for d in fp.GraphicalItems() if d.GetLayer() == pcbnew.Edge_Cuts]
+
+    nc_clear = {}
+
+    def gap(item, layer) -> int:
+        # the larger of the item's resolved clearance and its net class's
+        # (a run's grid rounds to the class value; DRC wants it in full)
+        code = item.GetNetCode()
+        if code not in nc_clear:
+            try:
+                nc_clear[code] = int(item.GetEffectiveNetClass().GetClearance())
+            except Exception:
+                nc_clear[code] = 0
+        return max(int(item.GetOwnClearance(layer)), nc_clear[code])
+
+    # fine-pitch parts (a pin within 0.8 mm of the next): their pad area and a
+    # margin round it stay at routing width. A wide rail there reads as a blob
+    # over the pin row or a ring hugging a QFN's toes, not as a trunk.
+    fine_boxes = []
+    for fp in board.GetFootprints():
+        fpads = list(fp.Pads())
+        pos = [(p.GetPosition().x, p.GetPosition().y) for p in fpads]
+        if len(pos) < 4 or not any(min(math.hypot(x - u, y - v) for j, (u, v) in enumerate(pos) if j != i) < fine_pitch
+                                   for i, (x, y) in enumerate(pos)):
+            continue
+        box = None
+        for p in fpads:
+            if box is None:
+                box = p.GetBoundingBox()
+            else:
+                box.Merge(p.GetBoundingBox())
+        box.Inflate(fine_margin)
+        fine_boxes.append(box)
+
+    def clear(t, layer) -> bool:
+        net = t.GetNetCode()
+        box = t.GetBoundingBox()
+        if any(box.Intersects(f) for f in fine_boxes):
+            return False
+        box.Inflate(1_000_000)
+        shape = t.GetEffectiveShape(layer)
+        own = gap(t, layer) + 5_000
+        for o in others:
+            if o.GetNetCode() == net or not o.IsOnLayer(layer) or not o.GetBoundingBox().Intersects(box):
+                continue
+            if o.GetClass() == "PCB_VIA" or o.GetLayer() == layer:
+                if shape.Collide(o.GetEffectiveShape(layer), max(own, gap(o, layer) + 5_000)):
+                    return False
+        for p in pads:
+            if not p.GetBoundingBox().Intersects(box):
+                continue
+            if p.GetNetCode() != net or p.GetNetCode() <= 0:
+                if p.IsOnLayer(layer) and shape.Collide(p.GetEffectiveShape(layer), max(own, gap(p, layer) + 5_000)):
+                    return False
+                if p.HasHole() and shape.Collide(p.GetEffectiveHoleShape(), hole_clear + 5_000):
+                    return False
+        for d in edges:
+            if d.GetBoundingBox().Intersects(box) and shape.Collide(d.GetEffectiveShape(), edge_clear + 5_000):
+                return False
+        return True
+
+    def at(s, e, d):
+        L = math.hypot(e.x - s.x, e.y - s.y)
+        return pcbnew.VECTOR2I(int(round(s.x + (e.x - s.x) * d / L)), int(round(s.y + (e.y - s.y) * d / L)))
+
+    widened = 0
+    segs.sort(key=lambda t: -t.GetLength())
+    for t in segs:
+        w0 = t.GetWidth()
+        layer = t.GetLayer()
+        # copies: SWIG's GetStart/GetEnd hand back the track's own point
+        s = pcbnew.VECTOR2I(t.GetStart().x, t.GetStart().y)
+        e = pcbnew.VECTOR2I(t.GetEnd().x, t.GetEnd().y)
+        length = t.GetLength()
+        done = False
+        for w in widths:
+            if w <= w0:
+                break
+            # whole segment, then with a neck at the start, the end or both
+            for a, b in ((0, 0), (neck, 0), (0, neck), (neck, neck),
+                         (2 * neck, 0), (0, 2 * neck), (2 * neck, 2 * neck)):
+                if a + b and length < a + b + neck:
+                    continue
+                ns, ne = (at(s, e, a) if a else s), (at(s, e, length - b) if b else e)
+                t.SetStart(ns)
+                t.SetEnd(ne)
+                t.SetWidth(w)
+                if clear(t, layer):
+                    for p, q in ([(s, ns)] if a else []) + ([(ne, e)] if b else []):
+                        extra = pcbnew.PCB_TRACK(board)
+                        extra.SetStart(p)
+                        extra.SetEnd(q)
+                        extra.SetWidth(w0)
+                        extra.SetLayer(layer)
+                        extra.SetNetCode(t.GetNetCode())
+                        board.Add(extra)
+                        others.append(extra)
+                    done = True
+                    break
+                t.SetStart(s)
+                t.SetEnd(e)
+                t.SetWidth(w0)
+            if done:
+                break
+        if done:
+            widened += 1
+    return widened
+
+
 def add_path(board, layers: List[LayerInfo], path: RoutedPath, trim: bool = False) -> List[object]:
     """Create the items for one path and add them to the board; returns them.
     With trim, segments are cut where the board already has the same copper

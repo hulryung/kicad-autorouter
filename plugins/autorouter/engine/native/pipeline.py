@@ -299,6 +299,13 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
                 out.stats["dangling_vias_removed"] = native_apply.prune_dangling_vias(board, live)
             except Exception as e:
                 out.stats["prune_error"] = repr(e)
+            # power rails: as wide as the finished board leaves room for
+            gone = {str(item.m_Uuid.AsString()) for item in _REMOVED + native_apply._REMOVED}
+            live = [t for t in live if str(t.m_Uuid.AsString()) not in gone]
+            try:
+                out.stats["power_widened"] = native_apply.widen_power(board, live, options.power_patterns)
+            except Exception as e:
+                out.stats["widen_error"] = repr(e)
     if apply_paths and not (cancelled and cancelled()):
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
