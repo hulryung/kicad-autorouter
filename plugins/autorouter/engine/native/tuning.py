@@ -697,8 +697,36 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
     pitches = [float(max(spacing, w + clr))]
     if w + clr < pitches[0]:
         pitches.append(float(w + clr))
+    # a pair line: its partner's copper, to tell the stretches where the two
+    # run side by side from those where they are already apart (the loose
+    # finishes into a part's pins, a split round a via)
+    partner = []
+    if avoid_net:
+        for t in board.GetTracks():
+            if t.GetClass() in ("PCB_TRACK", "PCB_ARC") and t.GetNetCode() == avoid_net:
+                s_, e_ = t.GetStart(), t.GetEnd()
+                partner.append((t.GetLayer(), s_.x, s_.y, e_.x, e_.y))
+    beside = 3 * w + clr / 2.0
 
-    def survey(need: float) -> Tuple[float, List[_Slot], float]:
+    def apart(sl: _Slot, p: float) -> bool:
+        """The bump's stretch of its run is clear of the partner line: a
+        meander there costs the pair no coupling."""
+        tr = sl.track
+        s_, e_ = tr.GetStart(), tr.GetEnd()
+        ln = math.hypot(e_.x - s_.x, e_.y - s_.y)
+        if ln <= 0:
+            return False
+        ux, uy = (e_.x - s_.x) / ln, (e_.y - s_.y) / ln
+        lid = tr.GetLayer()
+        for f in (0.0, 0.5, 1.0):
+            along = sl.x0 + f * p
+            px, py = s_.x + ux * along, s_.y + uy * along
+            for l_, ax, ay, bx, by in partner:
+                if l_ == lid and _seg_dist((px, py, px, py), (ax, ay, bx, by)) < beside:
+                    return False
+        return True
+
+    def survey(need: float, only_apart: bool = False) -> Tuple[float, List[_Slot], float]:
         best: Tuple[float, List[_Slot], float] = (0.0, [], pitches[0])     # (length it can add, slots, pitch)
         for p in pitches:
             slots: List[_Slot] = []
@@ -709,6 +737,8 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
 
             for t in tracks:
                 found = _slots(room, t, p, float(amin), float(amax), clr, avoid_net)
+                if only_apart:
+                    found = [sl for sl in found if apart(sl, p)]
                 slots += found
                 if capacity(found) >= need:
                     # one straight run holds it all: keep the meander in one place (one
@@ -724,7 +754,15 @@ def lengthen(board, room: _Room, code: int, need: float, clr: int, spacing: int,
                 break
         return best
 
-    best = survey(need)
+    best = None
+    if partner:
+        # a pair line's skew meander where the two lines are apart already,
+        # when that holds it all; else the usual places beside the partner
+        got = survey(need, only_apart=True)
+        if got[0] >= need:
+            best = got
+    if best is None:
+        best = survey(need)
     pushed, new, removed = 0.0, [], []
     if best[0] < need:
         pushed, new, removed = _push(board, room, code, need, clr, float(amax))
