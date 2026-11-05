@@ -1242,12 +1242,32 @@ class Router:
             pairs_ends = (("a", "b"), ("b", "a"))
         else:
             pairs_ends = (("a", "a"), ("b", "b"))
-        # per end: (A's cluster, B's cluster) combinations, neighbours first
+        def used(code, i):
+            """Has a routed line of this net landed on cluster i already?"""
+            return any(pth.conn.net == code and any(i in jn for jn in pth.joins) for pth in self.paths.values())
+
+        def far_dist(net, i, conn, far_end):
+            (x1, y1), (x2, y2) = net.clusters[i].anchors[0], net.clusters[getattr(conn, far_end)].anchors[0]
+            return math.hypot(x1 - x2, y1 - y2)
+
+        # per end: (A's cluster, B's cluster) combinations, neighbours first;
+        # among equally tight ones (a flow-through ESD array's twin pins) the
+        # pins no line has landed on yet, then the ones facing the far end: a
+        # pair's second leg leaves the array from the side its first leg did
+        # not come in on, as a designer runs it straight through
         per_end = []
-        for end_a, end_b in pairs_ends:
+        for n_end, (end_a, end_b) in enumerate(pairs_ends):
+            far_a, far_b = pairs_ends[1 - n_end]
             combos = [(gap(i, j), i, j) for i in choices(na, ca, end_a) for j in choices(nb, cb, end_b)]
             combos.sort()
             best = combos[0][0] if combos else 0
+            if len(combos) > 1:
+                tight = best * 1.25 + 1e-9
+                combos.sort(key=lambda t: (t[0] > tight,
+                                           (used(ca.net, t[1]) + used(cb.net, t[2])) if t[0] <= tight else 0,
+                                           (far_dist(na, t[1], ca, far_a) + far_dist(nb, t[2], cb, far_b))
+                                           if t[0] <= tight else 0,
+                                           t[0]))
             # side by side only: within twice the closest spacing (and 3 of them at most)
             per_end.append([(i, j) for g, i, j in combos if g <= max(best * 2, best + 1)][:3]
                            or [(getattr(ca, end_a), getattr(cb, end_b))])
@@ -1265,7 +1285,9 @@ class Router:
                 if self._try_pair_once(ca2, cb2, via_cost, cap, on_path, cancelled):
                     return True
                 why = why or self._pair_why
-                if self._pair_why not in ("cross", "pinch"):
+                # "blocked": these pins' entries hit other copper; the
+                # neighbouring twin pins may still let the pair in
+                if self._pair_why not in ("cross", "pinch", "blocked"):
                     self._pair_why = why
                     return False
         self._pair_why = why or self._pair_why
