@@ -220,7 +220,8 @@ def intent_metrics(board, o, job, si_plan) -> dict:
                     coupled += t.GetLength() / n
         la = kicad_len_all.get(name, sum(t.GetLength() for t in a))
         lb = kicad_len_all.get(other, sum(t.GetLength() for t in b))
-        exc = next((e for e in job.pair_exceptions if name in e["nets"]), None)
+        excs = [e for e in job.pair_exceptions if name in e["nets"]]
+        exc = {"text": "; ".join(dict.fromkeys(e["text"] for e in excs))} if excs else None
         pairs.append({"pair": f"{name} / {other}", "coupled_pct": round(100 * coupled / total, 1) if total else 0.0,
                       "skew_mm": round(abs(la - lb) / 1e6, 3), "length_mm": round(max(la, lb) / 1e6, 2),
                       # connected directly on purpose (coupling impossible or unnecessary), and why

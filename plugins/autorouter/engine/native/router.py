@@ -1185,8 +1185,17 @@ class Router:
                    for e in self.pair_exceptions):
             # exempt_skew: coupling was not needed here; whether the skew is
             # waived too depends on the whole pair being short (decided after routing)
+            text = PAIR_EXCEPTIONS.get(why, why)
+            if len(na.clusters) > 2 or len(nb.clusters) > 2:
+                # a pair through series parts (a TVS, a common-mode choke) has
+                # several legs: say which one, so a short hop does not read as
+                # the whole pair being uncoupled
+                ends = where.split(" - ")
+                leg = (f"the {ends[0]} pin-to-pin link" if len(ends) == 2 and ends[0] == ends[1]
+                       else f"the {where} leg")
+                text = f"{leg} only (the rest of the pair is coupled where there is room): {text}"
             self.pair_exceptions.append({"nets": [na.name, nb.name], "reason": why,
-                                         "text": PAIR_EXCEPTIONS.get(why, why), "where": where,
+                                         "text": text, "where": where,
                                          "exempt_skew": why in PAIR_UNNECESSARY})
         factor = max(1, self.opts.pair_direct_via_factor)
         for c in (ca, cb):
