@@ -266,7 +266,7 @@ def _penalty(m, base_seconds):
     """Lower is better. Hard problems dominate; the artwork terms break ties."""
     agree, total = (int(x) for x in m["escape_side_agreement"].split(" of "))
     own_vias = m["vias"] - m.get("fanout_vias", 0) - m.get("stitching_vias", 0)
-    p = (1000 * (m.get("unconnected_after") or 0) + 300 * m.get("drc_errors", 0) + 40 * m.get("dangling", 0)
+    p = (1000 * (m.get("unconnected_after") or 0) + 300 * m.get("drc_errors", 0) + 40 * (m.get("dangling", 0) + (m.get("drc") or {}).get("via_dangling/warning", 0))
          + 20 * m.get("off_45", 0) + 20 * m.get("doubled_back", 0) + 20 * m.get("acute_corners", 0)
          + 5 * (total - agree)
          + 0.05 * m["length_mm"] + 0.5 * max(0, own_vias)
