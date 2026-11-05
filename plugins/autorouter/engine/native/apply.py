@@ -239,7 +239,30 @@ def prune_dangling_vias(board, items) -> int:
         pos = via.GetPosition()
         r = via.GetBoundingBox().GetWidth() // 2
         if bridges(via):
-            continue
+            # the via's copper is a join on one layer only, which KiCad
+            # still flags as dangling: a short track from its centre to
+            # each track end inside its rim takes its place
+            added = []
+            for t in by_net_tracks.get(net, []):
+                if t.GetClass() != "PCB_TRACK":
+                    continue
+                for end in (t.GetStart(), t.GetEnd()):
+                    d = math.hypot(end.x - pos.x, end.y - pos.y)
+                    if 1_000 < d <= r:
+                        seg = pcbnew.PCB_TRACK(board)
+                        seg.SetStart(pcbnew.VECTOR2I(pos.x, pos.y))
+                        seg.SetEnd(pcbnew.VECTOR2I(end.x, end.y))
+                        seg.SetLayer(t.GetLayer())
+                        seg.SetWidth(t.GetWidth())
+                        seg.SetNetCode(net)
+                        added.append(seg)
+            if not added:
+                continue
+            for seg in added:
+                board.Add(seg)
+                items.append(seg)
+                by_net_tracks.setdefault(net, []).append(seg)
+                own.add(str(seg.m_Uuid.AsString()))
         # the job's tracks with an end inside the via: once it is gone, an end
         # touching nothing else (no other track, via or pad) is a stub
         stubs = []
