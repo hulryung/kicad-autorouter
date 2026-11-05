@@ -153,8 +153,10 @@ def prune_dangling_vias(board, items) -> int:
     one layer only (a plane-net pad via that missed the plane's fill, a
     fanout via a route made unnecessary) joins nothing; KiCad flags it as
     dangling. It comes off the board, and so does any of the job's tracks
-    it leaves ending in the air (the stub that led to it). Removing such a
-    via never breaks a connection. The pours are refilled first when a
+    it leaves ending in the air (the stub that led to it). A via whose copper
+    is the only join between two pieces on its one layer (a pad stub ending
+    at its centre, a route starting at its rim) stays: removing it, and the
+    route as "its stub", would leave the pad open. The pours are refilled first when a
     candidate turns up, so the check sees the copper DRC will see. Returns
     how many vias were removed."""
     vias = [t for t in items if t.GetClass() == "PCB_VIA"]
@@ -195,11 +197,49 @@ def prune_dangling_vias(board, items) -> int:
     cands = lonely(cands)
     own = {str(t.m_Uuid.AsString()) for t in items if t.GetClass() in ("PCB_TRACK", "PCB_ARC")}
     removed = 0
+
+    def bridges(via) -> bool:
+        """The via's copper is what joins two pieces of its net on one layer
+        (a pad stub ending at its centre and a route starting at its rim):
+        it does connect something, even on a single layer."""
+        net = via.GetNetCode()
+        items = []
+        for t in by_net_tracks.get(net, []):
+            if t.GetClass() == "PCB_TRACK" and _collide(via, t, t.GetLayer()):
+                items.append((t, t.GetLayer()))
+        for p in by_net_pads.get(net, []):
+            for layer in copper:
+                if p.IsOnLayer(layer) and _collide(via, p, layer):
+                    items.append((p, layer))
+                    break
+        if len(items) < 2:
+            return False
+        root = list(range(len(items)))
+
+        def find(i):
+            while root[i] != i:
+                root[i] = root[root[i]]
+                i = root[i]
+            return i
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                (a, la), (b, lb) = items[i], items[j]
+                if b.GetClass() == "PCB_TRACK" and la != lb:
+                    continue
+                layer = la if a.GetClass() == "PCB_TRACK" else lb
+                if not (a.IsOnLayer(layer) and b.IsOnLayer(layer)):
+                    continue
+                if _collide(a, b, layer):
+                    root[find(i)] = find(j)
+        return len({find(i) for i in range(len(items))}) > 1
+
     for via in cands:
         net = via.GetNetCode()
         uid = str(via.m_Uuid.AsString())
         pos = via.GetPosition()
         r = via.GetBoundingBox().GetWidth() // 2
+        if bridges(via):
+            continue
         # the job's tracks with an end inside the via: once it is gone, an end
         # touching nothing else (no other track, via or pad) is a stub
         stubs = []

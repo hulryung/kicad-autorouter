@@ -357,6 +357,8 @@ def _pick_pair_ends(nets: Dict[int, NetInfo], connections: List[Connection]) -> 
 DENSE_PITCH_NM = 700_000     # a row of pins closer than this cannot take a via between two outlets
 DENSE_ROW_GAP_NM = 5_000_000 # two such rows this close face each other (a connector, not a QFP)
 DEEP_OUTLET_NM = 1_400_000   # every other pin of a dense row keeps vias this far off (staggered depths)
+DENSE_OUT_TARGET_NM = 3_000_000   # a channel-side pin whose target is this far past its row's outer side leaves outward
+DENSE_OUT_OUTLET_NM = 2_000_000   # ...and keeps its via past both outward neighbours' (0.6 / 1.4 mm)
 
 
 def _dense_rows(fp) -> Dict[str, Tuple[int, Optional[Tuple[float, float]]]]:
@@ -1353,6 +1355,16 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 # loses its coupling (TRD2 against TRD0 on a CM5); the
                 # designer fans both outward, side by side
                 want_in = False
+            elif want_in and not net.partner and net.group != "power" and target is not None \
+                    and ((target[0] - pos.x) * inward[0] + (target[1] - pos.y) * inward[1]) < -DENSE_OUT_TARGET_NM:
+                # a plain signal whose far end lies past the outer side of
+                # its row does not cross the channel between the rows: the
+                # designer takes it outward (CAN_SCK, LED2/LED3, GPIO7 on a
+                # CM5) and keeps the channel for the nets that cross it. Its
+                # neighbours leave outward too, so its via goes deeper than
+                # either of theirs (the designer's sit 0.8 to 2.7 mm off).
+                want_in = False
+                outlet_len = DENSE_OUT_OUTLET_NM
             escapes.sort(key=lambda e: (-_inward(e) if want_in else _inward(e)))
             if _DEBUG:
                 print(f"[dense] {net.name} {ref}.{pad.GetNumber()} pin {dense_info[0]} leaves "
