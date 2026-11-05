@@ -426,6 +426,7 @@ def _faces_pair(fp, pos, inward: Tuple[float, float], nets) -> bool:
 # designer runs GNSS_TX / RS485_DE on In2 at a CM5. Power nets, pairs and
 # plane nets keep the full surcharge (a +5v run that took the cheap plane
 # layer east past the connector left two +5v joins open).
+EP_ARRAY_MIN_NM = 2_400_000          # an SMD plane pad this big both ways gets a 2x2 via array
 DENSE_RELIEF_MARGIN_NM = 1_500_000   # (the share: astar's relief_share)
 
 
@@ -1810,6 +1811,28 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     fanout_alt: Dict[int, List[int]] = {}        # exit cell -> the same pad's other exits
     fanout_goals: Dict[int, Set[int]] = {}       # exit cell -> cells on the net's pour layers within 3 mm
     fanout_strict: Set[int] = set()              # exit cells whose via must land on those goals
+    fanout_array: Dict[int, List[Tuple[int, int]]] = {}
+    fanout_array_cells: Dict[int, Set[int]] = {}
+    tied_pad_cells: Dict[int, Set[int]] = {}
+    fanout_tie_only: Set[int] = set()
+
+    def _beside_exposed_pad(pad, code) -> bool:
+        """A fine-pitch pin (another pin within 0.8 mm) of a part that has a
+        big SMD pad of the same plane net: a QFN's GND pin next to its EP."""
+        fp = pad.GetParentFootprint()
+        if fp is None:
+            return False
+        pads = list(fp.Pads())
+        pos = pad.GetPosition()
+        if not any(q.GetNumber() != pad.GetNumber() and
+                   math.hypot(q.GetPosition().x - pos.x, q.GetPosition().y - pos.y) < 800_000 for q in pads):
+            return False
+        for q in pads:
+            bb = q.GetBoundingBox()
+            if q.GetNetCode() == code and q.GetAttribute() == pcbnew.PAD_ATTRIB_SMD \
+                    and min(bb.GetWidth(), bb.GetHeight()) >= EP_ARRAY_MIN_NM:
+                return True
+        return False
     stranded_pads = 0
 
     def _via_near(code: int, x: int, y: int, within: int) -> bool:
@@ -1962,6 +1985,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     continue                      # pours follow the routing scope
             tie = _via_tie(pad) if not options.shove else int(_via_near(code, pos.x, pos.y, 1_500_000 + nets[code].rules.via_diameter))
             if tie == 1:
+                bb = pad.GetBoundingBox()
+                if pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD and min(bb.GetWidth(), bb.GetHeight()) >= EP_ARRAY_MIN_NM:
+                    tied_pad_cells.setdefault(code, set()).update(own_cells)
                 continue                          # a via already fans this pad out
             if nets[code].route and not (options.power_pours and len(zone_layers[code]) >= 1):
                 continue                          # a routed net without a usable pour
@@ -1990,6 +2016,16 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     stranded_pads += 1
             elif exits:                           # no stub: the via is sought around the pad itself
                 fanout.append((code, exits[0]))
+                if _beside_exposed_pad(pad, code):
+                    fanout_tie_only.add(exits[0])
+                bb = pad.GetBoundingBox()
+                if pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD and min(bb.GetWidth(), bb.GetHeight()) >= EP_ARRAY_MIN_NM:
+                    # an exposed pad: 2x2 vias at its quarter points
+                    cxm, cym = bb.GetCenter().x, bb.GetCenter().y
+                    qx, qy = bb.GetWidth() // 4, bb.GetHeight() // 4
+                    fanout_array_cells[exits[0]] = set(own_cells)
+                    fanout_array[exits[0]] = [(grid.cell_x(cxm + sx * qx), grid.cell_y(cym + sy * qy))
+                                              for sx in (-1, 1) for sy in (-1, 1)]
                 if len(exits) > 1:
                     fanout_alt[exits[0]] = exits[1:]
                 goals = _plane_goals(code, pos, pl)
@@ -2186,7 +2222,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
-                             fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_strict=fanout_strict,
+                             fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_strict=fanout_strict, fanout_array=fanout_array, fanout_array_cells=fanout_array_cells,
+                             tied_pad_cells=tied_pad_cells, fanout_tie_only=fanout_tie_only,
                              stitch=stitch, existing=existing, via_guard=via_guard,
                              lane_guard=lane_guard, site_guard=site_guard, board_vias=existing_vias)
     for fp in board.GetFootprints():

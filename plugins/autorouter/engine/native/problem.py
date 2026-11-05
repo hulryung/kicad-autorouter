@@ -205,6 +205,15 @@ class RoutingProblem:
     # exit cells of pads whose via is stranded in a pour island: the new via
     # must land on the goals (the filled plane), not next to the pad
     fanout_strict: Set[int] = field(default_factory=set)
+    # exit cell of a large plane pad (a QFN's exposed pad) -> grid spots
+    # (cx, cy) inside the pad for an array of vias, the way a designer ties a
+    # thermal pad down (the single via is the fallback)
+    fanout_array: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
+    fanout_array_cells: Dict[int, Set[int]] = field(default_factory=dict)   # ...and that pad's copper cells
+    tied_pad_cells: Dict[int, Set[int]] = field(default_factory=dict)       # net -> copper of big pads a via already ties
+    # exit cells of fine-pitch plane pins whose part has an exposed pad of the
+    # same net: they join that pad with a short track instead of a via
+    fanout_tie_only: Set[int] = field(default_factory=set)
     stitch: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> candidate (cx, cy) via spots
     island_stitch: List[Tuple[int, List[Tuple[int, int]]]] = field(default_factory=list)
     board_vias: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)   # net -> via centres (nm) on the board already

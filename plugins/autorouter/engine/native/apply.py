@@ -1,5 +1,6 @@
 """Putting routed paths on the board as tracks and vias (main thread only)."""
 import math
+import os
 from typing import Iterable, List
 
 import pcbnew
@@ -273,6 +274,8 @@ def prune_dangling_vias(board, items) -> int:
                 if math.hypot(end.x - pos.x, end.y - pos.y) <= r:
                     stubs.append((t, end))
                     break
+        if os.environ.get("AUTOROUTER_DEBUG"):
+            print(f"[prune] {via.GetNetname()} via at ({pos.x / 1e6:.2f}, {pos.y / 1e6:.2f})", flush=True)
         board.Remove(via)
         via.thisown = 0
         _REMOVED.append(via)

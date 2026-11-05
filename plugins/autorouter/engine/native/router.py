@@ -2487,13 +2487,18 @@ class Router:
         # of a QFP, half a millimetre away) are the fallback: a pad-to-pad
         # link, the way a designer bridges two adjacent power pins.
         wired: Set[int] = set()
+        via_cells: Set[int] = set()
         for path in self.paths.values():
             if path.conn.net == code:
                 wired.update(path.cells)
                 for x, y in path.path.vias:
                     vx, vy = grid.cell_x(x), grid.cell_y(y)
                     if grid.inside(vx, vy):
-                        wired.add(grid.index(layer, vx, vy))
+                        via_cells.add(grid.index(layer, vx, vy))
+        wired |= via_cells
+        # a big pad with vias in it (an exposed pad's array) is tied to the
+        # plane all over: a GND pin or capacitor beside it may end anywhere on it
+        wired |= getattr(self, "tied_pads", {}).get(code, set())
         own_cluster: Set[int] = set()
         others: Set[int] = set()
         for cl in net.clusters:
@@ -2818,6 +2823,7 @@ class Router:
         handled = set()
         self.pairs_routed = 0
         self.pair_exceptions: List[dict] = []
+        self.tied_pads: Dict[int, Set[int]] = {k: set(v) for k, v in self.p.tied_pad_cells.items()}
         # pairs whose lines cross: a via swap is tried once every other pair
         # has its plain run, so a long swapped pair cannot take the room a
         # pair that runs straight through needs
@@ -2994,7 +3000,20 @@ class Router:
                 # a pad whose via is stranded in a pour island: a spot next to
                 # the pad would land in that island again, only the search
                 # to the plane's main fill helps
+                if cell in self.p.fanout_tie_only:
+                    continue                    # tied to its part's exposed pad below, no via
                 strict = cell in self.p.fanout_strict
+                spots = getattr(self.p, "fanout_array", {}).get(cell)
+                if spots and not strict:
+                    placed = [rp for rp in (self._stitch_via(code, cx, cy) for cx, cy in spots) if rp is not None]
+                    if placed:
+                        for rp in placed:
+                            fanout_paths.append(rp)
+                            if on_path:
+                                on_path(rp)
+                        fanned.add(cell)
+                        self.tied_pads.setdefault(code, set()).update(self.p.fanout_array_cells.get(cell, ()))
+                        continue
                 for exit_cell in ([] if strict else [cell] + self.p.fanout_alt.get(cell, [])):
                     rp = self._fanout_via(code, exit_cell)
                     if _DEBUG and (code, cell) in self.restore:
