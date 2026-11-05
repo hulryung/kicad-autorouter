@@ -1920,10 +1920,22 @@ class Router:
                     return [pad]
                 out, seen = [], set()
 
-                if ex is not None and (gx, gy) != (px, py):
+                # "on along the escape": the stub's last stretch (exit point to
+                # cell), not pad centre to cell; a pad whose centre sits off the
+                # stub (a twin pin's join) would tilt the dog-leg's straight leg
+                # off 45 degrees. Snapped to the nearest octilinear heading, so
+                # the straight leg and the 45 after it both stay on the grid's angles.
+                if ex is not None and (gx, gy) != (ex, ey):
+                    ux, uy = gx - ex, gy - ey
+                elif ex is not None and (gx, gy) != (px, py):
                     ux, uy = gx - px, gy - py
                 else:
                     ux, uy = jx - gx, jy - gy
+                if ux or uy:
+                    ang = round(math.atan2(uy, ux) / (math.pi / 4)) * (math.pi / 4)
+                    ux, uy = math.cos(ang), math.sin(ang)
+                    ux = 0.0 if abs(ux) < 1e-9 else ux
+                    uy = 0.0 if abs(uy) < 1e-9 else uy
                 norm = math.hypot(ux, uy) or 1.0
                 ux, uy = ux / norm, uy / norm
 
