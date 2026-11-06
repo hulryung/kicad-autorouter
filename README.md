@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.3.0 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.3.0)
+**Current release:** [0.4.0 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.4.0)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -25,15 +25,25 @@ service or AI account is required.
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
 
-### New in 0.3.0
+### New in 0.4.0
 
-- Signal via checks use clearance maps sized for the via barrel, avoiding a
-  redundant grid-radius expansion that could block legal escape sites.
-- Copper islands are checked after signal routing as well as power repairs.
-- Temporary keepouts account for the width of the copper being routed.
-- Fine-pitch pin via sites are preserved during rip-up searches.
-- Installable packages include the license and installation instructions;
-  builds are reproducible and include SHA-256 checksums.
+- **Board setup tab:** checks Board Setup and the project's net classes before
+  routing and applies the fixes you tick; a pre-flight check runs before each
+  routing job.
+- **Differential pairs:** pad entries turn toward the coupled run and follow
+  the pad's own stub; pairs through flow-through TVS parts start from the twin
+  pins facing onward; loose-end finishes no longer cross; pairs facing each
+  other across a dense connector row fan outward; skew meanders go where the
+  two lines are already apart; pairs outside an impedance class still get
+  their P/N skew matched. Pair exceptions name the leg they apply to.
+- **Power and ground:** power rails are widened after routing, up to 0.5 mm,
+  wherever clearance allows (fine-pitch parts keep routing width); QFN
+  exposed pads get a 2x2 via array and their GND pins join the pad directly.
+- **Clean-up:** tiny off-angle joins are snapped, vias that join nothing are
+  removed, and a via that only joins two tracks on one layer becomes a track.
+- **Benchmarking:** `scripts/rubric.py` scores a benchmark with a fixed rubric
+  (measured criteria plus the median of reviewer judgements), so results are
+  repeatable.
 
 ## Installation
 
@@ -56,8 +66,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.3.0.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.3.0),
+Download `kicad-autorouter-0.4.0.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.4.0),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -68,7 +78,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The built-in router uses KiCad's bundled Python environment.
 - The optional AI assistant requires an installed, authenticated `codex` CLI.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.3.0 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.4.0 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약
@@ -278,18 +288,22 @@ kept locally in the job folder. The built-in router works without this feature.
 
 ## Validation and examples
 
-For the **0.3.0 four-layer CM5 regression**, three deterministic search budgets
+For the **0.4.0 four-layer CM5 regression**, three deterministic search budgets
 produced the following results:
 
-| Work-rate setting (expansions/s) | Earlier baseline: unconnected | 0.3.0: unconnected | Added physical / rule errors |
-| --- | --- | --- | --- |
-| 85,000 | 20 | 0 | 0 / 0 |
-| 100,000 | 15 | 0 | 0 / 0 |
-| 115,000 | 13 | 0 | 0 / 0 |
+| Work-rate setting (expansions/s) | 0.3.0: unconnected | 0.4.0: unconnected | Added physical / rule errors | Vias | Off-45 segments |
+| --- | --- | --- | --- | --- | --- |
+| 85,000 | 0 | 0 | 0 / 0 | 414 | 3 |
+| 100,000 | 0 | 0 | 0 / 0 | 414 | 3 |
+| 115,000 | 0 | 0 | 0 / 0 | 414 | 3 |
 
-All three final runs produced the same geometry. **Four pre-existing
-hole-clearance errors remained**. These work-rate settings control deterministic
-search budgets; they are not measured machine throughput. This regression
+All three final runs produced the same geometry. Only pre-existing footprint
+and text warnings of the reference board remained. On the fixed rubric
+(`scripts/rubric.py`) the result scores 84.1, against 79.6 for the starting
+point of this release cycle; the HUB_DN2 pair went from 0 % to 49 % coupled
+and the +5 V rail from 0.2 mm to mostly 0.3–0.5 mm. These work-rate settings
+control deterministic search budgets; they are not measured machine
+throughput. This regression
 establishes connectivity and absence of added errors on that board, not
 fabrication readiness or complete signal-integrity compliance.
 
