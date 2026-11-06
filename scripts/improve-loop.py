@@ -403,6 +403,10 @@ def main():
     ap.add_argument("--budget-usd", type=float, default=0, help="per Claude call")
     ap.add_argument("--goal", default="", help="extra guidance for the reviewer and the improver")
     ap.add_argument("--bench-timeout", type=int, default=1800)
+    ap.add_argument("--reviews", type=int, default=3,
+                    help="with --eval-only: reviewer evaluations to take (the rubric uses their median)")
+    ap.add_argument("--rubric", action="store_true",
+                    help="with --eval-only and --reviews 1: also print the fixed-rubric score")
     ap.add_argument("--eval-only", default="", metavar="BENCH_DIR",
                     help="only score an existing benchmark directory (its metrics.json and images) and exit")
     ap.add_argument("--time-limit", type=float, default=0.0,
@@ -431,11 +435,25 @@ def main():
         args.run_dir = bench_dir.parent                     # the reviewer may read the images next to it
         intent_text = INTENT_TEXT.format(intent_file=args.intent) if args.intent and args.intent != "none" else ""
         goal = f"\nThe user's goal for this run: {args.goal}\n" if args.goal else ""
-        data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=bench_dir, goal=goal,
-                                             intent=intent_text), REPO, bench_dir / "evaluation.json", args,
-                          schema=EVAL_SCHEMA, tools=("Read",))
-        ev = structured(data)
-        print(json.dumps(ev, indent=1, ensure_ascii=False))
+        files = []
+        for k in range(1, max(1, args.reviews) + 1):
+            out = bench_dir / (f"evaluation-{k}.json" if args.reviews > 1 else "evaluation.json")
+            data = run_claude(EVAL_PROMPT.format(board=args.reference.name, skip=args.skip, bench=bench_dir, goal=goal,
+                                                 intent=intent_text), REPO, out, args,
+                              schema=EVAL_SCHEMA, tools=("Read",))
+            ev = structured(data)
+            out.write_text(json.dumps(ev, indent=1, ensure_ascii=False))
+            files.append(str(out))
+        if args.reviews <= 1 and not args.rubric:
+            print(json.dumps(ev, indent=1, ensure_ascii=False))
+            return
+        # the fixed rubric: measured criteria from the benchmark, the reviewed
+        # ones as the median over the reviews (scripts/rubric.py)
+        r = subprocess.run([args.kicad_py, str(REPO / "scripts" / "rubric.py"), "--bench", str(bench_dir),
+                            "--reference", str(args.reference)] + files, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit("rubric failed: " + r.stderr[-2000:])
+        print(r.stdout.strip().splitlines()[-1])
         return
     args.bench_script = args.run_dir / "improve_bench.py"           # frozen: every round measured the same way
     shutil.copy(REPO / "scripts" / "improve_bench.py", args.bench_script)
