@@ -12,7 +12,7 @@ from typing import Optional
 import pcbnew
 import wx
 
-from .engine import board_setup, session, si
+from .engine import awake, board_setup, session, si
 from .engine.options import RouteOptions
 from .engine.native import (apply as native_apply, extract as native_extract, kicad_tuning as native_kicad_tuning,
                             pipeline as native_pipeline, router as native_router)
@@ -825,6 +825,11 @@ class AutorouterDialog(wx.Dialog):
         def set_layers(layers):
             self._native_layers = layers
 
+        def placed():
+            # on the UI thread, after the paths still queued there are on the board
+            return self._on_main(lambda: [u for u in (str(t.m_Uuid.AsString()) for t in self._run_added)
+                                          if u not in self._run_removed])
+
         def status(text):
             wx.CallAfter(self._show_progress, text, None)
             self._log_file(f"[router] {text}  ({time.time() - started:.0f}s)")
@@ -839,7 +844,7 @@ class AutorouterDialog(wx.Dialog):
                 job = native_pipeline.run_job(self.board, native, status=status, progress=progress,
                                               on_path=on_path, on_remove=on_remove,
                                               cancelled=lambda: self._cancel, escalate=True, apply_paths=False,
-                                              extract_fn=extract_on_ui, on_layers=set_layers)
+                                              extract_fn=extract_on_ui, on_layers=set_layers, placed=placed)
             except Exception as e:
                 logger.exception("Routing failed")
                 self._log_file(f"[router] failed after {time.time() - started:.0f}s: {e!r}")
@@ -1023,6 +1028,13 @@ class AutorouterDialog(wx.Dialog):
 
     def _set_busy(self, busy: bool):
         self.busy = busy
+        # a running job keeps macOS from napping KiCad (hidden or background
+        # windows otherwise run it at a fraction of its speed)
+        if busy and not getattr(self, "_awake", None):
+            self._awake = awake.begin("Autorouter is routing")
+        elif not busy and getattr(self, "_awake", None):
+            awake.end(self._awake)
+            self._awake = None
         self.route_btn.Enable(not busy)
         for b in (getattr(self, "ai_ask", None), getattr(self, "ai_review", None), getattr(self, "ai_score", None)):
             if b is not None:

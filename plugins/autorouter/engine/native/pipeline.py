@@ -78,7 +78,7 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
 
 def run_job(board, options: NativeOptions, status=None, progress=None, on_path=None, on_remove=None,
             cancelled: Optional[Callable[[], bool]] = None, escalate: bool = True,
-            apply_paths: bool = True, extract_fn=None, on_layers=None) -> JobResult:
+            apply_paths: bool = True, extract_fn=None, on_layers=None, placed=None) -> JobResult:
     """The whole job, in the order a designer works:
       1. signals at the normal grid (pour vias held back);
       2. a finer second pass on what is still open;
@@ -86,13 +86,22 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     When apply_paths is False the caller adds paths itself through on_path
     (the dialog does, for live display); extract_fn lets the caller run the
     board reads on its UI thread; on_layers is told the layer list of each
-    pass before its paths arrive."""
+    pass before its paths arrive; placed (with apply_paths False) returns the
+    UUIDs of the items the caller has put on the board for this job so far,
+    so a later pass may move the job's own plane vias as it does otherwise."""
     extract = extract_fn or (lambda b, o, st: native_extract.extract(b, o, status=st))
     out = JobResult()
     added: list = []                       # board items this job created (apply_paths)
     paired_items: list = []                # ...of which the coupled pairs' lines
     job_started = native_astar.clock()        # the wall clock, or the search work done (benchmarks)
     limit = options.time_limit_s if options.time_limit_s and options.time_limit_s > 0 else 0.0
+
+    def job_items() -> list:
+        """UUIDs of the items this job has on the board now (ripped ones gone)."""
+        if not apply_paths:
+            return list(placed()) if placed else []
+        gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
+        return [u for u in (str(item.m_Uuid.AsString()) for item in added) if u not in gone]
 
     def remaining() -> float:
         """Seconds left of the job's time limit (0 = no limit)."""
@@ -163,7 +172,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             options.escape_sides = dict(problem0.escape_sides)
             # those vias are the job's own: a signal pass may rip one up that
             # walls in a connection, and the pour pass drops it again if room is left
-            options.movable_uuids = [str(item.m_Uuid.AsString()) for item in added]
+            options.movable_uuids = job_items()
     first = copy.deepcopy(options)
     if pours_later:
         first.fanout_vias = False
@@ -193,11 +202,10 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     out.pair_exceptions = list(getattr(result, "pair_exceptions", []))
     out.pair_loose = list(getattr(result, "pair_loose", []))
     out.stats["budget_cuts"] = getattr(result, "budget_cuts", 0)
-    if apply_paths and options.movable_uuids:
+    if options.movable_uuids and (apply_paths or placed):
         # the plane vias as they stand now (ripped ones gone, restored ones in)
-        gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
         options = copy.copy(options)
-        options.movable_uuids = [u for u in (str(item.m_Uuid.AsString()) for item in added) if u not in gone]
+        options.movable_uuids = job_items()
 
     # the finer pass needs room in the time limit (its board read alone takes a while)
     time_for_more = not limit or remaining() > 60.0
