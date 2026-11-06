@@ -11,6 +11,11 @@ service or AI account is required.
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
+This README describes the current source checkout. PCM and the release ZIP
+provide **0.3.0**; the isolated [Codex routing search](#codex-routing-search-source-checkout)
+described below is a newer source-only feature. Use the [development install](#development)
+to try it.
+
 ## What is implemented
 
 | Area | Capabilities |
@@ -253,12 +258,29 @@ project copy, re-runs KiCad DRC, and asks Codex to score the resulting board.
 Rejected attempts never replace the best accepted board. This replaces the
 earlier in-place reviewer shipped in release 0.3.0.
 
+### From the PCB editor
+
+1. Install the development copy, open your PCB and set routing and SI options.
+2. Open **AI assistant**, enter a request, and set **Rounds** (1–10; default 3).
+   Leave **Model** blank to use your Codex CLI configuration.
+3. Click **Score and improve**. Each experiment starts from the best accepted
+   board and uses previous rejection reasons to guide the next proposal.
+4. Review the final score and applied-improvement count. Use **Open data folder**
+   to inspect `jobs/<time>-<board>-optimize/search/optimization.json` and its
+   candidates, then inspect the applied board and save it in KiCad.
+
 In the dialog, **Rounds** limits the number of experiments. The open board's
 copper stays unchanged during the search; accepted tracks, vias, arcs and tuning
 groups are applied together at the end. Placement, pad assignments and locked
 copper are protected. **Cancel** leaves the open board's copper unchanged and
 keeps the saved candidates in the data folder. DRC is mandatory for this mode,
 including when the optional DRC checkbox for the ordinary assistant is off.
+
+For scoped search requests, name nets or schematic sheets explicitly. Editor
+selection is not passed into this mode. Footprint movement is supported by
+**Ask the assistant**, but is rejected by **Score and improve**.
+
+### From the command line
 
 ```bash
 /path/to/kicad-python scripts/route-with-codex.py /path/to/board.kicad_pcb \
@@ -270,10 +292,23 @@ Use KiCad's Python, an authenticated Codex CLI and `kicad-cli`. `--model` can
 select the CLI model; omitting it uses the CLI configuration. `--time-limit`
 sets minutes per native routing action, not a deadline for the complete search.
 
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--out` | Required | Separate output directory for this run. |
+| `--attempts` | `8` | Maximum number of proposed experiments. |
+| `--patience` | `4` | Stop after this many consecutive rejected or failed experiments; acceptance resets the count. |
+| `--min-gain` | `1` | Minimum score increase required for acceptance. |
+| `--time-limit` | `10` | Minutes per native routing action; `0` disables that routing limit. |
+| `--model` | CLI configuration | Model used for proposals and reviews. |
+| `--codex` | Auto-detected | Explicit path to the Codex executable. |
+| `--request` | Route completely, then improve quality | Routing objective supplied to Codex. |
+
+### Acceptance and saved results
+
 Each candidate must increase the reviewer score by `--min-gain` (default 1),
 introduce no new DRC errors, and leave no additional unconnected items. It must
 also improve connectivity, remove an existing DRC error, or reduce measured
-copper cost (track length in mm plus 2 per via) without increasing non-octilinear
+copper cost (track length in mm plus 2 per via) by more than 0.1 without increasing non-octilinear
 straight segments. A higher model score alone is insufficient. These checks
 are routing acceptance criteria, not proof of signal-integrity compliance.
 
@@ -284,7 +319,42 @@ Use a new output directory for each run. A run stops at its attempt limit,
 patience limit, a request for missing information, or no further executable
 proposal; inspect its status rather than interpreting every stop as completion.
 
+The report records `best_board`, `initial_score`, `best_score`, `best_metrics`,
+`best_drc` and the actions, acceptance decision and reason for each attempt.
+The best board may be the original copy if no candidate passes the checks.
+
+| Report status | Meaning |
+| --- | --- |
+| `attempt_limit` | The experiment budget was exhausted. |
+| `plateau` | The consecutive-failure limit was reached. |
+| `no_proposal` | The assistant returned no executable board-edit proposal. |
+| `needs_input` | The assistant asked a question; inspect the saved actions or dialog log. |
+| `cancelled` / `failed` | The search was interrupted; a report retains the best result if initial assessment completed. |
+
 ## Validation and examples
+
+### Codex search in the current source
+
+Live Codex runs on macOS with KiCad 10.0.7 exercised both the dialog button and
+the CLI:
+
+| Case | Accepted reviewer scores | Final unconnected items | DRC result |
+| --- | --- | --- | --- |
+| Public OBD2 fixture, actual **Score and improve** button | 15 → 87 → 89 | 0 | No added errors; one existing invalid-outline error remained. |
+| Already-routed four-layer CM5 reference, CLI | 78 → 79 | 0 | No added errors; four existing hole-clearance errors remained. |
+
+The CM5 run reduced copper length from 5741.3 to 5740.8 mm with 435 vias and
+stopped after four subsequent attempts failed acceptance. The dialog run
+preserved the source file and open project while applying the accepted copper.
+Scores are model judgments from individual runs, not reproducible benchmarks
+or a guarantee that every run improves a board.
+
+Automated tests cover score-only rejection, added DRC errors, connectivity
+regressions, candidate isolation, cancellation, subprocess cleanup, copper-layer
+rendering, and transfer of groups and tuning patterns. The desktop-enabled suite
+passed; native PCB-editor Undo was not manually exercised for this new mode.
+
+### Native router in release 0.3.0
 
 For the **0.3.0 four-layer CM5 regression**, three deterministic search budgets
 produced the following results:
@@ -393,6 +463,9 @@ python3 scripts/run-tests.py
 
 # GUI smoke test: run in a desktop session with KiCad's Python:
 KICAD_AUTOROUTER_GUI_TESTS=1 /path/to/kicad-python scripts/run-tests.py dialog_smoke
+
+# Guarded Codex search and dialog tests (scripted model; no AI account needed):
+KICAD_AUTOROUTER_GUI_TESTS=1 /path/to/kicad-python scripts/run-tests.py ai_
 
 # Route a supplied board and collect results:
 /path/to/kicad-python tests/test_native_e2e.py path/to/board.kicad_pcb --skip GND --out /tmp/routed
