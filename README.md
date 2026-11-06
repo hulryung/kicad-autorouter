@@ -7,14 +7,9 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.4.0 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.4.0)
+**Current release:** [0.5.0 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.0)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
-
-This README describes the current source checkout. PCM and the release ZIP
-provide **0.4.0**; the isolated [Codex routing search](#codex-routing-search-source-checkout)
-described below is a newer source-only feature. Use the [development install](#development)
-to try it.
 
 ## What is implemented
 
@@ -29,6 +24,15 @@ to try it.
 | AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex CLI. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.0
+
+- **Codex routing search:** **Score and improve** in the AI assistant (and
+  `scripts/route-with-codex.py`) runs guarded experiments on a project copy:
+  Codex proposes a routing change, the plugin applies it, re-runs KiCad DRC and
+  has Codex score the result; only verified improvements are applied to the
+  open board, together at the end. Codex also gets correctly scaled images of
+  every copper layer. See [Codex routing search](#codex-routing-search).
 
 ### New in 0.4.0
 
@@ -71,8 +75,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.4.0.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.4.0),
+Download `kicad-autorouter-0.5.0.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.0),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -83,7 +87,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The built-in router uses KiCad's bundled Python environment.
 - The optional AI assistant requires an installed, authenticated `codex` CLI.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.4.0 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.0 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약
@@ -292,9 +296,9 @@ performs the returned board edits. Using AI supplies board context and images
 to the configured AI service. Prompts, replies, images and review results are
 kept locally in the job folder. The built-in router works without this feature.
 
-## Codex routing search (source checkout)
+## Codex routing search
 
-The source checkout's **Score and improve** button and CLI use the same guarded
+The **Score and improve** button and the CLI use the same guarded
 search loop: Codex proposes a routing experiment, the plugin applies it to a
 project copy, re-runs KiCad DRC, and asks Codex to score the resulting board.
 Rejected attempts never replace the best accepted board. This replaces the
@@ -302,7 +306,7 @@ earlier in-place reviewer shipped in releases 0.3.0 and 0.4.0.
 
 ### From the PCB editor
 
-1. Install the development copy, open your PCB and set routing and SI options.
+1. Install the plugin, open your PCB and set routing and SI options.
 2. Open **AI assistant**, enter a request, and set **Rounds** (1–10; default 3).
    Leave **Model** blank to use your Codex CLI configuration.
 3. Click **Score and improve**. Each experiment starts from the best accepted
@@ -375,7 +379,7 @@ The best board may be the original copy if no candidate passes the checks.
 
 ## Validation and examples
 
-### Codex search in the current source
+### Codex search
 
 Live Codex runs on macOS with KiCad 10.0.7 exercised both the dialog button and
 the CLI:
@@ -396,7 +400,7 @@ regressions, candidate isolation, cancellation, subprocess cleanup, copper-layer
 rendering, and transfer of groups and tuning patterns. The desktop-enabled suite
 passed; native PCB-editor Undo was not manually exercised for this new mode.
 
-### Native router in release 0.4.0
+### Native router (0.4.0 and later)
 
 For the **0.4.0 four-layer CM5 regression**, three deterministic search budgets
 produced the following results:
