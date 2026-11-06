@@ -1,6 +1,6 @@
 # KiCad Autorouter
 
-<img src="docs/logo.png" alt="Autorouter logo" width="96" align="right">
+![Autorouter: a four-layer board routed by the built-in router, with the plugin dialog](docs/images/hero.jpg)
 
 Route a placed PCB without leaving KiCad. Autorouter adds a toolbar button
 with a built-in router, signal-integrity settings and an optional AI assistant.
