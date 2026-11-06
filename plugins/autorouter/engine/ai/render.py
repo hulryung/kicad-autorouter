@@ -1,15 +1,46 @@
 """A picture of the board for the model: top copper and silkscreen as PNG."""
 import os
+import re
 import shutil
 import subprocess
 import sys
+import struct
+import zlib
 from pathlib import Path
 from typing import Optional
 
 from .context import kicad_cli
 
 
+def _write_rgba_png(path, width, height, pixels):
+    """Write NanoSVG's RGBA output without a GUI app or Pillow dependency."""
+    def chunk(kind, data):
+        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    stride = width * 4
+    rows = b''.join(b'\0' + pixels[y * stride:(y + 1) * stride] for y in range(height))
+    path.write_bytes(b'\x89PNG\r\n\x1a\n' +
+                     chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 6, 0, 0, 0)) +
+                     chunk(b'IDAT', zlib.compress(rows)) + chunk(b'IEND', b''))
+
+
 def _svg_to_png(svg: Path, png: Path, size: int) -> bool:
+    # KiCad ships wxPython/NanoSVG. Rasterizing at an explicit pixel scale
+    # avoids Quick Look's physical-unit thumbnail padding, which also made
+    # coordinate-based close-ups point at the wrong part of the board.
+    try:
+        import wx.svg
+        source = re.sub(rb'(<svg\b[^>]*>)',
+                        rb'\1<rect x="0" y="0" width="100%" height="100%" fill="#202024"/>',
+                        svg.read_bytes(), count=1)
+        drawing = wx.svg.SVGimage.CreateFromBytes(source)
+        scale = size / max(drawing.width, drawing.height)
+        width = max(1, round(drawing.width * scale))
+        height = max(1, round(drawing.height * scale))
+        pixels = drawing.Rasterize(scale=scale, width=width, height=height)
+        _write_rgba_png(png, width, height, pixels)
+        return True
+    except (ImportError, AttributeError, ValueError, RuntimeError):
+        pass
     if sys.platform == "darwin":
         try:
             subprocess.run(["qlmanage", "-t", "-s", str(size), "-o", str(png.parent), str(svg)],

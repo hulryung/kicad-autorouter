@@ -5,6 +5,7 @@ and puts each connection's copper on the board as soon as it is found.
 """
 import threading
 import time
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +16,8 @@ from .engine import board_setup, session, si
 from .engine.options import RouteOptions
 from .engine.native import (apply as native_apply, extract as native_extract, kicad_tuning as native_kicad_tuning,
                             pipeline as native_pipeline, router as native_router)
-from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless, review as ai_review
+from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless
+from .engine.ai import optimize as ai_optimize, board_copy as ai_board_copy
 from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                                     SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
 from .engine.paths import data_dir
@@ -335,9 +337,8 @@ class AutorouterDialog(wx.Dialog):
         self.ai_review = wx.Button(page, label="Review current routing")
         self.ai_review.Bind(wx.EVT_BUTTON, lambda e: self._on_ai_ask(None, review=True))
         self.ai_score = wx.Button(page, label="Score and improve")
-        self.ai_score.SetToolTip("The model scores the routing (0-100, per criterion) from the context, metrics, "
-                                 "a board image and close-ups of what it flags, applies improvements, and re-scores, "
-                                 "for up to 'Rounds' rounds or until the score stops rising.")
+        self.ai_score.SetToolTip("Try up to Rounds routing experiments on board copies. Re-score with images of every "
+                                 "copper layer and mandatory DRC checks. Apply only the best verified improvement.")
         self.ai_score.Bind(wx.EVT_BUTTON, self._on_ai_score)
         row2.Add(self.ai_ask, 0, wx.RIGHT, 6)
         row2.Add(self.ai_review, 0, wx.RIGHT, 6)
@@ -372,6 +373,7 @@ class AutorouterDialog(wx.Dialog):
         name = Path(self.board.GetFileName()).stem if self.board.GetFileName() else "board"
         self.job = session.new_job(name + suffix)
         base = self.native_options(options)
+        self._ai_base = base
         selection = {"refs": list(self.sel_refs), "nets": list(self.sel_nets)}
         self._path_items = {}
         self._run_added = []                   # items this run created (for the overlap merge at the end)
@@ -380,35 +382,61 @@ class AutorouterDialog(wx.Dialog):
         return binary, self._ai_route_fn(base, selection), selection
 
     def _on_ai_score(self, event):
-        """Score the current routing, let the model improve it, re-score."""
-        started = self._ai_begin("-review")
+        """Evaluate isolated candidates and apply only the best verified copper."""
+        had_applied = self.applied
+        started = self._ai_begin("-optimize")
         if started is None:
             return
-        binary, route_fn, selection = started
-        reviewer = ai_review.Reviewer(self.board, {}, route_fn, lambda: session.refill_zones(self.board),
-                                      self.job.directory, log=self._append_log, binary=binary,
-                                      model=self.ai_model.GetValue().strip(), max_rounds=self.ai_rounds.GetValue(),
-                                      poll=lambda: wx.SafeYield(self, True), cancelled=lambda: self._cancel)
-        self._show_progress("Reviewer: measuring, rendering and scoring the board...", None)
+        binary, _, _ = started
+        self.applied = had_applied
+        self._show_progress("Codex: testing board copies; only the best verified result will be applied.", None)
+        last_poll = [0.0]
+
+        def pump():
+            now = time.monotonic()
+            if now - last_poll[0] >= 0.1:
+                last_poll[0] = now
+                wx.SafeYield(self, True)
+
+        def cancelled():
+            pump()
+            return self._cancel
+
         try:
-            rounds = reviewer.run(self.ai_request.GetValue().strip(), apply=True)
-        except ai_codex.CodexError as e:
+            source = ai_board_copy.snapshot(self.board, self.job.directory / "input" /
+                                            (Path(self.board.GetFileName()).name or "board.kicad_pcb"))
+            source.with_suffix('.autorouter.json').write_text(json.dumps(self.si_page.config().to_dict(), indent=2))
+            optimizer = ai_optimize.Optimizer(
+                source, self.job.directory / 'search', binary=binary,
+                model=self.ai_model.GetValue().strip(), attempts=self.ai_rounds.GetValue(),
+                patience=self.ai_rounds.GetValue(), options=ai_headless.assistant_options(self._ai_base),
+                base=self._ai_base, log=self._append_log, cancelled=cancelled, poll=pump,
+                load_board=lambda path: ai_board_copy.load_copy(path, self.board))
+            result = optimizer.run(self.ai_request.GetValue().strip() or
+                                   "Route the board completely, then improve its routing quality.")
+            if self._cancel:
+                self._show_progress("Codex search cancelled. The open board is unchanged; candidates remain in the data folder.", 0.0)
+                return
+            accepted = sum(bool(r.get('accepted')) for r in result['attempts'])
+            if accepted:
+                ai_board_copy.apply_copper(self.board, result['best_board'])
+                self.applied = True
+                pcbnew.Refresh()
+            self._append_log(f"[optimize] best board: {result['best_board']}")
+            endings = {'attempt_limit': 'Attempt limit reached.', 'plateau': 'No further verified improvement.',
+                       'no_proposal': 'No further routing proposal.', 'needs_input': 'The assistant needs more information.'}
+            if result['status'] == 'needs_input':
+                for record in result['attempts']:
+                    for action in record.get('actions', []):
+                        if action.get('type') == 'ask':
+                            self._append_log('[assistant] ' + action.get('question', ''))
+            self._show_progress(f"Codex: {result['initial_score']} -> {result['best_score']}/100; "
+                                f"{accepted} improvement(s) applied. " + endings.get(result['status'], result['status']), 1.0)
+        except Exception as exc:
+            logger.exception("Codex optimization stopped")
+            self._show_progress(f"Codex search stopped: {exc}. Results remain in the data folder.", 0.0)
+        finally:
             self._set_busy(False)
-            self._show_progress(f"Reviewer stopped: {e}", 0.0)
-            return
-        except Exception as e:
-            logger.exception("Reviewer failed")
-            self._set_busy(False)
-            self._show_progress(f"Reviewer failed: {e}", 0.0)
-            return
-        self._set_busy(False)
-        pcbnew.Refresh()
-        scores = [r["score"] for r in rounds]
-        self._show_progress(f"Reviewer: score {' -> '.join(str(x) for x in scores)} over {len(rounds)} round(s). "
-                            f"{rounds[-1]['summary'] if rounds else ''}"[:300], 1.0)
-        self.applied = self.applied or any(r.get("type") in ("route", "add_track", "add_via", "remove_tracks",
-                                                              "remove_items_near", "move_footprint", "move_items_near")
-                                           and r.get("ok") for rd in rounds for r in rd["results"])
 
     def _ai_route_fn(self, base, selection):
         def on_path(path):
@@ -982,6 +1010,8 @@ class AutorouterDialog(wx.Dialog):
                              wx.YES_NO | wx.ICON_QUESTION, self) != wx.YES:
                 return
             self._cancel = True
+            self._close_when_idle = True
+            return
         self._save_settings()
         self.si_page.save()
         if getattr(self, "_kicad_update_wanted", False):
@@ -1001,6 +1031,9 @@ class AutorouterDialog(wx.Dialog):
         self.notebook.Enable(not busy)
         if not busy:
             self.gauge.SetValue(self.gauge.GetValue())
+            if getattr(self, "_close_when_idle", False):
+                self._close_when_idle = False
+                wx.CallAfter(self._on_close, None)
 
     def _status_now(self, text: str):
         """Status updates from main-thread work (board reading): show them immediately."""

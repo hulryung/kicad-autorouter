@@ -64,7 +64,7 @@ Set done when nothing worth changing remains. Answer with the JSON object only.
 def metrics(board) -> dict:
     """Deterministic figures the reviewer should not have to estimate."""
     import pcbnew
-    tracks = [t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK"]
+    tracks = [t for t in board.GetTracks() if t.GetClass() in ("PCB_TRACK", "PCB_ARC")]
     vias = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
     per_net: Dict[str, dict] = defaultdict(lambda: {"length_mm": 0.0, "segments": 0, "vias": 0, "layers": set()})
     for t in tracks:
@@ -93,6 +93,8 @@ def metrics(board) -> dict:
     rows.sort(key=lambda r: -(r["detour_ratio"] or 0))
     angles = defaultdict(int)
     for t in tracks:
+        if t.GetClass() == "PCB_ARC":
+            continue
         d = t.GetEnd() - t.GetStart()
         a = round(math.degrees(math.atan2(d.y, d.x))) % 180
         angles["octilinear" if a in (0, 45, 90, 135) else "other"] += 1
@@ -106,20 +108,32 @@ class Reviewer:
 
     def __init__(self, board, options: dict, route_fn, refill_fn, workdir: Path, log, binary: str = "",
                  model: str = "", max_rounds: int = 3, poll=None, cancelled=None, verify: bool = True,
-                 min_gain: int = 2):
+                 min_gain: int = 2, previous_issues=None):
         self.board, self.options, self.route_fn, self.refill_fn = board, dict(options), route_fn, refill_fn
         self.workdir, self.log = workdir, log
         self.binary = binary or codex.find_codex()
         self.model, self.max_rounds, self.poll, self.cancelled = model, max_rounds, poll, cancelled
         self.verify, self.min_gain = verify, min_gain
         self.rounds: List[dict] = []
+        self.previous_issues = list(previous_issues or [])
 
     def _images(self, round_no: int, issues: List[dict]) -> List[Path]:
         images = []
-        full = render.render_board(self.board, self.workdir, name=f"review-round{round_no}.png", size=1800)
+        full = None
+        for index, layer in enumerate(self.board.GetEnabledLayers().CuStack()):
+            name = self.board.GetLayerName(layer)
+            silk = "B.SilkS" if name == "B.Cu" else "F.SilkS"
+            filename = (f"review-round{round_no}.png" if index == 0 else
+                        f"review-round{round_no}-{name.replace('.', '_')}.png")
+            view = render.render_board(self.board, self.workdir, name=filename,
+                                       layers=f"{name},{silk},Edge.Cuts", size=1800)
+            if view:
+                images.append(view)
+                if index == 0:
+                    full = view
         if full:
-            images.append(full)
-            for i, issue in enumerate([x for x in issues if x.get("x_mm") is not None][:4]):
+            for i, issue in enumerate([x for x in issues if x.get("x_mm") is not None
+                                      and x.get("y_mm") is not None][:4]):
                 crop = render.crop_at(self.board, full, issue["x_mm"], issue["y_mm"], 8.0,
                                       self.workdir / f"review-round{round_no}-closeup{i + 1}.png")
                 if crop:
@@ -137,7 +151,7 @@ class Reviewer:
         if not self.binary:
             raise codex.CodexError("The codex CLI was not found.")
         self.workdir.mkdir(parents=True, exist_ok=True)
-        last_issues: List[dict] = []
+        last_issues: List[dict] = list(self.previous_issues)
         best = None
         for round_no in range(1, self.max_rounds + 1):
             if self.cancelled and self.cancelled():
@@ -148,12 +162,18 @@ class Reviewer:
             ctx["metrics"] = metrics(self.board)
             (self.workdir / f"review-context-round{round_no}.json").write_text(json.dumps(ctx, indent=1), encoding="utf-8")
             images = self._images(round_no, last_issues)
-            labels = [f"{p.name}" + (f" (close-up around issue {i})" if i else " (full board, top copper)")
-                      for i, p in enumerate(images)]
+            context_text = json.dumps(ctx, indent=1)
+            if len(context_text) > 70000:
+                context_text = json.dumps({"board": ctx["board"], "metrics": ctx["metrics"],
+                                           "drc": ctx.get("drc"), "options": self.options}, indent=1)
+                context_text += ("\nFull board context is in "
+                                 f"review-context-round{round_no}.json; read it for net/pad details.")
+            labels = [f"{p.name} ({'close-up' if 'closeup' in p.stem else 'copper layer view; not mirrored'})"
+                      for p in images]
             prompt = "\n".join([REVIEW_PROMPT, "\n## Images attached\n", "\n".join(labels),
                                 "\n## What the user asked for\n", request or "Score the routing and improve it.",
                                 "\n## Earlier rounds\n", json.dumps(self.rounds, indent=1, default=str)[:12000],
-                                "\n## Board context and metrics\n", json.dumps(ctx, indent=1)[:70000],
+                                "\n## Board context and metrics\n", context_text,
                                 "\n\nAnswer with the JSON object only."])
             self.log(f"[review] round {round_no}: asking Codex to score the board...")
             reply = codex.run(self.binary, prompt, self.workdir, schema=REVIEW_SCHEMA, model=self.model,
@@ -168,7 +188,9 @@ class Reviewer:
                          f"({issue.get('x_mm')}, {issue.get('y_mm')}): {issue.get('description')} -> {issue.get('suggestion')}")
             last_issues = reply.get("issues", [])
             record = {"round": round_no, "score": score, "criteria": reply.get("criteria", []),
-                      "issues": last_issues, "summary": reply.get("summary", ""), "results": []}
+                      "issues": last_issues, "summary": reply.get("summary", ""), "results": [],
+                      "actions": reply.get("actions", []), "done": bool(reply.get("done")),
+                      "metrics": ctx["metrics"], "drc": ctx.get("drc", {})}
             acts = [a for a in reply.get("actions", []) if a.get("type") in act_mod.ACTION_TYPES]
             if apply and acts and not reply.get("done"):
                 applier = act_mod.BoardActions(self.board, self.options, self.route_fn, self.refill_fn, self.log,

@@ -2,6 +2,7 @@
 import json
 import math
 import os
+import shutil
 import subprocess
 import tempfile
 from collections import Counter
@@ -28,12 +29,28 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
     cli = kicad_cli()
     if not cli:
         return {"available": False}
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    source = Path(board.GetFileName()) if board.GetFileName() else None
     copy = workdir / "drc-copy.kicad_pcb"
     report = workdir / "drc.json"
     try:
-        pcbnew.SaveBoard(str(copy), board)
-        subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--refill-zones",
+        report.unlink(missing_ok=True)
+        # DRC must see the same project rules as the board being evaluated.
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            target = copy.with_suffix(suffix)
+            original = source.with_suffix(suffix) if source else None
+            if original and original.is_file():
+                if original.resolve() != target.resolve():
+                    shutil.copy2(original, target)
+            else:
+                target.unlink(missing_ok=True)
+        if not pcbnew.SaveBoard(str(copy), board):
+            raise RuntimeError("Could not save the DRC board copy")
+        result = subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--refill-zones",
                         "-o", str(report), str(copy)], capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(f"kicad-cli DRC failed ({result.returncode}): {result.stderr[-1000:]}")
         data = json.loads(report.read_text(encoding="utf-8"))
     except Exception as e:
         return {"available": False, "error": str(e)}
@@ -53,7 +70,14 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
             opens.append({"items": [it.get("description", "")[:100] for it in u.get("items", [])],
                           "pos_mm": [[it.get("pos", {}).get("x"), it.get("pos", {}).get("y")]
                                      for it in u.get("items", [])]})
+    # BOARD UUIDs are regenerated when a PCB is loaded. Compare error type,
+    # item description and position instead of falsely reporting new errors.
+    identities = [json.dumps({"type": v.get("type"),
+                   "items": sorted((json.dumps({k: value for k, value in it.items() if k != "uuid"}, sort_keys=True)
+                                 for it in v.get("items", [])))},
+                   sort_keys=True) for v in data.get("violations", [])]
     return {"available": True, "violations_by_type": dict(kinds), "violations": items,
+            "violation_identities": identities,
             "unconnected_total": len(data.get("unconnected_items", [])),
             "unconnected_by_net": dict(unconnected.most_common(40)),
             "unconnected": opens}
