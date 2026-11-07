@@ -478,10 +478,10 @@ class AutorouterDialog(wx.Dialog):
                 return {"error": "could not read the board"}
             escalated = job.escalated
             result = job
-            # as after a dialog run: shared copper written once, then length matching
+            # as after a dialog run: the copper clean-up, then length matching
             try:
                 live = [t for t in self._run_added if str(t.m_Uuid.AsString()) not in self._run_removed]
-                native_apply.trim_overlaps(self.board, live)
+                native_pipeline.finish_copper(self.board, live, o)
                 report = native_pipeline.tune_lengths(self.board, o, status=self._status_now,
                                                       pair_exceptions=job.pair_exceptions)
                 if report is not None:
@@ -917,10 +917,11 @@ class AutorouterDialog(wx.Dialog):
                 for key, label in (("trimmed", "overlapping segments merged"),
                                    ("tiny_joins_snapped", "tiny off-angle joins snapped"),
                                    ("dangling_vias_removed", "vias that joined nothing removed"),
+                                   ("welded", "junctions welded into shared end points"),
                                    ("power_widened", "power rail segments widened")):
                     if st.get(key):
                         self._append_log(f"[plugin] {st[key]} {label}")
-                for key in ("snap_error", "prune_error", "widen_error"):
+                for key in ("snap_error", "prune_error", "weld_error", "widen_error"):
                     if st.get(key):
                         self._append_log(f"[plugin] {key.replace('_', ' ')}: {st[key]}")
             except Exception as e:

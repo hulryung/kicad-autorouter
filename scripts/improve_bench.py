@@ -33,12 +33,30 @@ def kicad_cli():
 
 # ---- artwork measures ---------------------------------------------------------
 
-def octilinear_off(tracks):
-    """Segments (longer than 1 µm) not at a multiple of 45 degrees."""
+def _hidden(code, points, vias, pads=()):
+    """All points inside one via (or pad) of the net: copper the artwork never shows."""
+    import pcbnew
+    for v in vias:
+        if v.GetNetCode() == code:
+            c, r = v.GetPosition(), v.GetWidth(pcbnew.F_Cu) / 2
+            if all(math.hypot(x - c.x, y - c.y) <= r for x, y in points):
+                return True
+    for p in pads:
+        if p.GetNetCode() == code and all(p.HitTest(pcbnew.VECTOR2I(int(x), int(y))) for x, y in points):
+            return True
+    return False
+
+
+def octilinear_off(tracks, vias=(), pads=()):
+    """Segments (longer than 1 µm) not at a multiple of 45 degrees, except
+    those lying wholly inside a via or pad of their net (a join to its centre)."""
     out = []
     for t in tracks:
         d = t.GetEnd() - t.GetStart()
         if math.hypot(d.x, d.y) < 1000:
+            continue
+        if (vias or pads) and _hidden(t.GetNetCode(), [(t.GetStart().x, t.GetStart().y), (t.GetEnd().x, t.GetEnd().y)],
+                                      vias, pads):
             continue
         a = math.degrees(math.atan2(d.y, d.x)) % 45
         if min(a, 45 - a) > 0.5:
@@ -74,7 +92,7 @@ def doubled_back(tracks):
     return out
 
 
-def acute_corners(tracks, pads=()):
+def acute_corners(tracks, pads=(), vias=()):
     import pcbnew
     """Corners sharper than 90 degrees: two segments of one net and layer
     meeting end to end (and nothing else there) that turn back by more than
@@ -95,6 +113,8 @@ def acute_corners(tracks, pads=()):
         if 0.05 < cos < 0.999:                          # under 87 degrees, not a straight overlap
             if any(p.GetNetCode() == code and p.HitTest(pcbnew.VECTOR2I(x, y)) for p in pads):
                 continue                                # hidden in pad copper
+            if _hidden(code, [(x, y)], vias):
+                continue                                # ...or in via copper
             out.append((a.GetNetname(), x / 1e6, y / 1e6))
     return out
 
@@ -538,9 +558,10 @@ def main():
     sides_mine, sides_ref = escape_sides(board), escape_sides(ref)
     compared = {k: (sides_mine.get(k), v) for k, v in sides_ref.items() if v}
     disagree = {k: {"routed": a, "reference": b} for k, (a, b) in compared.items() if a and a != b}
-    off45 = octilinear_off(tracks)
+    board_vias = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
+    off45 = octilinear_off(tracks, board_vias, list(board.GetPads()))
     doubled = doubled_back(tracks)
-    acute = acute_corners(tracks, list(board.GetPads()))
+    acute = acute_corners(tracks, list(board.GetPads()), board_vias)
     for net, x, y in acute[:5]:
         issues.append({"kind": "acute_corner", "x": x, "y": y, "what": net})
     for t in off45[:5]:

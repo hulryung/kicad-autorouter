@@ -301,8 +301,9 @@ def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> 
     """The clean-up of a run's copper once nothing will be ripped up any
     more, the same whether the pipeline placed the paths or the dialog did
     (live display): shared copper written once, tiny off-angle joins snapped,
-    vias that join nothing taken off with the stubs that led to them, power
-    rails widened where there is room. live: the items the run created that
+    vias that join nothing taken off with the stubs that led to them, every
+    junction welded into a shared end point, power rails widened where there
+    is room. live: the items the run created that
     are still on the board. Returns counts (and *_error entries)."""
     stats: dict = {}
 
@@ -326,6 +327,15 @@ def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> 
         stats["dangling_vias_removed"] = native_apply.prune_dangling_vias(board, live)
     except Exception as e:
         stats["prune_error"] = repr(e)
+    # every junction of the run's copper a shared end point (via centres,
+    # T points split), the way KiCad's own router leaves it
+    try:
+        live[:] = alive(live)
+        welded = native_apply.weld_junctions(board, live)
+        stats["welded"] = sum(welded.values())
+        stats["weld_detail"] = welded
+    except Exception as e:                     # cosmetic: never lose a routed board over it
+        stats["weld_error"] = repr(e)
     # power rails: as wide as the finished board leaves room for
     try:
         stats["power_widened"] = native_apply.widen_power(board, alive(live), options.power_patterns)
