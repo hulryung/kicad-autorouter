@@ -289,36 +289,49 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         # SWIG wrappers do not compare by item: tell the ripped-up ones apart by UUID
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
         live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
-        out.stats["trimmed"] = native_apply.trim_overlaps(board, live)
-        try:
-            # tiny odd-angle joins where a run ends off the grid: the 45-degree
-            # segments either side meet directly instead
-            gone = {str(item.m_Uuid.AsString()) for item in _REMOVED + native_apply._REMOVED}
-            out.stats["tiny_joins_snapped"] = native_apply.snap_tiny_joins(
-                board, [t for t in live if str(t.m_Uuid.AsString()) not in gone])
-        except Exception as e:
-            out.stats["snap_error"] = repr(e)
-        if not (cancelled and cancelled()):
-            # vias that ended up joining nothing (a pad via that missed the
-            # plane's fill, a fanout via a route made unnecessary): off the board
-            gone = {str(item.m_Uuid.AsString()) for item in _REMOVED + native_apply._REMOVED}
-            live = [t for t in live if str(t.m_Uuid.AsString()) not in gone]
-            try:
-                out.stats["dangling_vias_removed"] = native_apply.prune_dangling_vias(board, live)
-            except Exception as e:
-                out.stats["prune_error"] = repr(e)
-            # power rails: as wide as the finished board leaves room for
-            gone = {str(item.m_Uuid.AsString()) for item in _REMOVED + native_apply._REMOVED}
-            live = [t for t in live if str(t.m_Uuid.AsString()) not in gone]
-            try:
-                out.stats["power_widened"] = native_apply.widen_power(board, live, options.power_patterns)
-            except Exception as e:
-                out.stats["widen_error"] = repr(e)
+        out.stats.update(finish_copper(board, live, options, cancelled))
     if apply_paths and not (cancelled and cancelled()):
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
             out.tuning, out.tuning_lines = report.groups, report.lines()
     return out
+
+
+def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> dict:
+    """The clean-up of a run's copper once nothing will be ripped up any
+    more, the same whether the pipeline placed the paths or the dialog did
+    (live display): shared copper written once, tiny off-angle joins snapped,
+    vias that join nothing taken off with the stubs that led to them, power
+    rails widened where there is room. live: the items the run created that
+    are still on the board. Returns counts (and *_error entries)."""
+    stats: dict = {}
+
+    def alive(items):
+        gone = {str(item.m_Uuid.AsString()) for item in native_apply._REMOVED}
+        return [t for t in items if str(t.m_Uuid.AsString()) not in gone]
+
+    stats["trimmed"] = native_apply.trim_overlaps(board, live)
+    try:
+        # tiny odd-angle joins where a run ends off the grid: the 45-degree
+        # segments either side meet directly instead
+        stats["tiny_joins_snapped"] = native_apply.snap_tiny_joins(board, alive(live))
+    except Exception as e:
+        stats["snap_error"] = repr(e)
+    if cancelled and cancelled():
+        return stats
+    # vias that ended up joining nothing (a pad via that missed the plane's
+    # fill, a fanout via a route made unnecessary): off the board
+    live = alive(live)
+    try:
+        stats["dangling_vias_removed"] = native_apply.prune_dangling_vias(board, live)
+    except Exception as e:
+        stats["prune_error"] = repr(e)
+    # power rails: as wide as the finished board leaves room for
+    try:
+        stats["power_widened"] = native_apply.widen_power(board, alive(live), options.power_patterns)
+    except Exception as e:
+        stats["widen_error"] = repr(e)
+    return stats
 
 
 def waived_skew(board, options: NativeOptions, pair_exceptions) -> set:

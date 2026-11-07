@@ -94,6 +94,7 @@ def trim_overlaps(board, items) -> int:
             extra.SetNetCode(t.GetNetCode())
             board.Add(extra)
             by_key[key].append(extra)
+            items.append(extra)                # still the run's own copper for the later clean-up
     return changed
 
 
@@ -591,12 +592,21 @@ def widen_power(board, items, patterns, cap: int = 500_000, neck: int = 750_000,
         box.Inflate(fine_margin)
         fine_boxes.append(box)
 
+    # how far to look: the largest clearance anything on the board asks for
+    # (a mounting hole's keep-out can be well over a millimetre)
+    look = 1_000_000
+    for p in pads:
+        try:
+            look = max(look, int(p.GetLocalClearance() or 0) + 500_000)
+        except Exception:
+            pass
+
     def clear(t, layer) -> bool:
         net = t.GetNetCode()
         box = t.GetBoundingBox()
         if any(box.Intersects(f) for f in fine_boxes):
             return False
-        box.Inflate(1_000_000)
+        box.Inflate(look)
         shape = t.GetEffectiveShape(layer)
         own = gap(t, layer) + 5_000
         for o in others:
@@ -611,8 +621,14 @@ def widen_power(board, items, patterns, cap: int = 500_000, neck: int = 750_000,
             if p.GetNetCode() != net or p.GetNetCode() <= 0:
                 if p.IsOnLayer(layer) and shape.Collide(p.GetEffectiveShape(layer), max(own, gap(p, layer) + 5_000)):
                     return False
-                if p.HasHole() and shape.Collide(p.GetEffectiveHoleShape(), hole_clear + 5_000):
-                    return False
+                if p.HasHole():
+                    # an unplated hole keeps the pad's own clearance (a mounting
+                    # hole's keep-out), a plated one the board's hole clearance
+                    hc = hole_clear
+                    if p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH:
+                        hc = max(hc, gap(p, layer))
+                    if shape.Collide(p.GetEffectiveHoleShape(), hc + 5_000):
+                        return False
         for d in edges:
             if d.GetBoundingBox().Intersects(box) and shape.Collide(d.GetEffectiveShape(), edge_clear + 5_000):
                 return False

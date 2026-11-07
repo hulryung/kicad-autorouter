@@ -906,16 +906,26 @@ class AutorouterDialog(wx.Dialog):
             self._append_log(f"[plugin] routing failed: {error!r}")
             return
         if result is not None:
-            # shared copper (a stub two routes leave by) is written once, now
-            # that nothing will be ripped up any more
+            # the same clean-up the pipeline does when it places the paths
+            # itself, now that nothing will be ripped up any more: shared copper
+            # written once, tiny joins snapped, vias (and their stubs) that join
+            # nothing removed, power rails widened
             try:
                 live = [t for t in self._run_added if str(t.m_Uuid.AsString()) not in self._run_removed]
-                n = native_apply.trim_overlaps(self.board, live)
-                if n:
-                    self._append_log(f"[plugin] {n} overlapping segments merged")
+                st = native_pipeline.finish_copper(self.board, live, self._native_opts or self.native_options(
+                    self._collect_options()), cancelled=lambda: result.cancelled)
+                for key, label in (("trimmed", "overlapping segments merged"),
+                                   ("tiny_joins_snapped", "tiny off-angle joins snapped"),
+                                   ("dangling_vias_removed", "vias that joined nothing removed"),
+                                   ("power_widened", "power rail segments widened")):
+                    if st.get(key):
+                        self._append_log(f"[plugin] {st[key]} {label}")
+                for key in ("snap_error", "prune_error", "widen_error"):
+                    if st.get(key):
+                        self._append_log(f"[plugin] {key.replace('_', ' ')}: {st[key]}")
             except Exception as e:
-                logger.exception("Trimming overlaps failed")
-                self._append_log(f"[plugin] could not merge overlapping segments: {e!r}")
+                logger.exception("Finishing the copper failed")
+                self._append_log(f"[plugin] could not finish the copper: {e!r}")
             # length matching on the finished copper (meanders)
             if not result.cancelled and getattr(self, "_native_opts", None) is not None:
                 try:
