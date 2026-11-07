@@ -552,11 +552,14 @@ class Router:
                     owners[idx] = net.code
                     routed[idx] = path.pid
                 elif cur != net.code and cur != BLOCKED:
-                    # overlaps another net's zone: blocked for everyone. It stays
-                    # rip-up-able only if that other zone was routed copper too
-                    # (routed[idx] already names a path); fixed copper underneath
-                    # means ripping this path would not free the cell.
+                    # overlaps another net's zone: blocked for everyone. Ripping
+                    # this path frees the cell for the net whose fixed zone it
+                    # is (a pin's own room past its exit), so it is named here
+                    # when no routed copper claimed the cell first; a rip-up
+                    # search lets only that net through (astar: fixed)
                     owners[idx] = BLOCKED
+                    if not routed[idx]:
+                        routed[idx] = path.pid
         r_hole = rp.via_drill // 2 + p.hole_to_hole + p.max_via_drill // 2
         for x, y in rp.vias:
             path.via_cells += grid.disc_cells(0, x, y, r_hole)
@@ -634,6 +637,8 @@ class Router:
                         routed[idx] = pid
                     elif cur != code and cur != BLOCKED:
                         owners[idx] = BLOCKED
+                        if not routed[idx]:
+                            routed[idx] = pid
         touched = set()
         for path in removed:
             touched.update(path.via_cells)
@@ -693,11 +698,19 @@ class Router:
         if soft:
             kwargs = {"routed": self.routed[self._key(conn)],
                       "rippable": lambda pid: self._rippable(pid, conn),
-                      "rip_penalty": RIP_PENALTY}
+                      "rip_penalty": RIP_PENALTY, "fixed": self.fixed.get(self._key(conn))}
+        if self.p.site_guard is not None:
+            # a pin's via site is kept for its own net only until that net is
+            # connected: other searches may pass it then
+            kwargs["sites_done"] = self._connected_nets()
         region = self._neck_region(conn)
         if region:
-            kwargs["neck_owners"] = self.p.owners.get((conn.neck, net.rules.clearance), owners)
+            neck_key = (conn.neck, net.rules.clearance)
+            kwargs["neck_owners"] = self.p.owners.get(neck_key, owners)
             kwargs["neck_region"] = region
+            if soft:
+                kwargs["neck_routed"] = self.routed.get(neck_key)
+                kwargs["neck_fixed"] = self.fixed.get(neck_key)
         return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
@@ -783,6 +796,14 @@ class Router:
                                 region.add(base + (cy + dy) * grid.w + cx + dx)
         return region
 
+    def _connected_nets(self) -> Set[int]:
+        """Codes of the routed nets whose pads are all joined."""
+        done = set()
+        for code, net in self.p.nets.items():
+            if net.route and len({self._find(code, i) for i in range(len(net.clusters))}) <= 1:
+                done.add(code)
+        return done
+
     def _blockers(self, conn: Connection, cells: List[int]) -> Set[int]:
         """Paths of other nets that a soft route runs through: along its cells
         and, where it changes layer, under the via barrel on every layer."""
@@ -800,11 +821,18 @@ class Router:
                         if dx * dx + dy * dy <= reach * reach and grid.inside(cx + dx, cy + dy):
                             for layer in range(grid.layers):
                                 spots.append(grid.index(layer, cx + dx, cy + dy))
+        # near a fine-pitch pin the search judged cells by the neck-width map:
+        # who claimed them there is in that map's routed record
+        region = self._neck_region(conn)
+        neck_routed = self.routed.get((conn.neck, net.rules.clearance)) if region else None
         out: Set[int] = set()
         for idx in spots:
-            pid = routed[idx]
-            if pid and pid in self.paths and self.paths[pid].conn.net != conn.net:
-                out.add(pid)
+            pids = [routed[idx]]
+            if neck_routed is not None and idx in region:
+                pids.append(neck_routed[idx])
+            for pid in pids:
+                if pid and pid in self.paths and self.paths[pid].conn.net != conn.net:
+                    out.add(pid)
         return out
 
     def _remember_conflict(self, conn: Connection, cells: List[int], blockers: Set[int]) -> None:

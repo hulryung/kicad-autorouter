@@ -67,7 +67,8 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
           max_expansions: int, turn_cost: int = 2,
           cancelled=None, routed=None, rippable=None, rip_penalty: int = 0,
           also_ok: int = 0, source_costs=None, routable=None,
-          neck_owners=None, neck_region=None, via_guard=None, lane_guard=None,
+          neck_owners=None, neck_region=None, neck_routed=None, fixed=None, neck_fixed=None, sites_done=None,
+          via_guard=None, lane_guard=None,
           history=None, via_lead: int = 0, lead_from=None, layer_extra=None,
           via_goals_only: bool = False, goal_bounds=None, site_guard=None, via_owners=None,
           relief=None, relief_share: int = 4) -> Optional[List[int]]:
@@ -130,18 +131,25 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
 
     def passable(idx: int) -> bool:
         # near a fine-pitch pin the track is narrower: judge those cells by
-        # the neck-width owner map
-        o = neck_owners[idx] if (necked and idx in neck_region) else owners[idx]
+        # the neck-width owner map, and who claimed them by its routed map
+        in_neck = necked and idx in neck_region
+        o = neck_owners[idx] if in_neck else owners[idx]
         if site_guard is not None and o != net:
             # another pin's via site, kept for that pin alone
             s = site_guard[idx]
-            if s > 0 and s != net and s != also_ok and idx not in goals:
+            if s > 0 and s != net and s != also_ok and idx not in goals \
+                    and not (sites_done is not None and s in sites_done):
                 return False
         if o == 0 or o == net or o == also_ok or idx in goals:
             return True
         if soft:
-            pid = routed[idx]
-            return pid != 0 and rippable(pid)
+            pid = (neck_routed if in_neck and neck_routed is not None else routed)[idx]
+            if pid == 0 or not rippable(pid):
+                return False
+            # ripping that path frees the cell only if nothing fixed of
+            # another net lies under it (it may be this net's own room)
+            f = neck_fixed if in_neck and neck_fixed is not None else fixed
+            return f is None or f[idx] in (0, net)
         return False
 
     def extra(idx: int) -> int:
@@ -224,7 +232,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
             i = rest + off
             o = owners[i]
             if o != 0 and o != net and o != also_ok:
-                if soft and routed[i] != 0 and rippable(routed[i]):
+                if soft and routed[i] != 0 and rippable(routed[i]) and (fixed is None or fixed[i] in (0, net)):
                     continue
                 return False
         return True
