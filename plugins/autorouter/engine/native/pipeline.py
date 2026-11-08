@@ -303,7 +303,7 @@ def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> 
     (live display): shared copper written once, tiny off-angle joins snapped,
     vias that join nothing taken off with the stubs that led to them, every
     junction welded into a shared end point, power rails widened where there
-    is room. live: the items the run created that
+    is room, pour islands the copper cut off tied back to their net. live: the items the run created that
     are still on the board. Returns counts (and *_error entries)."""
     stats: dict = {}
 
@@ -341,6 +341,14 @@ def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> 
         stats["power_widened"] = native_apply.widen_power(board, alive(live), options.power_patterns)
     except Exception as e:
         stats["widen_error"] = repr(e)
+    if cancelled and cancelled():
+        return stats
+    # pieces of a pour that the finished copper cut off with only their own
+    # pads in them: a stub and via to the net's connected fill
+    try:
+        stats["islands_joined"] = native_apply.repair_islands(board, live)
+    except Exception as e:
+        stats["island_error"] = repr(e)
     return stats
 
 

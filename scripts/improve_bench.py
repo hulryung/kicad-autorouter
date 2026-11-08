@@ -583,7 +583,7 @@ def main():
         "fanout_vias": job.fanout, "stitching_vias": job.stitched,
         "pass_errors": {k: v for k, v in job.stats.items() if k.endswith("_error")},
         "post_route": {k: job.stats.get(k) for k in ("trimmed", "tiny_joins_snapped", "dangling_vias_removed",
-                                                       "power_widened")},
+                                                       "power_widened", "islands_joined")},
         "route_seconds": round(seconds, 1),
         "search_work": _search_work(),
         "stages": stages,

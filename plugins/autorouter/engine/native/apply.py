@@ -872,6 +872,282 @@ def widen_power(board, items, patterns, cap: int = 500_000, neck: int = 750_000,
     return widened
 
 
+def _pad_groups(board, conn, code):
+    """The net's pads in groups that its copper (fills included) connects."""
+    pads = [p for p in board.GetPads() if p.GetNetCode() == code]
+    seen, groups = set(), []
+    for p in pads:
+        uid = str(p.m_Uuid.AsString())
+        if uid in seen:
+            continue
+        group = [p]
+        seen.add(uid)
+        try:
+            linked = list(conn.GetConnectedItems(p))
+        except Exception:
+            linked = []
+        for item in linked:
+            if item.GetClass() == "PAD" and str(item.m_Uuid.AsString()) not in seen:
+                seen.add(str(item.m_Uuid.AsString()))
+                group.append(item)
+        groups.append(group)
+    groups.sort(key=len, reverse=True)
+    return groups
+
+
+def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000) -> int:
+    """After every other clean-up: a piece of a pour that its pads alone hold
+    (a signal routed round two GND pads of a resistor and a capacitor cuts
+    them off the surface pour) gets a short stub from one of its pads to a
+    via that lands in the net's connected fill on another layer. The
+    router's grid check is a little coarser than DRC and can find no room
+    where there is; this checks the copper itself, with the clearances DRC
+    uses. The pours are refilled first; a via that does not join the island
+    to the net after the refill comes off again. Returns how many islands
+    were joined."""
+    zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
+    if not zones:
+        return 0
+    filler = pcbnew.ZONE_FILLER(board)
+    filler.Fill(board.Zones())
+    board.BuildConnectivity()
+    conn = board.GetConnectivity()
+    if conn.GetUnconnectedCount(True) == 0:
+        return 0
+    ds = board.GetDesignSettings()
+    hole_clear = int(ds.m_HoleClearance)
+    hole_hole = int(ds.m_HoleToHoleMin)
+    edge_clear = int(ds.m_CopperEdgeClearance)
+    copper = list(board.GetEnabledLayers().CuStack())
+    keepouts = [z for z in board.Zones() if z.GetIsRuleArea()]
+    edges = [d for d in board.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts]
+    for fp in board.GetFootprints():
+        edges += [d for d in fp.GraphicalItems() if d.GetLayer() == pcbnew.Edge_Cuts]
+    nc_clear = {}
+
+    def netclass(name):
+        return ds.m_NetSettings.GetEffectiveNetClass(name)
+
+    def gap(item, layer) -> int:
+        code = item.GetNetCode()
+        if code not in nc_clear:
+            try:
+                nc_clear[code] = int(netclass(item.GetNetname()).GetClearance())
+            except Exception:
+                nc_clear[code] = 0
+        try:
+            own = int(item.GetOwnClearance(layer))
+        except Exception:
+            own = 0
+        return max(own, nc_clear[code])
+
+    added_items, repairs = [], []
+    joined = 0
+    for code in sorted({z.GetNetCode() for z in zones}):
+        groups = _pad_groups(board, conn, code)
+        if len(groups) < 2:
+            continue
+        main = groups[0]
+        # where the connected part of the net is, layer by layer
+        anchors = {}
+        for item in main + [i for i in conn.GetConnectedItems(main[0])]:
+            kind = item.GetClass()
+            if kind in ("PAD", "PCB_VIA"):
+                for lid in item.GetLayerSet().CuStack():
+                    anchors.setdefault(lid, []).append(item.GetPosition())
+            elif kind in ("PCB_TRACK", "PCB_ARC"):
+                anchors.setdefault(item.GetLayer(), []).extend([item.GetStart(), item.GetEnd()])
+        targets = []                              # (layer, fill, outline index) tied to the main group
+        for z in zones:
+            if z.GetNetCode() != code:
+                continue
+            for lid in z.GetLayerSet().CuStack():
+                poly = z.GetFilledPolysList(lid)
+                for i in range(poly.OutlineCount()):
+                    if any(poly.Contains(pt, i) for pt in anchors.get(lid, [])):
+                        targets.append((lid, poly, i))
+        if not targets:
+            continue
+        nc = netclass(main[0].GetNetname())
+        via_d, drill, width = int(nc.GetViaDiameter()), int(nc.GetViaDrill()), int(nc.GetTrackWidth())
+        for group in groups[1:]:
+            if _join_island(board, group, code, targets, via_d, drill, width, reach, step, gap, hole_clear,
+                            hole_hole, edge_clear, copper, keepouts, edges, added_items, repairs):
+                joined += 1
+    if not added_items:
+        return 0
+    # the refill decides: an island the new via does not join keeps nothing
+    filler.Fill(board.Zones())
+    board.BuildConnectivity()
+    conn = board.GetConnectivity()
+    undone = False
+    for group_pad, made in repairs:
+        groups = _pad_groups(board, conn, group_pad.GetNetCode())
+        uid = str(group_pad.m_Uuid.AsString())
+        if groups and any(str(p.m_Uuid.AsString()) == uid for p in groups[0]):
+            continue
+        joined -= 1
+        undone = True
+        for it in made:
+            board.Remove(it)
+            added_items.remove(it)
+    if undone:
+        filler.Fill(board.Zones())
+        board.BuildConnectivity()
+    if isinstance(items, list):
+        items.extend(added_items)
+    return joined
+
+
+def _join_island(board, group, code, targets, via_d, drill, width, reach, step, gap, hole_clear, hole_hole,
+                 edge_clear, copper, keepouts, edges, added_items, repairs) -> bool:
+    """One stub and via for an island's pads; True when placed."""
+    margin = 5_000
+    box = None
+    for p in group:
+        b = p.GetBoundingBox()
+        if box is None:
+            box = b
+        else:
+            box.Merge(b)
+    box.Inflate(reach + 2_000_000)
+    near = [t for t in board.GetTracks() if t.GetBoundingBox().Intersects(box)]
+    near_pads = [p for p in board.GetPads() if p.GetBoundingBox().Intersects(box)]
+    holes = [(t.GetPosition(), t.GetDrillValue() // 2) for t in near if t.GetClass() == "PCB_VIA"]
+    holes += [(p.GetPosition(), max(p.GetDrillSize().x, p.GetDrillSize().y) // 2) for p in near_pads if p.HasHole()]
+
+    def clear(item, layers, hole=False) -> bool:
+        ibox = item.GetBoundingBox()
+        ibox.Inflate(1_000_000)
+        for layer in layers:
+            shape = item.GetEffectiveShape(layer)
+            own = gap(item, layer) + margin
+            for o in near:
+                if o.GetNetCode() == code or not o.IsOnLayer(layer) or not o.GetBoundingBox().Intersects(ibox):
+                    continue
+                if o.GetClass() == "PCB_VIA" or o.GetLayer() == layer:
+                    if shape.Collide(o.GetEffectiveShape(layer), max(own, gap(o, layer) + margin)):
+                        return False
+            for p in near_pads:
+                if not p.GetBoundingBox().Intersects(ibox):
+                    continue
+                if p.GetNetCode() != code or code <= 0:
+                    if p.IsOnLayer(layer) and shape.Collide(p.GetEffectiveShape(layer), max(own, gap(p, layer) + margin)):
+                        return False
+                    if p.HasHole():
+                        hc = hole_clear
+                        if p.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH:
+                            hc = max(hc, gap(p, layer))
+                        if shape.Collide(p.GetEffectiveHoleShape(), hc + margin):
+                            return False
+            for d in edges:
+                if d.GetBoundingBox().Intersects(ibox) and shape.Collide(d.GetEffectiveShape(), edge_clear + margin):
+                    return False
+        if hole:
+            hs = item.GetEffectiveHoleShape()
+            for layer in copper:
+                for o in near:
+                    if o.GetNetCode() != code and o.IsOnLayer(layer) and o.GetBoundingBox().Intersects(ibox) \
+                            and (o.GetClass() == "PCB_VIA" or o.GetLayer() == layer) \
+                            and hs.Collide(o.GetEffectiveShape(layer), hole_clear + margin):
+                        return False
+            pos = item.GetPosition()
+            for c, r in holes:
+                if math.hypot(c.x - pos.x, c.y - pos.y) - r - drill // 2 < hole_hole + margin:
+                    return False
+        return True
+
+    def keepout(x, y) -> bool:
+        pt = pcbnew.VECTOR2I(x, y)
+        for z in keepouts:
+            if (z.GetDoNotAllowVias() or z.GetDoNotAllowTracks()) and z.Outline().Contains(pt):
+                return True
+        return False
+
+    def lands(x, y, layer) -> bool:
+        r = via_d // 2
+        for lid, poly, i in targets:
+            if lid == layer:
+                continue
+            if all(poly.Contains(pcbnew.VECTOR2I(x + dx, y + dy), i)
+                   for dx, dy in ((0, 0), (r, 0), (-r, 0), (0, r), (0, -r))):
+                return True
+        return False
+
+    def in_pad(x, y) -> bool:
+        pt = pcbnew.VECTOR2I(x, y)
+        return any(p.HitTest(pt) for p in near_pads)
+
+    spots = []
+    n = reach // step
+    for p in group:
+        if p.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+            continue
+        layer = p.GetLayer()
+        if layer not in copper:
+            continue
+        c = p.GetPosition()
+        for i in range(-n, n + 1):
+            for j in range(-n, n + 1):
+                d2 = i * i + j * j
+                if 0 < d2 <= n * n:
+                    spots.append((d2, p, layer, c.x + i * step, c.y + j * step))
+    spots.sort(key=lambda s: s[0])
+    from .grid import jog
+
+    def on_pad(x, y) -> bool:
+        # the via's ring over pad copper: solder wicks down an open via
+        r = via_d // 2
+        for p in near_pads:
+            bb = p.GetBoundingBox()
+            if bb.GetLeft() - r < x < bb.GetRight() + r and bb.GetTop() - r < y < bb.GetBottom() + r:
+                if any(p.HitTest(pcbnew.VECTOR2I(x + dx, y + dy)) for dx, dy in
+                       ((0, 0), (r, 0), (-r, 0), (0, r), (0, -r), (r * 7 // 10, r * 7 // 10), (-r * 7 // 10, r * 7 // 10),
+                        (r * 7 // 10, -r * 7 // 10), (-r * 7 // 10, -r * 7 // 10))):
+                    return True
+        return False
+
+    # spots clear of every pad first; one with its ring on a pad of the
+    # island only when nothing else fits
+    clean = [s for s in spots if not on_pad(s[3], s[4])]
+    ordered = clean + [s for s in spots if s not in clean]
+    for _, p, layer, x, y in ordered:
+        if in_pad(x, y) or keepout(x, y) or not lands(x, y, layer):
+            continue
+        via = pcbnew.PCB_VIA(board)
+        via.SetPosition(pcbnew.VECTOR2I(x, y))
+        via.SetWidth(via_d)
+        via.SetDrill(drill)
+        via.SetNetCode(code)
+        try:
+            via.SetViaType(pcbnew.VIATYPE_THROUGH)
+        except Exception:
+            pass
+        via.SetLayerPair(copper[0], copper[-1])
+        if not clear(via, copper, hole=True):
+            continue
+        c = p.GetPosition()
+        for at_end in (False, True):
+            pts = jog(c.x, c.y, x, y, at_end=at_end)
+            stubs = []
+            for k in range(len(pts) - 1):
+                t = pcbnew.PCB_TRACK(board)
+                t.SetStart(pcbnew.VECTOR2I(*pts[k]))
+                t.SetEnd(pcbnew.VECTOR2I(*pts[k + 1]))
+                t.SetWidth(width)
+                t.SetLayer(layer)
+                t.SetNetCode(code)
+                stubs.append(t)
+            if all(clear(t, [layer]) for t in stubs):
+                made = stubs + [via]
+                for it in made:
+                    board.Add(it)
+                    added_items.append(it)
+                repairs.append((p, made))
+                return True
+    return False
+
+
 def add_path(board, layers: List[LayerInfo], path: RoutedPath, trim: bool = False) -> List[object]:
     """Create the items for one path and add them to the board; returns them.
     With trim, segments are cut where the board already has the same copper

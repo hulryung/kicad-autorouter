@@ -909,7 +909,7 @@ class AutorouterDialog(wx.Dialog):
             # the same clean-up the pipeline does when it places the paths
             # itself, now that nothing will be ripped up any more: shared copper
             # written once, tiny joins snapped, vias (and their stubs) that join
-            # nothing removed, power rails widened
+            # nothing removed, power rails widened, cut-off pour islands tied back
             try:
                 live = [t for t in self._run_added if str(t.m_Uuid.AsString()) not in self._run_removed]
                 st = native_pipeline.finish_copper(self.board, live, self._native_opts or self.native_options(
@@ -918,10 +918,11 @@ class AutorouterDialog(wx.Dialog):
                                    ("tiny_joins_snapped", "tiny off-angle joins snapped"),
                                    ("dangling_vias_removed", "vias that joined nothing removed"),
                                    ("welded", "junctions welded into shared end points"),
-                                   ("power_widened", "power rail segments widened")):
+                                   ("power_widened", "power rail segments widened"),
+                                   ("islands_joined", "pour islands tied back to their net")):
                     if st.get(key):
                         self._append_log(f"[plugin] {st[key]} {label}")
-                for key in ("snap_error", "prune_error", "weld_error", "widen_error"):
+                for key in ("snap_error", "prune_error", "weld_error", "widen_error", "island_error"):
                     if st.get(key):
                         self._append_log(f"[plugin] {key.replace('_', ' ')}: {st[key]}")
             except Exception as e:
