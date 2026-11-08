@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.5.2 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.2)
+**Current release:** [0.5.3 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.3)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -24,6 +24,14 @@ service or AI account is required.
 | AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex CLI. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.3
+
+- A piece of a pour cut off from the rest of its net, with only its own pads
+  in it, is tied back after routing: a short stub and a via down to the
+  net's connected fill, placed where the copper and DRC's clearances leave
+  room. On the CM5 board a signal routed round two GND pads of a resistor
+  and a capacitor left them on such an island with the board's own rules.
 
 ### New in 0.5.2
 
@@ -97,8 +105,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.5.2.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.2),
+Download `kicad-autorouter-0.5.3.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.3),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -109,7 +117,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The built-in router uses KiCad's bundled Python environment.
 - The optional AI assistant requires an installed, authenticated `codex` CLI.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.5.2 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.3 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약
