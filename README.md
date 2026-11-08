@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.5.1 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.1)
+**Current release:** [0.5.2 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.2)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -24,6 +24,20 @@ service or AI account is required.
 | AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex CLI. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.2
+
+- Dialog and AI-assistant runs get the same copper clean-up as the
+  command-line pipeline: vias that join nothing are removed with their
+  stubs, tiny off-angle joins are snapped and power rails are widened.
+- Junctions are welded into shared end points: a route that ended inside a
+  via off its centre or in the middle of another track now meets it at an
+  end point, so KiCad no longer flags dangling ends and Select Connection
+  (U) follows it. Copper is no longer drawn twice at such joins.
+- Rip-up reaches a pin walled in by routes over its own room past the exit
+  (HUB_nOC2 / HUB_nOC4 at a USB hub QFN were left open with the board's own
+  clearance rules).
+- Power widening respects a mounting hole's own clearance.
 
 ### New in 0.5.1
 
@@ -83,8 +97,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.5.1.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.1),
+Download `kicad-autorouter-0.5.2.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.2),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -95,7 +109,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The built-in router uses KiCad's bundled Python environment.
 - The optional AI assistant requires an installed, authenticated `codex` CLI.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.5.1 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.2 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약
