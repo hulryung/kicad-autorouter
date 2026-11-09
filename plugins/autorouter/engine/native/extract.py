@@ -2074,6 +2074,124 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         for zone in board.Zones():
             if not zone.GetIsRuleArea() and zone.GetNetCode() in nets:
                 zones_by_net.setdefault(zone.GetNetCode(), []).append(zone)
+    # The board's own tracks and vias of each routed net (not this job's: its
+    # paths join pads whole). A route of the designer's that stops short of
+    # the far pad, or a piece with no pad at all, is where the rest of the
+    # route starts or ends: left out, the search ran pad to pad again on top
+    # of it and left its open end in the air.
+    wired_items: Dict[int, List] = {}
+    if not options.shove:
+        for item in board.GetTracks():
+            code = item.GetNetCode()
+            # plane nets too (their strays are routed to the pour), not the
+            # nets the user left to the pours alone
+            if code in nets and code not in user_skipped and item.GetClass() in ("PCB_TRACK", "PCB_ARC", "PCB_VIA") \
+                    and str(item.m_Uuid.AsString()) not in job_items:
+                wired_items.setdefault(code, []).append(item)
+
+    def _wired_cells(item) -> Set[int]:
+        """Cells whose centre lies in the item's copper: a route ending there
+        ends on it."""
+        out: Set[int] = set()
+        if item.GetClass() == "PCB_VIA":
+            pos = item.GetPosition()
+            for kl in item.GetLayerSet().CuStack():
+                li = layer_of.get(kl)
+                if li is None or not layers[li].routable:
+                    continue
+                try:
+                    radius = item.GetWidth(kl) // 2
+                except TypeError:
+                    radius = item.GetWidth() // 2
+                out.update(grid.disc_cells(li, pos.x, pos.y, max(0, radius - 5_000)))
+            return out
+        li = layer_of.get(item.GetLayer())
+        if li is None or not layers[li].routable:
+            return out
+        r = max(0, item.GetWidth() // 2 - 5_000)
+        s, e = item.GetStart(), item.GetEnd()
+        pts = [(s.x, s.y), (e.x, e.y)]
+        if item.GetClass() == "PCB_ARC":
+            # chords short enough to stay inside the arc's copper
+            m, c = item.GetMid(), item.GetCenter()
+            rad = math.hypot(s.x - c.x, s.y - c.y)
+            a0, am, a1 = (math.atan2(p.y - c.y, p.x - c.x) for p in (s, m, e))
+            sweep = (a1 - a0) % (2 * math.pi)
+            if (am - a0) % (2 * math.pi) > sweep:       # the arc runs the other way round
+                sweep -= 2 * math.pi
+            n = max(2, int(abs(sweep) * rad / 100_000) + 1)
+            pts = [(c.x + rad * math.cos(a0 + sweep * k / n), c.y + rad * math.sin(a0 + sweep * k / n))
+                   for k in range(n + 1)]
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            out.update(grid.segment_cells(li, int(x1), int(y1), int(x2), int(y2), r))
+        return out
+
+    def _attach_wired(net, code, entries, find, cluster_index) -> None:
+        items = wired_items.get(code)
+        if not items:
+            return
+        uid_of = lambda it: str(it.m_Uuid.AsString())
+        index = {uid_of(it): k for k, it in enumerate(items)}
+        pad_index = {(pad.GetPosition().x, pad.GetPosition().y, pad.GetNumber()): i
+                     for i, (pad, _, _, _, _) in enumerate(entries)}
+        root = list(range(len(items)))
+
+        def top(k):
+            while root[k] != k:
+                root[k] = root[root[k]]
+                k = root[k]
+            return k
+
+        touches: Dict[int, Set[int]] = {}              # item -> pad entries it reaches
+        for k, it in enumerate(items):
+            try:
+                linked = list(conn.GetConnectedItems(it))
+            except Exception:
+                linked = []
+            for other in linked:
+                kind = other.GetClass()
+                if kind == "PAD":
+                    pos = other.GetPosition()
+                    i = pad_index.get((pos.x, pos.y, other.GetNumber()))
+                    if i is not None:
+                        touches.setdefault(k, set()).add(i)
+                else:
+                    j = index.get(uid_of(other))
+                    if j is not None:
+                        root[top(k)] = top(j)
+        pieces: Dict[int, List[int]] = {}
+        for k in range(len(items)):
+            pieces.setdefault(top(k), []).append(k)
+        # the pads' own cells (their exits) stay theirs: a piece of track that
+        # ends on another pad's exit cell would read as joined to that pad
+        # with no copper drawn between them
+        pad_owned: Dict[int, int] = {}
+        for ci, cl in enumerate(net.clusters):
+            for c in cl.cells | cl.copper:
+                pad_owned[c] = ci
+        for members in pieces.values():
+            cells: Set[int] = set()
+            for k in members:
+                cells |= _wired_cells(items[k])
+            reached = {cluster_index[find(i)] for k in members for i in touches.get(k, ())}
+            cells = {c for c in cells if c not in pad_owned or pad_owned[c] in reached}
+            if not cells:
+                continue
+            if reached:
+                for ci in reached:                     # one, unless the copper alone joins them
+                    net.clusters[ci].cells |= cells
+                continue
+            # a piece of route with no pad: a cluster of its own, to be joined
+            ends = []
+            for k in members:
+                it = items[k]
+                pts = [it.GetPosition()] if it.GetClass() == "PCB_VIA" else [it.GetStart(), it.GetEnd()]
+                for p in pts:
+                    a = (grid.cell_x(p.x), grid.cell_y(p.y))
+                    if a not in ends:
+                        ends.append(a)
+            net.clusters.append(Cluster(cells=cells, anchors=ends[:16]))
+
     for code, entries in pad_cells.items():
         net = nets[code]
         pads = [pad for pad, _, _, _, _ in entries]
@@ -2132,6 +2250,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if tight:
                 cl.tight = True
         net.clusters = list(groups.values())
+        if not options.shove and code not in user_skipped:
+            _attach_wired(net, code, entries, find, cluster_index)
         for piece in pieces:
             touched = sorted({cluster_index[find(i)] for i in piece["pads"]})
             rp = RoutedPath(code, piece["width"], piece["segments"], piece["vias"],
