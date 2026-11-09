@@ -2126,6 +2126,41 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             out.update(grid.segment_cells(li, int(x1), int(y1), int(x2), int(y2), r))
         return out
 
+    def _attach_pour(net, code, entries, find, cluster_index) -> None:
+        """A filled pour of the net on a routable layer is copper its pads'
+        group already has: a route to that group ends where it reaches the
+        pour, not at a pad somewhere inside it with a track laid across the
+        fill on the way."""
+        zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() == code and z.IsFilled()]
+        if not zones:
+            return
+        pad_owned: Dict[int, int] = {}
+        for ci, cl in enumerate(net.clusters):
+            for c in cl.cells | cl.copper:
+                pad_owned[c] = ci
+        for z in zones:
+            for kl in z.GetLayerSet().CuStack():
+                li = layer_of.get(kl)
+                if li is None or not layers[li].routable:
+                    continue
+                poly = z.GetFilledPolysList(kl)
+                rings = _poly_rings(poly)
+                for i in range(poly.OutlineCount()):
+                    reached = set()
+                    for k, (pad, _, _, _, _) in enumerate(entries):
+                        if pad.IsOnLayer(kl) and poly.Contains(pad.GetPosition(), i):
+                            reached.add(cluster_index[find(k)])
+                    if not reached:
+                        continue
+                    pts, holes = rings[i]
+                    inside = set(grid.polygon_cells(li, pts, holes, 0))
+                    # a cell in from the edge: the track end lands in the fill
+                    cells = {c for c in inside
+                             if c + 1 in inside and c - 1 in inside and c + grid.w in inside and c - grid.w in inside
+                             and (c not in pad_owned or pad_owned[c] in reached)}
+                    for ci in reached:
+                        net.clusters[ci].cells |= cells
+
     def _attach_wired(net, code, entries, find, cluster_index) -> None:
         items = wired_items.get(code)
         if not items:
@@ -2252,6 +2287,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         net.clusters = list(groups.values())
         if not options.shove and code not in user_skipped:
             _attach_wired(net, code, entries, find, cluster_index)
+            if not net.partner:
+                _attach_pour(net, code, entries, find, cluster_index)
         for piece in pieces:
             touched = sorted({cluster_index[find(i)] for i in piece["pads"]})
             rp = RoutedPath(code, piece["width"], piece["segments"], piece["vias"],
