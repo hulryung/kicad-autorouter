@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.5.4 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.4)
+**Current release:** [0.5.5 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.5)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -24,6 +24,25 @@ service or AI account is required.
 | AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex CLI. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.5
+
+- A route that ended at the edge of its net's pour could come apart when
+  another net routed in the same run cut that edge strip, and was still
+  reported as routed. Pours are now refilled and checked after routing, and
+  such a net is routed again to its pads.
+- Isolated-copper repair only acts on pads that sit in a cut-off piece of
+  their own pour. It had also added vias and stubs to pads no pour reaches,
+  including on nets left out of the run. Planes joined through thermal
+  through-hole pads are found, and repair vias keep clear of copper
+  drawings and of keepouts over their whole pad.
+- Half-done routes off the straight line between their pads are finished
+  from the old track's end instead of redrawn pad to pad. Joins land on the
+  old track's end point, and tails buried in other copper are removed. On
+  the CM5 board with every third segment deleted (1807 mm), new copper went
+  2261 -> 1941 mm and dangling-track warnings 88 -> 55.
+- Reading a board with large connected copper pieces is faster (19.9 -> 4.6 s
+  with 2000 vias in one pour).
 
 ### New in 0.5.4
 
@@ -115,8 +134,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.5.4.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.4),
+Download `kicad-autorouter-0.5.5.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.5),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -127,7 +146,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The built-in router uses KiCad's bundled Python environment.
 - The optional AI assistant requires an installed, authenticated `codex` CLI.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.5.4 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.5 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약
