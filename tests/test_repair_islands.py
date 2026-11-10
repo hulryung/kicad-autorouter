@@ -29,7 +29,7 @@ def pt(x, y):
     return pcbnew.VECTOR2I(mm(x), mm(y))
 
 
-def make_board(ring=True):
+def make_board(ring=True, extra=(), surface=True, thermal_pth=False, graphic=False, keepout=False):
     board = pcbnew.BOARD()
     gnd = pcbnew.NETINFO_ITEM(board, "GND")
     board.Add(gnd)
@@ -47,7 +47,7 @@ def make_board(ring=True):
     fp.SetReference("C1")
     board.Add(fp)
     pads = []
-    for n, (x, y) in enumerate(((9, 10), (11, 10), (3, 3), (17, 3), (3, 17)), 1):
+    for n, (x, y) in enumerate(((9, 10), (11, 10), (3, 3), (17, 3), (3, 17)) + tuple(extra), 1):
         p = pcbnew.PAD(fp)
         p.SetNumber(str(n))
         p.SetShape(pcbnew.PAD_SHAPE_RECT)
@@ -58,27 +58,70 @@ def make_board(ring=True):
         p.SetNet(gnd)
         fp.Add(p)
         pads.append(p)
-    for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
+    for layer in (pcbnew.F_Cu, pcbnew.B_Cu) if surface else (pcbnew.B_Cu,):
         z = pcbnew.ZONE(board)
         z.SetLayer(layer)
         z.SetNetCode(gnd.GetNetCode())
         z.SetMinThickness(mm(0.2))
         z.SetLocalClearance(mm(0.2))
-        z.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+        z.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL if thermal_pth else pcbnew.ZONE_CONNECTION_FULL)
         o = z.Outline()
         o.NewOutline()
         for x, y in ((0.5, 0.5), (19.5, 0.5), (19.5, 19.5), (0.5, 19.5)):
             o.Append(mm(x), mm(y))
         board.Add(z)
-    # the surface pour reaches the plane through a via in its main part
-    v = pcbnew.PCB_VIA(board)
-    v.SetPosition(pt(5, 5))
-    v.SetViaType(pcbnew.VIATYPE_THROUGH)
-    v.SetWidth(mm(0.6))
-    v.SetDrill(mm(0.3))
-    v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
-    v.SetNetCode(gnd.GetNetCode())
-    board.Add(v)
+    if thermal_pth:
+        # the surface pour reaches the plane through a through-hole pad on
+        # thermal spokes: its centre is in neither fill
+        p = pcbnew.PAD(fp)
+        p.SetNumber("T")
+        p.SetShape(pcbnew.PAD_SHAPE_CIRCLE)
+        p.SetAttribute(pcbnew.PAD_ATTRIB_PTH)
+        p.SetLayerSet(p.PTHMask())
+        p.SetSize(pcbnew.VECTOR2I(mm(1.6), mm(1.6)))
+        p.SetDrillSize(pcbnew.VECTOR2I(mm(0.8), mm(0.8)))
+        p.SetPosition(pt(5, 5))
+        p.SetNet(gnd)
+        fp.Add(p)
+    else:
+        # the surface pour reaches the plane through a via in its main part
+        v = pcbnew.PCB_VIA(board)
+        v.SetPosition(pt(5, 5))
+        v.SetViaType(pcbnew.VIATYPE_THROUGH)
+        v.SetWidth(mm(0.6))
+        v.SetDrill(mm(0.3))
+        v.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+        v.SetNetCode(gnd.GetNetCode())
+        board.Add(v)
+    if not surface:
+        # no surface pour: one pad reaches the plane by a track to the via
+        t = pcbnew.PCB_TRACK(board)
+        t.SetStart(pt(3, 3))
+        t.SetEnd(pt(5, 5))
+        t.SetWidth(mm(0.25))
+        t.SetLayer(pcbnew.F_Cu)
+        t.SetNetCode(gnd.GetNetCode())
+        board.Add(t)
+    if graphic:
+        # a copper drawing through the island, where the nearest via spots are
+        g = pcbnew.PCB_SHAPE(board)
+        g.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        g.SetStart(pt(7.6, 10.3))
+        g.SetEnd(pt(12.4, 10.3))
+        g.SetLayer(pcbnew.B_Cu)
+        g.SetWidth(mm(0.3))
+        board.Add(g)
+    if keepout:
+        k = pcbnew.ZONE(board)
+        k.SetIsRuleArea(True)
+        k.SetDoNotAllowVias(True)
+        k.SetDoNotAllowTracks(False)
+        k.SetLayerSet(pcbnew.LSET.AllCuMask())
+        o = k.Outline()
+        o.NewOutline()
+        for x, y in ((7.2, 8.2), (12.8, 8.2), (12.8, 10.6), (7.2, 10.6)):
+            o.Append(mm(x), mm(y))
+        board.Add(k)
     if ring:
         # a signal all the way round the two pads: their pour is an island
         corners = ((7, 8), (13, 8), (13, 12), (7, 12), (7, 8))
@@ -125,6 +168,39 @@ def main():
     board, gnd, sig = make_board(ring=False)
     before = len(list(board.GetTracks()))
     check("no island: nothing to do", apply.repair_islands(board, []) == 0 and len(list(board.GetTracks())) == before)
+
+    # the island holds more pads than the connected part: still the island
+    board, gnd, sig = make_board(extra=((10, 9), (10, 11), (8.5, 11), (11.5, 9)))
+    live = []
+    check("an island with most of the pads is joined", apply.repair_islands(board, live) == 1 and unconnected(board) == 0)
+    v = [i for i in live if i.GetClass() == "PCB_VIA"][0].GetPosition()
+    check("...from inside the ring", 7.3 < v.x / MM < 12.7 and 8.3 < v.y / MM < 11.7, f"{v.x / MM},{v.y / MM}")
+
+    # the plane held by a thermal-relief through-hole pad
+    board, gnd, sig = make_board(thermal_pth=True)
+    check("thermal through-hole pad: the plane is found", apply.repair_islands(board, []) == 1 and unconnected(board) == 0)
+
+    # pads no pour reaches are not islands: the router fans those out
+    board, gnd, sig = make_board(ring=False, surface=False)
+    before = len(list(board.GetTracks()))
+    check("pads outside any pour are left alone", unconnected(board) > 0 and apply.repair_islands(board, []) == 0
+          and len(list(board.GetTracks())) == before)
+
+    # copper drawings are obstacles
+    board, gnd, sig = make_board(graphic=True)
+    live = []
+    check("joined past a copper drawing", apply.repair_islands(board, live) == 1 and unconnected(board) == 0)
+    via = [i for i in live if i.GetClass() == "PCB_VIA"][0]
+    g = [d for d in board.GetDrawings() if d.GetLayer() == pcbnew.B_Cu][0]
+    check("via clear of the drawing", not via.GetEffectiveShape(pcbnew.B_Cu).Collide(g.GetEffectiveShape(pcbnew.B_Cu), mm(0.19)))
+
+    # a via keepout: no part of the via's pad inside it
+    board, gnd, sig = make_board(keepout=True)
+    live = []
+    check("joined beside a via keepout", apply.repair_islands(board, live) == 1 and unconnected(board) == 0)
+    v = [i for i in live if i.GetClass() == "PCB_VIA"][0]
+    r, c = v.GetWidth(pcbnew.F_Cu) / 2 / MM, v.GetPosition()
+    check("via pad outside the keepout", c.y / MM - r >= 10.6 - 0.001, f"{c.x / MM},{c.y / MM} r {r}")
     print("test_repair_islands: all passed")
 
 

@@ -5,7 +5,8 @@ fills it last computed; a pour drawn but never filled, or filled before
 tracks were moved, is common). A VCC pad outside the pour is joined to the
 pour's edge, not to a pad inside it with a track across the fill: for a
 pour net (the pour covers most of its pads) and for a routed net (it covers
-only some). Builds the board in memory. Needs KiCad's Python; skips
+only some). When another net's route then cuts the strip of pour that track
+ended in off the rest, the join is routed again, pad to pad. Builds the board in memory. Needs KiCad's Python; skips
 otherwise.
 
   <KiCad python3> tests/test_pour_joined.py
@@ -31,7 +32,7 @@ def pt(x, y):
     return pcbnew.VECTOR2I(int(x * MM), int(y * MM))
 
 
-def make_board(filled: bool):
+def make_board(filled: bool, cut: bool = False):
     board = pcbnew.BOARD()
     vcc = pcbnew.NETINFO_ITEM(board, "VCC")
     board.Add(vcc)
@@ -49,6 +50,9 @@ def make_board(filled: bool):
     fp.SetReference("U1")
     board.Add(fp)
     spots = [((4, 4), vcc), ((10, 6), vcc), ((6, 10), vcc), ((30, 20), sig), ((36, 26), sig)]
+    if cut:
+        # the signal's straight route runs just inside the pour's east edge
+        spots = spots[:3] + [((12.4, 3), sig), ((12.4, 9), sig)]
     for n, ((x, y), net) in enumerate(spots, 1):
         p = pcbnew.PAD(fp)
         p.SetNumber(str(n))
@@ -63,7 +67,7 @@ def make_board(filled: bool):
     z.SetLayer(pcbnew.F_Cu)
     z.SetNetCode(vcc.GetNetCode())
     z.SetMinThickness(int(0.2 * MM))
-    z.SetLocalClearance(int(0.2 * MM))
+    z.SetLocalClearance(int((0.3 if cut else 0.2) * MM))
     z.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
     o = z.Outline()
     o.NewOutline()
@@ -137,6 +141,15 @@ def main():
               str(job.failed))
         inside = over_pour(board, vcc)
         check(f"{label}: the track stops at the pour", inside < 500_000, f"{inside / 1e6:.2f} mm over the fill")
+    # the signal, routed in the same run, cuts the pour's edge strip off: the
+    # track that ended there must still reach the pads
+    board, vcc = make_board(True, cut=True)
+    add_pads(board, [(20, 6)])
+    job = pipeline.run_job(board, NativeOptions(pitch_mm=0.1), apply_paths=True)
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    board.BuildConnectivity()
+    check("a join the refill took apart is routed again", board.GetConnectivity().GetUnconnectedCount(True) == 0
+          and not job.failed, f"failed {job.failed} stats {job.stats.get('pour_joins_redone')}")
     print("test_pour_joined: all passed")
 
 

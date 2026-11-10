@@ -115,6 +115,7 @@ class NativeOptions:
     # Track width and via size: per net from the net class (KiCad's default),
     # the editor's current track/via selection, or one fixed size (nm).
     neck_down: bool = True          # narrower escape stubs at fine-pitch pads
+    pour_goals: bool = True         # a route to pads a filled pour joins may end on the pour (see pipeline's check)
     escape_sides: Dict[Tuple[str, str], Tuple[int, int]] = field(default_factory=dict)
     # (reference, pad number) -> the exit point chosen for that pad by an earlier pass of the same job, so
     # the vias that pass dropped do not flip a later pass's choice of side

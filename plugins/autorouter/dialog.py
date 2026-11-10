@@ -844,7 +844,8 @@ class AutorouterDialog(wx.Dialog):
                 job = native_pipeline.run_job(self.board, native, status=status, progress=progress,
                                               on_path=on_path, on_remove=on_remove,
                                               cancelled=lambda: self._cancel, escalate=True, apply_paths=False,
-                                              extract_fn=extract_on_ui, on_layers=set_layers, placed=placed)
+                                              extract_fn=extract_on_ui, on_layers=set_layers, placed=placed,
+                                              on_board=self._on_main)
             except Exception as e:
                 logger.exception("Routing failed")
                 self._log_file(f"[router] failed after {time.time() - started:.0f}s: {e!r}")

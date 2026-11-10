@@ -210,6 +210,19 @@ def weld_junctions(board, items) -> dict:
                 continue
             if ends[(net, layer, px, py)] > 1 or (px, py) in pad_pts.get(net, ()) or in_pad(net, layer, px, py):
                 continue
+            # an end of the other track within its own copper of this point:
+            # meet there, rather than on its centre line a few micrometres
+            # short of that end (the split would leave the rest as a tail)
+            near = [(math.hypot(ex - px, ey - py), ex, ey, hw) for hu, hw, hx1, hy1, hx2, hy2 in by_layer[(net, layer)]
+                    if hu != u for ex, ey in ((hx1, hy1), (hx2, hy2))
+                    if (hx1, hy1) != (hx2, hy2) and math.hypot(ex - px, ey - py) <= hw / 2]
+            if near:
+                d, ex, ey, hw = min(near)
+                stubbed.add((net, layer, px, py))
+                if d > 0 and (net, layer, (px, py), (ex, ey)) not in joins:
+                    add(net, layer, min(w, hw), px, py, ex, ey)
+                    stats["end_stubs"] += 1
+                continue
             for hu, hw, hx1, hy1, hx2, hy2 in by_layer[(net, layer)]:
                 if hu == u:
                     continue
@@ -285,6 +298,44 @@ def weld_junctions(board, items) -> dict:
         if uid(t) in run and (t.GetStart().x, t.GetStart().y) == (t.GetEnd().x, t.GetEnd().y):
             remove(t)
             stats["zero_length"] += 1
+    # 5: tails. A route ends on a cell of the copper it joins, which can lie
+    # past the point where the two centre lines meet: after the split there
+    # a short piece of the run is left with one end free, all of it inside
+    # the other track's copper. It joins nothing (KiCad flags it dangling).
+    def inside(host, x, y):
+        s, e = host.GetStart(), host.GetEnd()
+        dx, dy = e.x - s.x, e.y - s.y
+        length2 = dx * dx + dy * dy
+        k = max(0.0, min(1.0, ((x - s.x) * dx + (y - s.y) * dy) / length2)) if length2 else 0.0
+        return math.hypot(s.x + k * dx - x, s.y + k * dy - y) <= host.GetWidth() / 2 - WELD_TOL
+    trimmed = True
+    while trimmed:
+        trimmed = False
+        ends = Counter()
+        groups = defaultdict(list)
+        for t in tracks():
+            groups[(t.GetNetCode(), t.GetLayer())].append(t)
+            for p in (t.GetStart(), t.GetEnd()):
+                ends[(t.GetNetCode(), t.GetLayer(), p.x, p.y)] += 1
+        for (net, layer), lst in groups.items():
+            for t in lst:
+                if uid(t) not in run:
+                    continue
+                pts = [(t.GetStart().x, t.GetStart().y), (t.GetEnd().x, t.GetEnd().y)]
+                free = [p for p in pts if ends[(net, layer, p[0], p[1])] == 1]
+                if len(free) != 1:
+                    continue
+                fx, fy = free[0]
+                if (fx, fy) in via_pts.get(net, ()) or (fx, fy) in pad_pts.get(net, ()) or in_pad(net, layer, fx, fy) \
+                        or any(math.hypot(vx - fx, vy - fy) < r for vx, vy, r in vias.get(net, ())):
+                    continue
+                if any(uid(h) != uid(t)
+                       and all(inside(h, x, y) for x, y in pts) for h in lst):
+                    remove(t)
+                    stats["tails"] += 1
+                    trimmed = True
+            if trimmed:
+                break
     return dict(stats)
 
 
@@ -895,7 +946,7 @@ def _pad_groups(board, conn, code):
     return groups
 
 
-def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000) -> int:
+def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000, cancelled=None) -> int:
     """After every other clean-up: a piece of a pour that its pads alone hold
     (a signal routed round two GND pads of a resistor and a capacitor cuts
     them off the surface pour) gets a short stub from one of its pads to a
@@ -903,8 +954,9 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
     router's grid check is a little coarser than DRC and can find no room
     where there is; this checks the copper itself, with the clearances DRC
     uses. The pours are refilled first; a via that does not join the island
-    to the net after the refill comes off again. Returns how many islands
-    were joined."""
+    to the net after the refill comes off again. Only pads that sit in a
+    piece of their net's fill are islands: pads no pour reaches are the
+    router's to join, not this pass's. Returns how many islands were joined."""
     zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
     if not zones:
         return 0
@@ -941,38 +993,71 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
             own = 0
         return max(own, nc_clear[code])
 
+    graphics = []                                 # copper drawings and text: obstacles like any copper
+    for holder in [board.GetDrawings()] + [fp.GraphicalItems() for fp in board.GetFootprints()]:
+        for d in holder:
+            try:
+                if d.IsOnCopperLayer():
+                    graphics.append(d)
+            except Exception:
+                pass
     added_items, repairs = [], []
     joined = 0
     for code in sorted({z.GetNetCode() for z in zones}):
         groups = _pad_groups(board, conn, code)
         if len(groups) < 2:
             continue
-        main = groups[0]
-        # where the connected part of the net is, layer by layer
-        anchors = {}
-        for item in main + [i for i in conn.GetConnectedItems(main[0])]:
-            kind = item.GetClass()
-            if kind in ("PAD", "PCB_VIA"):
-                for lid in item.GetLayerSet().CuStack():
-                    anchors.setdefault(lid, []).append(item.GetPosition())
-            elif kind in ("PCB_TRACK", "PCB_ARC"):
-                anchors.setdefault(item.GetLayer(), []).extend([item.GetStart(), item.GetEnd()])
-        targets = []                              # (layer, fill, outline index) tied to the main group
-        for z in zones:
-            if z.GetNetCode() != code:
-                continue
-            for lid in z.GetLayerSet().CuStack():
-                poly = z.GetFilledPolysList(lid)
-                for i in range(poly.OutlineCount()):
-                    if any(poly.Contains(pt, i) for pt in anchors.get(lid, [])):
-                        targets.append((lid, poly, i))
+        fills = [(lid, z.GetFilledPolysList(lid)) for z in zones if z.GetNetCode() == code
+                 for lid in z.GetLayerSet().CuStack()]
+        fills = [(lid, poly, i, pcbnew.SHAPE_POLY_SET(poly.Outline(i))) for lid, poly in fills
+                 for i in range(poly.OutlineCount())]
+
+        def pieces(group):
+            """The pieces of fill a pad group is in: (layer, fill, outline index)."""
+            pts, shapes = {}, {}
+            for item in group + [i for i in conn.GetConnectedItems(group[0])]:
+                kind = item.GetClass()
+                if kind in ("PAD", "PCB_VIA"):
+                    for lid in item.GetLayerSet().CuStack():
+                        pts.setdefault(lid, []).append(item.GetPosition())
+                        if kind == "PAD":
+                            shapes.setdefault(lid, []).append(item)
+                elif kind in ("PCB_TRACK", "PCB_ARC"):
+                    pts.setdefault(item.GetLayer(), []).extend([item.GetStart(), item.GetEnd()])
+            out = []
+            for lid, poly, i, whole in fills:
+                if any(poly.Contains(pt, i) for pt in pts.get(lid, [])):
+                    out.append((lid, poly, i))
+                    continue
+                # a thermal relief leaves the pad's centre out of the fill:
+                # the spokes still touch its copper
+                box = poly.Outline(i).BBox()
+                for pad in shapes.get(lid, []):
+                    try:
+                        if box.Intersects(pad.GetBoundingBox()) and whole.Collide(pad.GetEffectiveShape(lid), 0):
+                            out.append((lid, poly, i))
+                            break
+                    except Exception:
+                        pass
+            return out
+
+        held = [pieces(g) for g in groups]
+        # the connected part of the net: the group in the most fill (a cut-off
+        # piece can hold more pads than the plane's own few)
+        area = [sum(abs(poly.Outline(i).Area()) for _, poly, i in h) for h in held]
+        m = max(range(len(groups)), key=lambda k: (area[k], len(groups[k])))
+        targets = held[m]
         if not targets:
             continue
-        nc = netclass(main[0].GetNetname())
+        nc = netclass(groups[m][0].GetNetname())
         via_d, drill, width = int(nc.GetViaDiameter()), int(nc.GetViaDrill()), int(nc.GetTrackWidth())
-        for group in groups[1:]:
+        for k, group in enumerate(groups):
+            if k == m or not held[k]:
+                continue                              # no fill of its own: not an island
+            if cancelled and cancelled():
+                break
             if _join_island(board, group, code, targets, via_d, drill, width, reach, step, gap, hole_clear,
-                            hole_hole, edge_clear, copper, keepouts, edges, added_items, repairs):
+                            hole_hole, edge_clear, copper, keepouts, edges, graphics, added_items, repairs, groups[m][0]):
                 joined += 1
     if not added_items:
         return 0
@@ -981,10 +1066,14 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
     board.BuildConnectivity()
     conn = board.GetConnectivity()
     undone = False
-    for group_pad, made in repairs:
-        groups = _pad_groups(board, conn, group_pad.GetNetCode())
-        uid = str(group_pad.m_Uuid.AsString())
-        if groups and any(str(p.m_Uuid.AsString()) == uid for p in groups[0]):
+    for group_pad, made, main_pad in repairs:
+        uid = str(main_pad.m_Uuid.AsString())
+        try:
+            together = any(i.GetClass() == "PAD" and str(i.m_Uuid.AsString()) == uid
+                           for i in conn.GetConnectedItems(group_pad))
+        except Exception:
+            together = False
+        if together:
             continue
         joined -= 1
         undone = True
@@ -1000,7 +1089,7 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
 
 
 def _join_island(board, group, code, targets, via_d, drill, width, reach, step, gap, hole_clear, hole_hole,
-                 edge_clear, copper, keepouts, edges, added_items, repairs) -> bool:
+                 edge_clear, copper, keepouts, edges, graphics, added_items, repairs, main_pad) -> bool:
     """One stub and via for an island's pads; True when placed."""
     margin = 5_000
     box = None
@@ -1013,6 +1102,7 @@ def _join_island(board, group, code, targets, via_d, drill, width, reach, step, 
     box.Inflate(reach + 2_000_000)
     near = [t for t in board.GetTracks() if t.GetBoundingBox().Intersects(box)]
     near_pads = [p for p in board.GetPads() if p.GetBoundingBox().Intersects(box)]
+    near_graphics = [d for d in graphics if d.GetBoundingBox().Intersects(box)]
     holes = [(t.GetPosition(), t.GetDrillValue() // 2) for t in near if t.GetClass() == "PCB_VIA"]
     holes += [(p.GetPosition(), max(p.GetDrillSize().x, p.GetDrillSize().y) // 2) for p in near_pads if p.HasHole()]
 
@@ -1043,6 +1133,14 @@ def _join_island(board, group, code, targets, via_d, drill, width, reach, step, 
             for d in edges:
                 if d.GetBoundingBox().Intersects(ibox) and shape.Collide(d.GetEffectiveShape(), edge_clear + margin):
                     return False
+            for d in near_graphics:
+                try:
+                    if d.IsOnLayer(layer) and d.GetBoundingBox().Intersects(ibox) \
+                            and getattr(d, "GetNetCode", lambda: 0)() != code \
+                            and shape.Collide(d.GetEffectiveShape(layer), own):
+                        return False
+                except Exception:
+                    return False
         if hole:
             hs = item.GetEffectiveHoleShape()
             for layer in copper:
@@ -1057,10 +1155,28 @@ def _join_island(board, group, code, targets, via_d, drill, width, reach, step, 
                     return False
         return True
 
+    ring = [(0, 0)] + [(int(via_d / 2 * math.cos(k * math.pi / 4)), int(via_d / 2 * math.sin(k * math.pi / 4)))
+                       for k in range(8)]
+    no_via = [z for z in keepouts if z.GetDoNotAllowVias() or z.GetDoNotAllowTracks()]
+    no_track = [z for z in keepouts if z.GetDoNotAllowTracks()]
+
     def keepout(x, y) -> bool:
-        pt = pcbnew.VECTOR2I(x, y)
-        for z in keepouts:
-            if (z.GetDoNotAllowVias() or z.GetDoNotAllowTracks()) and z.Outline().Contains(pt):
+        """The via's pad, not just its centre, in an area that bans it."""
+        for z in no_via:
+            outline = z.Outline()
+            if any(outline.Contains(pcbnew.VECTOR2I(x + dx, y + dy)) for dx, dy in ring):
+                return True
+        return False
+
+    def stub_banned(t, layer) -> bool:
+        s_, e_ = t.GetStart(), t.GetEnd()
+        n_ = max(1, int(math.hypot(e_.x - s_.x, e_.y - s_.y) / 100_000))
+        for z in no_track:
+            if not z.IsOnLayer(layer):
+                continue
+            outline = z.Outline()
+            if any(outline.Contains(pcbnew.VECTOR2I(int(s_.x + (e_.x - s_.x) * k / n_), int(s_.y + (e_.y - s_.y) * k / n_)))
+                   for k in range(n_ + 1)):
                 return True
         return False
 
@@ -1109,11 +1225,11 @@ def _join_island(board, group, code, targets, via_d, drill, width, reach, step, 
 
     # spots clear of every pad first; one with its ring on a pad of the
     # island only when nothing else fits
-    clean = [s for s in spots if not on_pad(s[3], s[4])]
-    ordered = clean + [s for s in spots if s not in clean]
-    for _, p, layer, x, y in ordered:
-        if in_pad(x, y) or keepout(x, y) or not lands(x, y, layer):
-            continue
+    # (the cheap tests first; what the first round put off waits its turn)
+    if not any(lid != p.GetLayer() for lid, _, _ in targets for p in group):
+        return False                              # no fill on another layer to land in
+    def place(spot) -> bool:
+        _, p, layer, x, y = spot
         via = pcbnew.PCB_VIA(board)
         via.SetPosition(pcbnew.VECTOR2I(x, y))
         via.SetWidth(via_d)
@@ -1125,7 +1241,7 @@ def _join_island(board, group, code, targets, via_d, drill, width, reach, step, 
             pass
         via.SetLayerPair(copper[0], copper[-1])
         if not clear(via, copper, hole=True):
-            continue
+            return False
         c = p.GetPosition()
         for at_end in (False, True):
             pts = jog(c.x, c.y, x, y, at_end=at_end)
@@ -1138,14 +1254,25 @@ def _join_island(board, group, code, targets, via_d, drill, width, reach, step, 
                 t.SetLayer(layer)
                 t.SetNetCode(code)
                 stubs.append(t)
-            if all(clear(t, [layer]) for t in stubs):
+            if all(clear(t, [layer]) and not stub_banned(t, layer) for t in stubs):
                 made = stubs + [via]
                 for it in made:
                     board.Add(it)
                     added_items.append(it)
-                repairs.append((p, made))
+                repairs.append((p, made, main_pad))
                 return True
-    return False
+        return False
+
+    put_off = []
+    for spot in spots:
+        _, p, layer, x, y = spot
+        if not lands(x, y, layer) or keepout(x, y) or in_pad(x, y):
+            continue
+        if on_pad(x, y):
+            put_off.append(spot)
+        elif place(spot):
+            return True
+    return any(place(spot) for spot in put_off)
 
 
 def add_path(board, layers: List[LayerInfo], path: RoutedPath, trim: bool = False) -> List[object]:

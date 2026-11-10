@@ -2126,6 +2126,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             out.update(grid.segment_cells(li, int(x1), int(y1), int(x2), int(y2), r))
         return out
 
+    pour_joined: Dict[int, int] = {}                   # net -> pad groups, where a pour gave goal cells
+
     def _attach_pour(net, code, entries, find, cluster_index) -> None:
         """A filled pour of the net on a routable layer is copper its pads'
         group already has: a route to that group ends where it reaches the
@@ -2158,8 +2160,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     cells = {c for c in inside
                              if c + 1 in inside and c - 1 in inside and c + grid.w in inside and c - grid.w in inside
                              and (c not in pad_owned or pad_owned[c] in reached)}
+                    step = max(20, int(math.ceil(math.sqrt(len(cells) / 24.0))))
+                    marks = [(c % grid.plane % grid.w, c % grid.plane // grid.w) for c in cells]
+                    marks = [(x, y) for x, y in marks if x % step == 0 and y % step == 0]
+                    if cells:
+                        pour_joined[code] = len(cluster_index)
                     for ci in reached:
                         net.clusters[ci].cells |= cells
+                        net.clusters[ci].anchors += [a for a in marks if a not in net.clusters[ci].anchors]
 
     def _attach_wired(net, code, entries, find, cluster_index) -> None:
         items = wired_items.get(code)
@@ -2177,8 +2185,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 k = root[k]
             return k
 
-        touches: Dict[int, Set[int]] = {}              # item -> pad entries it reaches
+        touches: Dict[int, Set[int]] = {}              # piece (its first item) -> pad entries it reaches
+        seen: Set[int] = set()
         for k, it in enumerate(items):
+            if k in seen:
+                continue                               # one call returns the whole connected piece
             try:
                 linked = list(conn.GetConnectedItems(it))
             except Exception:
@@ -2190,10 +2201,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     i = pad_index.get((pos.x, pos.y, other.GetNumber()))
                     if i is not None:
                         touches.setdefault(k, set()).add(i)
-                else:
+                elif kind in ("PCB_TRACK", "PCB_ARC", "PCB_VIA"):
                     j = index.get(uid_of(other))
                     if j is not None:
-                        root[top(k)] = top(j)
+                        seen.add(j)
+                        root[top(j)] = top(k)
         pieces: Dict[int, List[int]] = {}
         for k in range(len(items)):
             pieces.setdefault(top(k), []).append(k)
@@ -2212,11 +2224,6 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             cells = {c for c in cells if c not in pad_owned or pad_owned[c] in reached}
             if not cells:
                 continue
-            if reached:
-                for ci in reached:                     # one, unless the copper alone joins them
-                    net.clusters[ci].cells |= cells
-                continue
-            # a piece of route with no pad: a cluster of its own, to be joined
             ends = []
             for k in members:
                 it = items[k]
@@ -2225,7 +2232,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     a = (grid.cell_x(p.x), grid.cell_y(p.y))
                     if a not in ends:
                         ends.append(a)
-            net.clusters.append(Cluster(cells=cells, anchors=ends[:16]))
+            if len(ends) > 16:                         # spread along the piece
+                ends = [ends[(k * (len(ends) - 1)) // 15] for k in range(16)]
+            if reached:
+                for ci in reached:                     # one, unless the copper alone joins them
+                    net.clusters[ci].cells |= cells
+                    # the search steers by anchors: the piece's ends are where
+                    # the rest of the route meets this group, not its pads
+                    net.clusters[ci].anchors += [a for a in ends if a not in net.clusters[ci].anchors]
+                continue
+            # a piece of route with no pad: a cluster of its own, to be joined
+            net.clusters.append(Cluster(cells=cells, anchors=ends))
 
     for code, entries in pad_cells.items():
         net = nets[code]
@@ -2285,9 +2302,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if tight:
                 cl.tight = True
         net.clusters = list(groups.values())
-        if not options.shove and code not in user_skipped:
+        if not options.shove and not options.pours_only and code not in user_skipped:
             _attach_wired(net, code, entries, find, cluster_index)
-            if not net.partner:
+            if not net.partner and options.pour_goals:
                 _attach_pour(net, code, entries, find, cluster_index)
         for piece in pieces:
             touched = sorted({cluster_index[find(i)] for i in piece["pads"]})
@@ -2325,6 +2342,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 continue
             covered = [any(_zone_covers(z, pp.x, pp.y, 1_500_000) for z in zones for pp in cluster_pads.get(i, []))
                        for i in range(len(net.clusters))]
+            for i, cl in enumerate(net.clusters):
+                # a piece of track or a via with no pad, inside the pour: the
+                # pour's to join, like the pads there (a designer's stitching
+                # vias in a pour not filled yet are not strays)
+                if i not in cluster_pads and any(_zone_covers(z, grid.nm_x(ax), grid.nm_y(ay)) for z in zones
+                                                 for ax, ay in cl.anchors):
+                    covered[i] = True
             if not any(covered):
                 continue
             for i, cl in enumerate(net.clusters):
@@ -2375,7 +2399,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 break
 
     all_connections = len(connections)
+    per_net_all = Counter(c.net for c in connections)
     connections = in_scope(board, nets, connections, options)
+    per_net = Counter(c.net for c in connections)
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
@@ -2414,7 +2440,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                      "nets": len(nets), "connections": len(connections), "movable_paths": len(existing),
                      "all_connections": all_connections, "owner_maps": len(owners),
                      "fanout_vias": len(fanout), "stranded_pads": stranded_pads, "plane_nets": len(plane_codes), "stitch_spots": sum(len(v) for v in stitch.values()),
-                     "escapes": dict(escape_stats)}
+                     "escapes": dict(escape_stats),
+                     # nets whose routes may end on their pour: the pipeline
+                     # checks those joins against the refilled pour
+                     "pour_joins": {nets[c].name: {"groups": g, "all": per_net_all[c], "scoped": per_net[c],
+                                                   "route": nets[c].route}
+                                    for c, g in pour_joined.items() if per_net[c]}}
     return problem
 
 

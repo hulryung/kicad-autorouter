@@ -8,8 +8,11 @@ scoped to just those nets. That is what a designer does by hand for the last
 few stubborn connections, and what the AI assistant found by itself.
 """
 import copy
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
+
+import pcbnew
 
 from . import apply as native_apply, astar as native_astar, extract as native_extract, router as native_router, tuning as native_tuning
 from .problem import NativeOptions, SCOPE_SELECTION
@@ -78,7 +81,7 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
 
 def run_job(board, options: NativeOptions, status=None, progress=None, on_path=None, on_remove=None,
             cancelled: Optional[Callable[[], bool]] = None, escalate: bool = True,
-            apply_paths: bool = True, extract_fn=None, on_layers=None, placed=None) -> JobResult:
+            apply_paths: bool = True, extract_fn=None, on_layers=None, placed=None, on_board=None) -> JobResult:
     """The whole job, in the order a designer works:
       1. signals at the normal grid (pour vias held back);
       2. a finer second pass on what is still open;
@@ -88,7 +91,9 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     board reads on its UI thread; on_layers is told the layer list of each
     pass before its paths arrive; placed (with apply_paths False) returns the
     UUIDs of the items the caller has put on the board for this job so far,
-    so a later pass may move the job's own plane vias as it does otherwise."""
+    so a later pass may move the job's own plane vias as it does otherwise;
+    on_board runs a function on the thread that owns the board and returns
+    its result (the dialog's UI thread; called directly when None)."""
     extract = extract_fn or (lambda b, o, st: native_extract.extract(b, o, status=st))
     out = JobResult()
     added: list = []                       # board items this job created (apply_paths)
@@ -250,6 +255,39 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             if result2.timed_out and limit and remaining() <= 1.0:
                 out.timed_out = True
 
+    # Routes that ended on their net's pour rather than at a pad: the pour
+    # was the one filled before this run, and a route of another net laid
+    # across it since (or the refill pulling back from the new copper) can
+    # leave such an end in a piece the pads are no longer in. Refill, and
+    # route what came apart again, pad to pad this time.
+    joins = {name: info for name, info in problem.stats.get("pour_joins", {}).items() if name not in out.failed}
+    if joins and (apply_paths or on_path) and not out.cancelled and not (cancelled and cancelled()):
+        try:
+            check = lambda: _open_pour_joins(board, joins, result)
+            apart = on_board(check) if on_board else check()
+        except Exception as e:
+            out.stats["pour_check_error"] = repr(e)
+            apart = []
+        if apart:
+            if status:
+                status(f"{len(apart)} net(s) came apart from their pour at a route's end: routing them pad to pad...")
+            again = copy.deepcopy(options)
+            again.pour_goals = False
+            again.scope, again.scope_nets, again.scope_refs = SCOPE_SELECTION, list(apart), []
+            again.fanout_vias = False
+            again.stitch_vias = False
+            again.time_limit_s = max(1.0, min(60.0, remaining())) if limit else 60.0
+            try:
+                problem5, result5 = one_pass(again)
+            except Exception as e:
+                out.stats["pour_check_error"] = repr(e)
+                problem5 = None
+            if problem5 is not None:
+                out.stats["pour_joins_redone"] = result5.routed
+                out.routed += result5.routed
+                out.seconds += result5.seconds
+                out.failed = sorted(set(out.failed) | {problem5.nets[c.net].name for c in result5.failed})
+
     problem3 = None
     if pours_later and not (cancelled and cancelled()):
         if status:
@@ -294,6 +332,34 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
             out.tuning, out.tuning_lines = report.groups, report.lines()
+    return out
+
+
+def _open_pour_joins(board, joins: dict, result) -> List[str]:
+    """Of the nets whose routes may have ended on their pour (extract's
+    "pour_joins": pad groups before the run, connections in all and in
+    scope), those the refilled board has in more groups than the routed
+    connections leave."""
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    board.BuildConnectivity()
+    conn = board.GetConnectivity()
+    failed = Counter(c.net for c in result.failed)
+    out = []
+    for name, info in joins.items():
+        net = board.FindNet(name)
+        if net is None:
+            continue
+        code = net.GetNetCode()
+        if info["route"]:
+            # a routed net: known only when all of it was this job's to join
+            if info["scoped"] != info["all"] or failed[code]:
+                continue
+            expected = 1
+        else:
+            # a plane net: each routed stray is one group fewer
+            expected = info["groups"] - (info["scoped"] - failed[code])
+        if len(native_apply._pad_groups(board, conn, code)) > max(1, expected):
+            out.append(name)
     return out
 
 
@@ -346,7 +412,7 @@ def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> 
     # pieces of a pour that the finished copper cut off with only their own
     # pads in them: a stub and via to the net's connected fill
     try:
-        stats["islands_joined"] = native_apply.repair_islands(board, live)
+        stats["islands_joined"] = native_apply.repair_islands(board, live, cancelled=cancelled)
     except Exception as e:
         stats["island_error"] = repr(e)
     return stats
