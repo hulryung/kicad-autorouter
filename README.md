@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.5.5 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.5)
+**Current release:** [0.5.6 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.6)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -24,6 +24,20 @@ service or AI account is required.
 | AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex CLI. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.6
+
+- No track or via is placed under an opening drawn on a solder mask layer
+  (a logo, an exposed strip), unless the opening sits over that net's own
+  pad or pour. KiCad's DRC reported such openings as bridging two nets: 44
+  errors on the StickHub demo board, none now.
+- An IC pin's track runs straight on past its pad before it turns, 0.3 mm
+  more than before when the lane is free, as a designer fans out a QFP. On
+  a TQFP board the straight run went 0.46 -> 0.64 mm (the designer's:
+  0.95 mm) and pins leaving under the chip 41 -> 35 %.
+- [Routing policies](docs/routing-policies.md) lists the layout conventions
+  the router follows and how each was checked; `scripts/conventions.py`
+  measures them on any routed board.
 
 ### New in 0.5.5
 
@@ -134,8 +148,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.5.5.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.5),
+Download `kicad-autorouter-0.5.6.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.6),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -146,7 +160,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The built-in router uses KiCad's bundled Python environment.
 - The optional AI assistant requires an installed, authenticated `codex` CLI.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.5.5 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.6 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약
