@@ -430,6 +430,7 @@ EP_ARRAY_MIN_NM = 2_400_000          # an SMD plane pad this big both ways gets 
 DENSE_RELIEF_MARGIN_NM = 1_500_000   # (the share: astar's relief_share)
 
 
+BODY_STRAIGHT_NM = 300_000   # the straight neck past an IC pin's pad before the track may turn, when the lane is free
 BODY_MIN_PADS = 6           # an IC body: this many SMD pins or more round a package
 BODY_BEHIND_NM = 1_500_000   # a body pin's target this far behind the pad (on the body's side) keeps the inward exit
 BODY_ROUND_GROUPS = ("signal", "power")   # ...except for these routing groups: they go round the body outside
@@ -556,6 +557,18 @@ def _collides(shape, stub, clearance: int) -> bool:
         return bool(shape.Collide(stub, clearance))
     except TypeError:
         return bool(shape.Collide(stub.GetSeg(), clearance + stub.GetWidth() // 2))
+
+
+def _shapes_touch(pad_shape, shape, pad) -> bool:
+    """Does a pad's copper touch a drawn shape? (Not every pair of SHAPE
+    classes collides in Python: the pad's centre decides then.)"""
+    for a, b in ((pad_shape, shape), (shape, pad_shape)):
+        try:
+            return bool(a.Collide(b, 0))
+        except TypeError:
+            continue
+    size = pad.GetSize()
+    return bool(shape.Collide(pad.GetPosition(), min(size.x, size.y) // 2))
 
 
 def footprint_of(pad):
@@ -1202,6 +1215,54 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)))
 
+    # Openings drawn on a solder mask layer (a logo, an exposed strip, a
+    # custom pad's window): copper under one is bare, and DRC reports the
+    # opening when it uncovers two nets ("solder mask aperture bridges items
+    # with different nets"). A designer keeps tracks out of such windows. An
+    # opening over the pads of one net belongs to that net; any other is
+    # closed to tracks and vias on the outer copper layer below it.
+    mask_openings = 0
+    for mask_id, cu_id in ((pcbnew.F_Mask, pcbnew.F_Cu), (pcbnew.B_Mask, pcbnew.B_Cu)):
+        if cu_id not in layer_of:
+            continue
+        li = layer_of[cu_id]
+        side_pads = None
+        for item in items:
+            if not item.IsOnLayer(mask_id) or item.IsOnLayer(cu_id):
+                continue
+            try:
+                shape = item.GetEffectiveShape(mask_id)
+            except TypeError:
+                shape = item.GetEffectiveShape()
+            box = _box(shape)
+            if box[2] - box[0] > 50_000_000 and box[3] - box[1] > 50_000_000:
+                continue
+            if side_pads is None:
+                side_pads = [(p, _box(p.GetEffectiveShape(cu_id))) for p in board.GetPads() if p.IsOnLayer(cu_id)]
+            under = {p.GetNetCode() for p, pb in side_pads
+                     if pb[0] <= box[2] and pb[2] >= box[0] and pb[1] <= box[3] and pb[3] >= box[1]
+                     and _shapes_touch(p.GetEffectiveShape(cu_id), shape, p)}
+            # ...or to the pour it uncovers (a logo opened over the ground fill)
+            mx, my = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+            if not under:
+                under = {z.GetNetCode() for z in board.Zones()
+                         if not z.GetIsRuleArea() and z.IsOnLayer(cu_id) and z.GetNetCode() > 0
+                         and _zone_covers(z, mx, my)}
+            if len(under) > 1:
+                continue                                 # it bridges two nets as drawn: nothing to keep
+            owner = next(iter(under)) if under else 0
+            if owner <= 0 or owner not in nets:
+                owner = 0
+            mask_openings += 1
+            add_copper(li, shape, owner, ds.m_MinClearance, box)
+            claim(li, owner, lambda r, shape=shape, box=box, li=li:
+                  grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
+                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)),
+                  own_clr=ds.m_MinClearance)
+
+    if _DEBUG and mask_openings:
+        print(f"[mask] {mask_openings} solder mask openings kept clear of other nets", flush=True)
+
     # Pad escapes, now that every other piece of copper is on the maps: a stub
     # from the pad centre along the pad axis to an exit point, used only when
     # that lane is free of other nets' copper.
@@ -1456,7 +1517,23 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 pair_sides[(ref, code)] = (dx / norm, dy / norm)
         exit_cells: Set[int] = set()
         chosen: List[Tuple[int, int, int, int, int, int, list]] = []
-        for ex, ey in (escapes or []):
+        # A pin of an IC body runs straight on past its pad before it turns,
+        # where the lane is free: a designer fans a QFP out with a short
+        # straight neck on every pin, not with a bend at the pad's end. The
+        # longer stub is tried first on an outward side, the plain one after.
+        tries = [(k, e) for k, e in enumerate(escapes or [])]
+        if escapes and body_pin and net.route and BODY_STRAIGHT_NM:
+            tries = []
+            for k, (ex, ey) in enumerate(escapes):
+                if not _inward_exit(ring_by_fp[ref], pos, ex, ey):
+                    n_ = math.hypot(ex - pos.x, ey - pos.y) or 1.0
+                    tries.append((k, (int(round(ex + (ex - pos.x) / n_ * BODY_STRAIGHT_NM)),
+                                      int(round(ey + (ey - pos.y) / n_ * BODY_STRAIGHT_NM)))))
+                tries.append((k, (ex, ey)))
+        sides_done: Set[int] = set()
+        for side_k, (ex, ey) in tries:
+            if side_k in sides_done:
+                continue
             # Snap the exit to the grid by flooring on both axes, so the pins
             # of one row all shift the same way and keep their pitch.
             ecx = int(math.floor((ex - grid.ox) / pitch))
@@ -1543,6 +1620,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                           f"({gx / 1e6:.2f},{gy / 1e6:.2f}) covers another net's exit", flush=True)
                 continue
             chosen.append((ex, ey, ecx, ecy, gx, gy, stub_shapes))
+            sides_done.add(side_k)
             # plane-net pads keep both exits: the fanout via goes to whichever
             # side still has room for it once the signals are routed (in a
             # pass without pours a pad is here for its movable via alone: one
