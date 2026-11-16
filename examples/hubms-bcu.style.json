@@ -1,0 +1,31 @@
+{
+ "layers": {
+  "F.Cu": "signal",
+  "In1.Cu": "plane",
+  "In2.Cu": "plane",
+  "B.Cu": "signal"
+ },
+ "class_width_mm": {
+  "PWR": 0.6,
+  "PWR_OUT": 1.5,
+  "DRY": 0.8
+ },
+ "class_via_mm": {
+  "PWR_HI": [
+   0.6,
+   0.3
+  ],
+  "HV": [
+   0.6,
+   0.3
+  ],
+  "PWR_TRIP": [
+   0.6,
+   0.3
+  ],
+  "PWR_OUT": [
+   0.6,
+   0.3
+  ]
+ }
+}

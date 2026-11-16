@@ -405,6 +405,10 @@ def main():
                     "instead of the wall clock, so a busy or slower machine gives the same result (0 = wall clock)")
     ap.add_argument("--no-images", action="store_true")
     ap.add_argument("--focus", default="", help="extra close-ups: x,y[,half];x,y ... in mm")
+    ap.add_argument("--no-creepage", action="store_true", help="leave creepage constraints out of the DRC "
+                    "(a slow check on large isolated boards); clearance rules stay")
+    ap.add_argument("--style", default="", help="routing style JSON learnt from a designer's board "
+                    "(scripts/style.py --learn): plane layers, the widths and vias net classes are really drawn at")
     ap.add_argument("--intent", default="", help="design intent JSON (engine/si.py SiConfig): stackup, "
                     "impedance classes, length groups, routing order; also written as net classes and DRC rules")
     args = ap.parse_args()
@@ -429,6 +433,15 @@ def main():
         if side.exists():
             shutil.copy(side, out / ("routed" + ext))
             shutil.copy(side, out / ("stripped" + ext))     # the board before routing, for the DRC baseline
+    if args.no_creepage:
+        # KiCad's creepage check runs for tens of minutes on a large isolated board; the clearance
+        # rules (an HV-to-logic 8 mm air gap, say) stay and are checked as usual
+        import re as _re
+        for name in ("routed.kicad_dru", "stripped.kicad_dru"):
+            f = out / name
+            if f.exists():
+                f.write_text(_re.sub(r"\(constraint creepage[^)]*\)\)", "", f.read_text(encoding="utf-8")),
+                             encoding="utf-8")
 
     board = pcbnew.LoadBoard(str(ref_path))
     items = list(board.GetTracks())
@@ -448,6 +461,15 @@ def main():
         n = len(list(board.GetEnabledLayers().CuStack()))
         o.routable_layers = [i not in planes for i in range(n)]
         print(f"  ground plane layers left unrouted: {planes}", flush=True)
+    if args.style:
+        from autorouter.engine import style as style_mod
+        st = style_mod.load(args.style)
+        mask = style_mod.routable_layers(board, st)
+        if mask is not None:
+            o.routable_layers = [a and b for a, b in zip(mask, o.routable_layers or mask)]
+            print(f"  [style] routable layers: {o.routable_layers}", flush=True)
+        for line in style_mod.apply_net_classes(board, st):
+            print("  [style] " + line, flush=True)
     si_cfg = si_plan = None
     if args.intent:
         from autorouter.engine import si

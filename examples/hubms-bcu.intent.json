@@ -1,0 +1,10 @@
+{
+ "fab": "JLCPCB 4-layer standard",
+ "stackup": "board",
+ "impedance": [
+  {"name": "CAN_120R", "nets": ["/CAN1_H", "/CAN1_L", "/CAN2_H", "/CAN2_L", "/CAN/CAN1_HT", "/CAN/CAN1_LT", "/CAN/CAN2_HT", "/CAN/CAN2_LT"], "diff_ohm": 120, "skew_mm": 0},
+  {"name": "RS485_120R", "nets": ["/RS485_1_A", "/RS485_1_B", "/RS485_2_A", "/RS485_2_B", "/RS485/RS485_?_AT", "/RS485/RS485_?_BT"], "diff_ohm": 120, "skew_mm": 0}
+ ],
+ "length_groups": [{"name": "SWD", "nets": ["/SWCLK", "/SWDIO"], "tolerance_mm": 1.0}],
+ "route_order": ["pairs", "clock", "high_speed", "memory", "power", "signal"]
+}
