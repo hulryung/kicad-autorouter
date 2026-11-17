@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.5.6 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.6)
+**Current release:** [0.5.7 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.7)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -25,6 +25,22 @@ service or AI account is required.
 | Custom design rules | Clearance rules from the board's `.kicad_dru` (net class, net name and footprint conditions): an 8 mm HV-to-logic gap is kept while routing (cut back where the placement already puts pads closer, so they stay reachable), a fine-pitch part's relief lets its pins be reached. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.7
+
+- The board's custom clearance rules (`.kicad_dru`) are read while routing:
+  net class, net name, footprint and courtyard conditions, with KiCad's
+  precedence. On the HUBMS BCU board (HV isolation, 8 mm HV-to-logic rule,
+  a relaxed rule for a fine-pitch HV part) the clearance errors the router
+  added went 149 -> 117 and unconnected 53 -> 41; every remaining added
+  error is the 8 mm rule where the placement itself already puts pads
+  closer (the designer's own board has 279 of them).
+- A **Routing guide** tab: choose how the board is routed from pictures
+  (the router's default, two signal layers over planes, or let the AI
+  decide), learn a guide from a finished board, or describe one in your
+  own words and get it as editable JSON.
+- The AI assistant runs on the Codex CLI, the Claude Code CLI, or the
+  Claude or OpenAI API.
 
 ### New in 0.5.6
 
@@ -149,8 +165,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.5.6.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.6),
+Download `kicad-autorouter-0.5.7.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.7),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -162,7 +178,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The optional AI assistant requires one of: an authenticated `codex` or `claude`
   CLI, or the `anthropic` / `openai` package in KiCad's Python with an API key.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.5.6 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.7 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약

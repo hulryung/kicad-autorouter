@@ -2,7 +2,7 @@
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "Autorouter",
   "description": "Autoroute the open board without leaving the PCB editor",
-  "description_full": "One toolbar button routes the open board inside KiCad. The built-in router works on KiCad's own board model through the PCB API: pad-axis escapes, neck-down at fine pitch, rip-up and reroute, coupled differential pairs, automatic track widths, fanout and stitching vias for ground and power pours, a finer second pass for stubborn connections, zone refill, routing by selection or schematic sheet, live display and one undo step. An AI assistant hands the board to the OpenAI Codex CLI and carries out its routing and editing actions with DRC feedback and rollback. For KiCad 9 and 10.",
+  "description_full": "One toolbar button routes the open board inside KiCad. The built-in router works on KiCad's own board model through the PCB API: pad-axis escapes, neck-down at fine pitch, rip-up and reroute, coupled differential pairs, automatic track widths, fanout and stitching vias for ground and power pours, a finer second pass for stubborn connections, zone refill, routing by selection or schematic sheet, live display and one undo step. The board's .kicad_dru clearance rules are honoured, and routing guides pick the approach. An AI assistant (Codex or Claude Code CLI, or the Claude or OpenAI API) carries out its routing and editing actions with DRC feedback and rollback. For KiCad 9 and 10.",
   "identifier": "com.github.hulryung.kicad-autorouter",
   "type": "plugin",
   "author": {
@@ -22,7 +22,7 @@
   ],
   "versions": [
     {
-      "version": "0.5.6",
+      "version": "0.5.7",
       "status": "testing",
       "kicad_version": "9.0",
       "kicad_version_max": "10.99"

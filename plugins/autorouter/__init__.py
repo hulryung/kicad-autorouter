@@ -3,11 +3,11 @@ KiCad Autorouter plugin.
 
 Routes the open board without leaving the PCB editor: a grid router on
 KiCad's own board model (PCB API) with live progress, one undo step per run,
-and an AI assistant (Codex CLI) that drives it.
+and an AI assistant (Codex/Claude CLI or API) that drives it.
 """
 import os
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"
 __author__ = "hulryung"
 __license__ = "MIT"
 
