@@ -53,6 +53,26 @@ every segment) is not on the list: it is slow, unreliable, and the router
 already does it better. Direct `add_track` exists for small, explicit fixes
 and is always followed by a DRC.
 
+## Backends and routing guides
+
+`engine/ai/llm.py` puts four backends behind one call: the Codex CLI and the
+Claude Code CLI (logged in once, no key in the plugin), and the Claude and
+OpenAI APIs through their SDKs in KiCad's Python. Every one answers with the
+JSON object of the caller's schema (Codex `--output-schema`, Claude Code
+`--json-schema`, the Claude API's `output_config.format`, OpenAI's
+`json_schema` text format), so the action loop is the same for all.
+
+A **routing guide** (`engine/guides.py`, the Routing guide tab) is the
+user's choice of approach. Its JSON half (`style`, `options`) is applied to
+every run by the router; its words go in front of every request to the
+model, which works within the guide or, with "Let the AI decide", chooses
+the approach and says which. A request in plain words becomes a guide
+through the model once and is then kept as JSON: words for intent, JSON for
+what runs, because a guide that is re-read by a model on every run would not
+route the same way twice. This is level 4 below ("learned style") made
+concrete: a guide can be learnt from a hand-routed board (layer use, widths
+per class, vias; `scripts/style.py` measures the same figures).
+
 ## Why Codex CLI, and how it is called
 
 - It is already installed and logged in on the developer's machines, needs no

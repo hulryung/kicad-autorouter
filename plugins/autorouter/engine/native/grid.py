@@ -16,9 +16,53 @@ from array import array
 from typing import Callable, Iterable, List, Sequence, Tuple
 
 BLOCKED = -1
+WIDE_NM = 1_000_000       # radii from this up are rasterized by row spans (isolation clearances)
 # lane_guard value of a cell under an IC body on the part's own layer (inside
 # its pin ring): passable, but a track there pays astar.BODY_PENALTY per cell
 BODY_LANE = -2
+
+
+class SpanCells(list):
+    """A cell list that also knows its row spans [a, b), for Grid.mark's slice path."""
+
+    def __init__(self):
+        super().__init__()
+        self.spans: List[Tuple[int, int]] = []
+
+    def add_span(self, a: int, b: int) -> None:
+        self.spans.append((a, b))
+        self.extend(range(a, b))
+
+    def __add__(self, other):
+        """Two span lists joined stay a span list (a stub's two pieces)."""
+        other_spans = getattr(other, "spans", None)
+        if other_spans is None:
+            return list(self) + list(other)
+        out = SpanCells()
+        out.spans = self.spans + other_spans
+        out.extend(self)
+        out.extend(other)
+        return out
+
+
+_ZEROS = array("i")
+
+
+_BLOCKED_ROW = memoryview(array("i"))
+
+
+def _blocked_row(n: int) -> memoryview:
+    global _BLOCKED_ROW
+    if len(_BLOCKED_ROW) < n:
+        _BLOCKED_ROW = memoryview(array("i", [BLOCKED]) * max(n, 8192))
+    return _BLOCKED_ROW
+
+
+def _zeros(n: int) -> array:
+    global _ZEROS
+    if len(_ZEROS) < n:
+        _ZEROS = array("i", [0]) * max(n, 4096)
+    return _ZEROS[:n]
 
 
 class Grid:
@@ -67,8 +111,45 @@ class Grid:
         return array("i", [0]) * self.size
 
     @staticmethod
+    def block(owners: array, cells: Iterable[int]) -> None:
+        """Close cells to every net of a map: an isolation rule's ring around
+        another side's copper, which no net of that map may enter (the copper's
+        own net routes on other maps). Row spans are written as slices."""
+        spans = getattr(cells, "spans", None)
+        if spans is not None:
+            view = memoryview(owners)
+            longest = max((b - a for a, b in spans), default=0)
+            row = _blocked_row(longest)
+            for a, b in spans:
+                view[a:b] = row[:b - a]           # a view into one shared row: no copy per row
+            return
+        for idx in cells:
+            owners[idx] = BLOCKED
+
+    @staticmethod
     def mark(owners: array, cells: Iterable[int], owner: int) -> None:
         """Claim cells for owner; a cell two nets both need becomes BLOCKED."""
+        spans = getattr(cells, "spans", None)
+        if spans is not None:
+            # row spans (the wide rings of isolation rules): a span still empty
+            # or wholly this owner's is written in one slice
+            for a, b in spans:
+                n = b - a
+                part = owners[a:b]
+                first = part[0]
+                if part.count(first) == n:            # one owner along the whole row
+                    if first == 0:
+                        owners[a:b] = array("i", [owner]) * n
+                    elif first != owner and first != BLOCKED:
+                        owners[a:b] = array("i", [BLOCKED]) * n
+                    continue
+                for idx in range(a, b):
+                    cur = owners[idx]
+                    if cur == 0 or cur == owner:
+                        owners[idx] = owner
+                    elif cur != BLOCKED:
+                        owners[idx] = BLOCKED
+            return
         for idx in cells:
             cur = owners[idx]
             if cur == 0 or cur == owner:
@@ -92,6 +173,29 @@ class Grid:
                     out.append(row + cx)
         return out
 
+    def rounded_box_cells(self, layer: int, box: Tuple[int, int, int, int], r: int) -> List[int]:
+        """Cells within r of a nm box (row spans, no per-cell test): for the
+        wide clearances of isolation rules, where an exact test of every cell
+        of an 8 mm ring is too slow. Holds the box's corners, so for a round
+        or chamfered shape it covers a little more than the exact ring."""
+        x0, y0, x1, y1 = box
+        cy0 = max(0, int(math.floor((y0 - r - self.oy) / self.pitch)))
+        cy1 = min(self.h - 1, int(math.ceil((y1 + r - self.oy) / self.pitch)))
+        base = layer * self.plane
+        out = SpanCells()
+        for cy in range(cy0, cy1 + 1):
+            y = self.oy + cy * self.pitch
+            dy = y0 - y if y < y0 else (y - y1 if y > y1 else 0)
+            if dy > r:
+                continue
+            half = math.sqrt(r * r - dy * dy)
+            cx0 = max(0, int(math.ceil((x0 - half - self.ox) / self.pitch)))
+            cx1 = min(self.w - 1, int(math.floor((x1 + half - self.ox) / self.pitch)))
+            if cx1 >= cx0:
+                row = base + cy * self.w
+                out.add_span(row + cx0, row + cx1 + 1)
+        return out
+
     def disc_cells(self, layer: int, x: int, y: int, r: int) -> List[int]:
         r2 = r * r
         return self.cells_where(layer, (x - r, y - r, x + r, y + r),
@@ -102,6 +206,8 @@ class Grid:
         dx, dy = x2 - x1, y2 - y1
         length2 = dx * dx + dy * dy
         r2 = r * r
+        if r >= WIDE_NM:
+            return self._capsule_rows(layer, x1, y1, x2, y2, r)
 
         def hit(px, py):
             if length2 == 0:
@@ -114,6 +220,48 @@ class Grid:
 
         return self.cells_where(layer, (min(x1, x2) - r, min(y1, y2) - r,
                                         max(x1, x2) + r, max(y1, y2) + r), hit)
+
+    def _capsule_rows(self, layer: int, x1: int, y1: int, x2: int, y2: int, r: int) -> List[int]:
+        """segment_cells by row spans: the capsule is convex, so each row
+        meets it in one interval, the hull of the end discs' and the middle
+        band's intervals."""
+        dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        cy0 = max(0, int(math.floor((min(y1, y2) - r - self.oy) / self.pitch)))
+        cy1 = min(self.h - 1, int(math.ceil((max(y1, y2) + r - self.oy) / self.pitch)))
+        base = layer * self.plane
+        out = SpanCells()
+        for cy in range(cy0, cy1 + 1):
+            y = self.oy + cy * self.pitch
+            lo, hi = math.inf, -math.inf
+            for ex, ey in ((x1, y1), (x2, y2)):
+                d = abs(y - ey)
+                if d <= r:
+                    h = math.sqrt(r * r - d * d)
+                    lo, hi = min(lo, ex - h), max(hi, ex + h)
+            if length > 0:
+                ux, uy = dx / length, dy / length
+                # band: 0 <= (p - p1).u <= length and |(p - p1) x u| <= r, both linear in x
+                a_lo, a_hi = -math.inf, math.inf
+                for k, c, lim_lo, lim_hi in ((ux, (y - y1) * uy, 0.0, length),
+                                             (-uy, (y - y1) * ux, -r, r)):
+                    # k * (x - x1) + c in [lim_lo, lim_hi]
+                    if abs(k) < 1e-12:
+                        if not (lim_lo <= c <= lim_hi):
+                            a_lo, a_hi = 1, 0
+                        continue
+                    p, q = (lim_lo - c) / k + x1, (lim_hi - c) / k + x1
+                    a_lo, a_hi = max(a_lo, min(p, q)), min(a_hi, max(p, q))
+                if a_lo <= a_hi:
+                    lo, hi = min(lo, a_lo), max(hi, a_hi)
+            if lo > hi:
+                continue
+            cx0 = max(0, int(math.ceil((lo - self.ox) / self.pitch)))
+            cx1 = min(self.w - 1, int(math.floor((hi - self.ox) / self.pitch)))
+            if cx1 >= cx0:
+                row = base + cy * self.w
+                out.add_span(row + cx0, row + cx1 + 1)
+        return out
 
     def polygon_cells(self, layer: int, outline: Sequence[Tuple[int, int]],
                       holes: Sequence[Sequence[Tuple[int, int]]] = (), r: int = 0) -> List[int]:

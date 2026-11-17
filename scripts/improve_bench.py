@@ -464,11 +464,8 @@ def main():
     if args.style:
         from autorouter.engine import style as style_mod
         st = style_mod.load(args.style)
-        mask = style_mod.routable_layers(board, st)
-        if mask is not None:
-            o.routable_layers = [a and b for a, b in zip(mask, o.routable_layers or mask)]
-            print(f"  [style] routable layers: {o.routable_layers}", flush=True)
-        for line in style_mod.apply_net_classes(board, st):
+        st = st.get("style", st)          # a routing guide file, or a bare style
+        for line in style_mod.apply_to_options(board, st, o):
             print("  [style] " + line, flush=True)
     si_cfg = si_plan = None
     if args.intent:

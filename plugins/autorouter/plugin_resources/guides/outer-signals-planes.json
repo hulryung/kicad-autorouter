@@ -1,0 +1,4 @@
+{"id": "outer-signals-planes", "order": 20, "name": "Signals outside, planes inside",
+ "summary": "Signals on the top and bottom layers only; the inner layers stay whole for ground and power pours. Fewer cuts in the return path, more vias and longer routes.",
+ "guide": "Keep every signal on the outer layers and leave the inner layers to the pours. Change layer with a via rather than running on an inner layer. Keep power nets short and wide.",
+ "style": {"layers": {"inner": "plane"}}, "options": {"via_cost": 20}, "preview": "outer-signals-planes.png"}

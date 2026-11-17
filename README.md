@@ -21,7 +21,8 @@ service or AI account is required.
 | Differential pairs | Coupled routes, pair layer changes, via swaps and single-ended end connections where needed, with exceptions reported in the log. |
 | Ground and power | Plane-net detection, pad fanout, power ties, via stitching, zone refill and repair of isolated copper after routing. |
 | Signal integrity | Stackup-based width estimates, impedance classes, length groups, routing priority, fabrication presets and KiCad tuning patterns. |
-| AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex CLI. |
+| AI assistance | Natural-language routing and edits, DRC feedback, board images, review requests, and iterative scoring and improvement through the Codex or Claude Code CLI, or the Claude or OpenAI API; routing guides chosen from pictures, learnt from a board or written from your words. |
+| Custom design rules | Clearance rules from the board's `.kicad_dru` (net class, net name and footprint conditions): an 8 mm HV-to-logic gap is kept while routing (cut back where the placement already puts pads closer, so they stay reachable), a fine-pitch part's relief lets its pins be reached. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
 
@@ -158,7 +159,8 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - **KiCad 9 or 10**, using its `pcbnew` Python action-plugin API. KiCad 11 is
   not supported by this release; an IPC port is future work.
 - The built-in router uses KiCad's bundled Python environment.
-- The optional AI assistant requires an installed, authenticated `codex` CLI.
+- The optional AI assistant requires one of: an authenticated `codex` or `claude`
+  CLI, or the `anthropic` / `openai` package in KiCad's Python with an API key.
   DRC feedback uses `kicad-cli`.
 - The plugin has macOS, Windows and Linux paths. The 0.5.6 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
@@ -205,10 +207,43 @@ design-intent files and written project rules are separate from copper undo.
 | Tab | Controls |
 | --- | --- |
 | **Routing** | Grid, via cost, search budget, time limit, track/via sizes, retries, coupled pairs, fanout, stitching, plane nets, existing copper, scope and zone refill. |
+| **Routing guide** | How the board should be routed: built-in guides with a picture of each, a guide learnt from a board you routed, or one the AI writes from your words; the exact settings as editable JSON. |
 | **Board setup** | Fabrication rules preset, the board and project check, details per item, **Check again** and **Apply ticked fixes**. |
 | **Signal integrity** | Stackup, impedance classes, pair limits, length groups, tuning options, routing order, **Compute sizes** and **Write to KiCad**. |
 | **Layers & nets** | Routable copper layers, preferred horizontal/vertical directions and net classes to skip. |
-| **AI assistant** | Request, model, round limit, DRC feedback, **Ask the assistant**, **Review current routing** and **Score and improve**. |
+| **AI assistant** | Assistant (Codex CLI, Claude Code CLI, Claude API or OpenAI API), request, model, round limit, DRC feedback, **Ask the assistant**, **Review current routing** and **Score and improve**. |
+
+## Routing guides
+
+A routing guide says how a board should be routed. The router applies its
+settings exactly, so a guide gives the same result every time; its words
+go to the AI assistant, which works within it.
+
+| Guide | What it does |
+| --- | --- |
+| **Let the AI decide** | The assistant picks the approach from the board and says what it chose. |
+| **Shortest paths on every layer** | The router's defaults: every copper layer carries tracks (inner ground planes excepted). |
+| **Signals outside, planes inside** | Tracks on the outer layers only; inner layers stay whole for the pours. |
+| **Like a board I made (learn)** | Pick a finished, hand-routed board; its plane layers, the widths each net class is really drawn at and its vias become a guide of your own. |
+| **Describe it in words (AI)** | Write how you want the board routed, in any language; the assistant turns it into a guide, shown as JSON before use. |
+
+A guide is a JSON file: `summary` and `guide` are words (for you and for the
+assistant), `style` and `options` are what the router executes:
+
+```json
+{"name": "Signals outside, planes inside",
+ "summary": "Signals on the top and bottom layers only; ...",
+ "guide": "Keep every signal on the outer layers ...",
+ "style": {"layers": {"inner": "plane"}, "class_width_mm": {"PWR_OUT": 1.5}, "class_via_mm": {"HV": [0.6, 0.3]}},
+ "options": {"via_cost": 20}}
+```
+
+Words alone would leave the router guessing and change from run to run;
+JSON alone is hard to write. So a plain-language request goes through the
+model once, and what it produces is kept and shown as JSON. Your guides are
+stored in the plugin's data folder (`guides/`); the pictures of the built-in
+guides are the same spot of a test board routed each way
+(`scripts/make_guide_previews.py`).
 
 ### Route part of a board
 
@@ -342,7 +377,19 @@ room; inspect the reported results.
 
 ## Optional AI assistant
 
-The **AI assistant** tab uses the Codex CLI to propose structured actions.
+The **AI assistant** tab uses a language model to propose structured
+actions, through one of four backends:
+
+| Assistant | Needs |
+| --- | --- |
+| Codex CLI (OpenAI) | `codex` installed and logged in once; no key in the plugin. |
+| Claude Code CLI | `claude` installed and logged in once; no key in the plugin. |
+| Claude API | `anthropic` in KiCad's Python (`<KiCad python3> -m pip install anthropic`) and `ANTHROPIC_API_KEY` or an `ant auth login` profile. Default model `claude-opus-5-5`, with server-side refusal fallback on. |
+| OpenAI API | `openai` in KiCad's Python and `OPENAI_API_KEY`. |
+
+The tab shows whether the chosen backend is ready. The routing guide of the
+**Routing guide** tab goes with every request; with an empty request the
+assistant routes the board following the guide.
 Each round supplies board context, routing results, a rendered board image
 when available, and optional KiCad DRC feedback. Replies are checked against
 an action schema and executed by the plugin.

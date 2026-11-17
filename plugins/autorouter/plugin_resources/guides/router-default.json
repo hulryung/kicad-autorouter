@@ -1,0 +1,4 @@
+{"id": "router-default", "order": 10, "name": "Shortest paths on every layer",
+ "summary": "The router's defaults: every copper layer carries tracks, inner ground planes excepted; widths and vias from the net classes. Short routes, but inner planes get cut up.",
+ "guide": "Route with the router's defaults. Prefer complete connectivity over appearance.",
+ "style": {}, "options": {}, "preview": "router-default.png"}

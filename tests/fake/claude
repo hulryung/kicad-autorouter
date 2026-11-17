@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""A stand-in for the Claude Code CLI used by the tests: `claude -p
+--output-format json [--json-schema S]`, prompt on stdin. Answers like the
+real one: a JSON result object with the reply as structured_output (with a
+schema) or as result text. The reply comes from FAKE_CLAUDE_REPLY. Keeps the
+prompt and the arguments next to it (claude-prompt-seen.md, claude-args.json)."""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+prompt = sys.stdin.read()
+with open("claude-prompt-seen.md", "w") as f:
+    f.write(prompt)
+with open("claude-args.json", "w") as f:
+    json.dump(args, f)
+reply = json.loads(os.environ.get("FAKE_CLAUDE_REPLY") or '{"summary": "fake", "actions": [], "done": true}')
+out = {"type": "result", "subtype": "success", "is_error": False}
+if "--json-schema" in args:
+    out["structured_output"] = reply
+    out["result"] = ""
+else:
+    out["result"] = "Here it is:\n```json\n" + json.dumps(reply) + "\n```"
+print(json.dumps(out))

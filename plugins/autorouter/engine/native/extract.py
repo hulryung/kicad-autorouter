@@ -9,12 +9,18 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import pcbnew
 
+import logging
+
+from . import dru
 from .grid import BLOCKED, BODY_LANE, Grid, jog
 from .problem import (ExistingPath, Cluster, Connection, LayerInfo, NativeOptions, NetInfo, NetRules,
                       RoutedPath, RoutingProblem, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                       SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED)
 
+logger = logging.getLogger(__name__)
+
 MARGIN_NM = 500_000
+WIDE_RULE_NM = 1_000_000     # a custom-rule clearance this wide is rasterized from the item's box
 
 
 def _poly_rings(poly) -> List[Tuple[List[Tuple[int, int]], List[List[Tuple[int, int]]]]]:
@@ -146,6 +152,13 @@ def net_rules(board, net, options: Optional[NativeOptions] = None,
             via_d, via_drill = ds.GetCurrentViaSize(), ds.GetCurrentViaDrill()
         elif options.via_mode == SIZE_FIXED and options.via_diameter > 0:
             via_d, via_drill = options.via_diameter, options.via_drill or nc.GetViaDrill()
+    if options is not None:
+        # a routing guide's sizes for the class (the widths and vias a designer really draws)
+        cls = str(net.GetNetClassName() or "Default")
+        if options.class_widths.get(cls):
+            width = options.class_widths[cls]
+        if options.class_vias.get(cls):
+            via_d, via_drill = options.class_vias[cls]
     return NetRules(width=max(int(width), ds.m_TrackMinWidth),
                     clearance=max(nc.GetClearance(), ds.m_MinClearance),
                     via_diameter=max(int(via_d), ds.m_ViasMinSize),
@@ -950,6 +963,79 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 a.rules = NetRules(max(width, max(a.layer_widths.values() or [0]), ds.m_TrackMinWidth),
                                    a.rules.clearance, a.rules.via_diameter, a.rules.via_drill)
     _assign_groups(board, nets, options, plane_codes)
+    # The board's custom clearance rules (.kicad_dru): nets the rules treat
+    # differently (an HV net 8 mm from logic, the nets of a fine-pitch HV part
+    # 0.14 mm apart) get owner maps of their own, told apart by a clearance a
+    # few nanometres off their class's, and each obstacle is inflated by the
+    # clearance the rules ask between it and that map's nets.
+    rules = None
+    rule_rep: Dict[int, "dru.Item"] = {}       # key clearance -> the moving net as the rules see it
+    if getattr(options, "custom_rules", True):
+        try:
+            rules = dru.for_board(board)
+        except Exception:
+            logger.exception("Reading the custom rules failed")
+            rules = None
+    net_item: Dict[int, "dru.Item"] = {}
+    if rules is not None:
+        for code, ni in board.GetNetsByNetcode().items():
+            if code > 0:
+                net_item[code] = dru.Item(str(ni.GetNetClassName()) or "Default", str(ni.GetNetname()), "", "Track")
+        probes = set(net_item.values())
+        for pad in board.GetPads():
+            fp = pad.GetParentFootprint()
+            code = pad.GetNetCode()
+            base = net_item.get(code, dru.Item())
+            probes.add(rules.normalise(dru.Item(base.netclass, base.netname, fp.GetReference() if fp else "", "Pad")))
+        probes = sorted(probes, key=lambda it: (it.netclass, it.netname, it.ref, it.kind))
+        offsets: Dict[int, Dict[tuple, int]] = {}
+        for code in sorted(nets):
+            n = nets[code]
+            me = net_item.get(code, dru.Item())
+            sig = tuple(rules.between(me, other) for other in probes)
+            seen = offsets.setdefault(n.rules.clearance, {})
+            off = seen.setdefault(sig, len(seen))
+            clr = n.rules.clearance + off
+            if off:
+                n.rules = NetRules(n.rules.width, clr, n.rules.via_diameter, n.rules.via_drill)
+            rule_rep.setdefault(clr, me)
+        say(f"Custom rules: {len(rules.rules)} clearance rules, "
+            f"{sum(len(v) for v in offsets.values())} rule groups of nets")
+        for line in rules.skipped:
+            logger.warning("custom rule not used by the router: %s", line)
+
+    def rule_clearance(key_clr: int, other, fallback: int) -> int:
+        """The clearance between the nets of an owner map (by its key's
+        clearance) and an obstacle item; fallback without rules."""
+        if rules is None or other is None:
+            return fallback
+        me = rule_rep.get(key_clr)
+        if me is None:
+            return fallback
+        return rules.between(me, other)
+
+    pair_cache: Dict[Tuple[int, int], int] = {}
+
+    def track_pair(key_clr: int, code: int) -> int:
+        got = pair_cache.get((key_clr, code))
+        if got is None:
+            fallback = max(key_clr, nets[code].rules.clearance if code in nets else 0)
+            got = rule_clearance(key_clr, net_item.get(code), fallback)
+            pair_cache[(key_clr, code)] = got
+        return got
+
+    def pad_item(pad, code: int):
+        if rules is None:
+            return None
+        fp = pad.GetParentFootprint()
+        base = net_item.get(code, dru.Item())
+        return rules.normalise(dru.Item(base.netclass, base.netname, fp.GetReference() if fp else "", "Pad"))
+
+    def track_item(code: int, kind: str = "Track"):
+        if rules is None:
+            return None
+        base = net_item.get(code, dru.Item())
+        return rules.normalise(dru.Item(base.netclass, base.netname, "", kind))
     # Connections that end on fine-pitch pins are routed at the board's
     # narrowest pre-defined width (the neck width), as a designer would, so
     # the escapes and the tracks between the pins have room. Those widths
@@ -1001,13 +1087,80 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # safety margin on every obstacle keeps the DRC exact.
     safety = max(pitch // 5, 10_000)
 
-    def claim(layer: int, code: int, cells_for, own_clr: Optional[int] = None) -> None:
-        """cells_for(r) -> cells; one radius per owner map."""
+    # Isolation rings stop short of the pads the placement already put inside
+    # the gap: an 8 mm HV-to-logic rule on a board whose logic pads sit 3 mm
+    # from an HV part would otherwise wall those pads in. The ring then keeps
+    # the nets "no closer than the placement already is".
+    RING_BUCKET = 5_000_000
+    ring_pads: Dict[int, Dict[Tuple[int, int], List[Tuple[int, int, int, int, int]]]] = {}
+    if rules is not None:
+        for pad in board.GetPads():
+            code = pad.GetNetCode()
+            if code not in nets:
+                continue
+            bb = pad.GetBoundingBox()
+            pb = (bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom(), code)
+            buckets = ring_pads.setdefault(nets[code].rules.clearance, {})
+            for bx in range(pb[0] // RING_BUCKET, pb[2] // RING_BUCKET + 1):
+                for by in range(pb[1] // RING_BUCKET, pb[3] // RING_BUCKET + 1):
+                    buckets.setdefault((bx, by), []).append(pb)
+
+    def ring_room(key_clr: int, box, reach: int, code: int) -> Optional[int]:
+        """The distance from an obstacle's box to the nearest pad of another
+        net in the owner map's rule group, if one lies within reach."""
+        buckets = ring_pads.get(key_clr)
+        if not buckets:
+            return None
+        x0, y0, x1, y1 = box[0] - reach, box[1] - reach, box[2] + reach, box[3] + reach
+        best = None
+        for bx in range(x0 // RING_BUCKET, x1 // RING_BUCKET + 1):
+            for by in range(y0 // RING_BUCKET, y1 // RING_BUCKET + 1):
+                for pb in buckets.get((bx, by), ()):
+                    if pb[4] == code:
+                        continue
+                    dx = max(0, pb[0] - box[2], box[0] - pb[2])
+                    dy = max(0, pb[1] - box[3], box[1] - pb[3])
+                    d = math.hypot(dx, dy)
+                    if d < reach and (best is None or d < best):
+                        best = d
+        return None if best is None else int(best)
+
+    def ring_need(key_clr: int, width: int, need: int, plain: int, box, code: int) -> int:
+        """need, cut back so the ring ends a cell before the nearest pad of
+        the map's nets that is already closer (never below plain)."""
+        if box is None:
+            return need
+        room = ring_room(key_clr, box, need + width // 2 + safety, code)
+        if room is None:
+            return need
+        return max(plain, min(need, room - pitch - width // 2 - safety))
+
+    def claim(layer: int, code: int, cells_for, own_clr: Optional[int] = None, item=None, floor_clr: int = 0,
+              box=None) -> None:
+        """cells_for(r) -> cells; one radius per owner map. item: the obstacle
+        as the custom rules see it (then the rules' clearance replaces the net
+        classes', floor_clr kept as a minimum: a hole's clearance). box: the
+        obstacle's bounding box, rasterized by row spans when a rule's
+        clearance is wide (isolation gaps of millimetres)."""
         if own_clr is None:
             own_clr = clearance_of(code)
+        done: Dict[Tuple[int, bool], List[int]] = {}       # maps of the same radius share the cells
         for (width, clearance), own in owners.items():
-            r = max(clearance, own_clr) + width // 2 + safety
-            grid.mark(own, cells_for(r), code if code > 0 and code in nets else BLOCKED)
+            plain = max(clearance, own_clr)
+            need = max(rule_clearance(clearance, item, plain), floor_clr)
+            if need > plain and need >= WIDE_RULE_NM:
+                need = ring_need(clearance, width, need, max(plain, floor_clr), box, code)
+            r = need + width // 2 + safety
+            isolation = need > plain and need >= WIDE_RULE_NM
+            wide = box is not None and isolation
+            cells = done.get((r, wide))
+            if cells is None:
+                cells = grid.rounded_box_cells(layer, box, r) if wide else cells_for(r)
+                done[(r, wide)] = cells
+            if isolation:
+                grid.block(own, cells)             # no net of this map may come that close
+            else:
+                grid.mark(own, cells, code if code > 0 and code in nets else BLOCKED)
 
     # Board edge: everything outside, plus the edge clearance band.
     say("Rasterizing the board outline...")
@@ -1016,8 +1169,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     for extra, _ in rings[1:]:
         pass                                            # multiple outlines: route inside the first
     for layer in layers:
+        edge_cells: Dict[int, List[int]] = {}      # the band depends on the width only, not the rule group
         for (width, clearance), own in owners.items():
-            cells = grid.outside_polygon_cells(layer.index, main_outline, holes, edge_clr + width // 2)
+            cells = edge_cells.get(width)
+            if cells is None:
+                cells = edge_cells[width] = grid.outside_polygon_cells(layer.index, main_outline, holes,
+                                                                       edge_clr + width // 2)
             grid.mark(own, cells, BLOCKED)
     for idx in range(grid.plane):
         if owners[keys[0]][idx] == BLOCKED:
@@ -1071,14 +1228,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     BUCKET = 2_000_000
     copper: Dict[Tuple[int, int, int], List[Tuple[object, int, int]]] = {}
 
-    def add_copper(layer: int, shape, code: int, clr: int, box) -> None:
+    def add_copper(layer: int, shape, code: int, clr: int, box, item=None) -> None:
         bx0, by0 = box[0] // BUCKET, box[1] // BUCKET
         bx1, by1 = box[2] // BUCKET, box[3] // BUCKET
         for bx in range(bx0, bx1 + 1):
             for by in range(by0, by1 + 1):
-                copper.setdefault((layer, bx, by), []).append((shape, code, clr))
+                copper.setdefault((layer, bx, by), []).append((shape, code, clr, item))
 
-    def copper_near(layer: int, box) -> List[Tuple[object, int, int]]:
+    def copper_near(layer: int, box) -> List[Tuple[object, int, int, object]]:
         out = []
         for bx in range(box[0] // BUCKET, box[2] // BUCKET + 1):
             for by in range(box[1] // BUCKET, box[3] // BUCKET + 1):
@@ -1102,15 +1259,18 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             shape = pad.GetEffectiveShape(kicad_layer)
             box = _box(shape)
             clr = item_clearance(pad, kicad_layer, code)
-            add_copper(li, shape, code if code in nets else 0, clr, box)
+            p_item = pad_item(pad, code)
+            add_copper(li, shape, code if code in nets else 0, clr, box, p_item)
             claim(li, code, lambda r, shape=shape, box=box, li=li:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
-                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)), clr)
+                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)), clr, p_item, box=box)
             if hole_radius:
                 # the hole itself, under the hole-clearance rule, on every layer
                 # (inner layers may carry no annular ring at all)
                 claim(li, code, lambda r, li=li: grid.disc_cells(li, pos.x, pos.y, hole_radius + r),
-                      max(clr, hole_clr, pth_clr if attr == pcbnew.PAD_ATTRIB_PTH else 0))
+                      max(clr, hole_clr, pth_clr if attr == pcbnew.PAD_ATTRIB_PTH else 0), p_item,
+                      max(hole_clr, pth_clr if attr == pcbnew.PAD_ATTRIB_PTH else 0),
+                      box=(pos.x - hole_radius, pos.y - hole_radius, pos.x + hole_radius, pos.y + hole_radius))
             if code in nets:
                 inside = grid.cells_where(li, box, lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), 0))
                 own_cells.update(inside)
@@ -1170,15 +1330,17 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 except TypeError:
                     radius = item.GetWidth() // 2
                 clr = item_clearance(item, kicad_layer, code)
+                v_item = track_item(code, "Via")
                 add_copper(li, pcbnew.SHAPE_CIRCLE(pcbnew.VECTOR2I(pos.x, pos.y), radius), code if code in nets else 0, clr,
-                           (pos.x - radius, pos.y - radius, pos.x + radius, pos.y + radius))
+                           (pos.x - radius, pos.y - radius, pos.x + radius, pos.y + radius), v_item)
                 if not is_movable:
-                    claim(li, code, lambda r, li=li, radius=radius: grid.disc_cells(li, pos.x, pos.y, radius + r), clr)
+                    claim(li, code, lambda r, li=li, radius=radius: grid.disc_cells(li, pos.x, pos.y, radius + r), clr, v_item,
+                          box=(pos.x - radius, pos.y - radius, pos.x + radius, pos.y + radius))
             if is_movable:
                 continue
             for layer in layers:                         # the hole goes through everything
                 claim(layer.index, code, lambda r, li=layer.index: grid.disc_cells(li, pos.x, pos.y, hole + r),
-                      max(hole_clr, clearance_of(code)))
+                      max(hole_clr, clearance_of(code)), track_item(code, "Via"), hole_clr)
             block_vias_near_hole(pos.x, pos.y, hole)
         else:
             li = layer_of.get(item.GetLayer())
@@ -1186,13 +1348,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 continue
             shape = item.GetEffectiveShape()
             box = _box(shape)
-            add_copper(li, shape, code if code in nets else 0, item_clearance(item, item.GetLayer(), code), box)
+            t_item = track_item(code)
+            add_copper(li, shape, code if code in nets else 0, item_clearance(item, item.GetLayer(), code), box, t_item)
             if is_movable:
                 continue
             claim(li, code, lambda r, shape=shape, box=box, li=li:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)),
-                  item_clearance(item, item.GetLayer(), code))
+                  item_clearance(item, item.GetLayer(), code), t_item)
 
     # Copper graphics and text (board and footprint level): netless obstacles.
     say("Rasterizing copper graphics...")
@@ -1570,12 +1733,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             margin = stub_w // 2 + net.rules.clearance + 2 * safety
             lane_box = (min(pos.x, ex, gx) - margin, min(pos.y, ey, gy) - margin,
                         max(pos.x, ex, gx) + margin, max(pos.y, ey, gy) + margin)
-            nearby = [(shape, other, other_clr) for li in pl
-                      for shape, other, other_clr in copper_near(li, lane_box) if other != code]
+            nearby = [(shape, other, other_clr, other_item) for li in pl
+                      for shape, other, other_clr, other_item in copper_near(li, lane_box) if other != code]
 
             def lane_clear(shapes):
-                for shape, other, other_clr in nearby:
-                    need = max(net.rules.clearance, other_clr) + safety
+                for shape, other, other_clr, other_item in nearby:
+                    need = rule_clearance(net.rules.clearance, other_item, max(net.rules.clearance, other_clr)) + safety
                     if any(_collides(shape, stub, need) for stub in shapes):
                         if _DEBUG:
                             print(f"[escape] {net.name} {fp.GetReference() if fp else '?'}.{pad.GetNumber()} lane to "
@@ -1665,9 +1828,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     # within clearance of the escape lane.
                     claim(li, code, lambda r, li=li, ex=ex, ey=ey, gx=gx, gy=gy, half=half:
                           grid.segment_cells(li, pos.x, pos.y, ex, ey, r + half)
-                          + grid.segment_cells(li, ex, ey, gx, gy, r + half))
+                          + grid.segment_cells(li, ex, ey, gx, gy, r + half), None, track_item(code))
                     for stub in stub_shapes:
-                        add_copper(li, stub, code, net.rules.clearance, lane_box)
+                        add_copper(li, stub, code, net.rules.clearance, lane_box, track_item(code))
                     # ...and the first 0.6 mm past the exit is reserved for this
                     # net where it is still free: a neighbour's track hugging
                     # the pad row would otherwise wall the pin in.
@@ -1812,7 +1975,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 # the run is the net's copper already, as its escape stubs
                 # are: no other net's track crosses it on this layer, and no
                 # via lands on it
-                claim(layer, code, lambda r, k=k: grid.segment_cells(layer, *run[k], *run[k + 1], r + half))
+                claim(layer, code, lambda r, k=k: grid.segment_cells(layer, *run[k], *run[k + 1], r + half),
+                      None, track_item(code))
                 for idx in grid.segment_cells(0, *run[k], *run[k + 1], via_r):
                     cur = via_guard[idx]
                     via_guard[idx] = code if cur in (0, code) else -1
@@ -2483,6 +2647,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
+                             pair_clearance=track_pair if rules is not None else None,
+                             ring_need=ring_need if rules is not None else None,
                              fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_strict=fanout_strict, fanout_array=fanout_array, fanout_array_cells=fanout_array_cells,
                              tied_pad_cells=tied_pad_cells, fanout_tie_only=fanout_tie_only,
                              stitch=stitch, existing=existing, via_guard=via_guard,

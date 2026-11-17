@@ -12,17 +12,18 @@ from typing import Optional
 import pcbnew
 import wx
 
-from .engine import awake, board_setup, session, si
+from .engine import awake, board_setup, guides, session, si
 from .engine.options import RouteOptions
 from .engine.native import (apply as native_apply, extract as native_extract, kicad_tuning as native_kicad_tuning,
                             pipeline as native_pipeline, router as native_router)
 from .engine.ai import assistant as ai_assistant, codex as ai_codex, headless as ai_headless
-from .engine.ai import optimize as ai_optimize, board_copy as ai_board_copy
+from .engine.ai import optimize as ai_optimize, board_copy as ai_board_copy, llm as ai_llm
 from .engine.native.problem import (NativeOptions, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
                                     SIZE_AUTO, SIZE_CURRENT, SIZE_FIXED, SIZE_NETCLASS)
 from .engine.paths import data_dir
 from .log import get_logger
 from .settings import Settings
+from .guide_page import GuidePage
 from .setup_page import SetupPage
 from .si_page import SiPage
 
@@ -70,6 +71,9 @@ class AutorouterDialog(wx.Dialog):
         root = wx.BoxSizer(wx.VERTICAL)
         self.notebook = wx.Notebook(self)
         self.notebook.AddPage(self._routing_page(self.notebook), "Routing")
+        self.guide_page = GuidePage(self.notebook, self.board, self._append_log, self.settings.guide_id,
+                                    provider=self._provider, workdir=lambda: data_dir() / "guides" / "describe")
+        self.notebook.AddPage(self.guide_page, "Routing guide")
         self.si_page = SiPage(self.notebook, self.board, self._append_log)
         self.setup_page = SetupPage(self.notebook, self.board, self._append_log, self.si_page,
                                     on_change=self._setup_changed)
@@ -308,10 +312,10 @@ class AutorouterDialog(wx.Dialog):
         page = wx.Panel(parent)
         box = wx.BoxSizer(wx.VERTICAL)
         intro = wx.StaticText(page, label=(
-            "Describe what you want in plain words. The assistant (OpenAI Codex CLI) reads the board, "
-            "the net classes, the last run and the DRC, and answers with routing actions this plugin "
-            "carries out live: option changes, routing by net, sheet or selection, removing or adding "
-            "tracks and vias. Each round is one undo step with everything else."))
+            "Describe what you want in plain words, or leave it empty to follow the Routing guide tab. "
+            "The assistant (Claude or Codex) reads the board, the net classes, the last run, the DRC and the "
+            "chosen routing guide, and answers with routing actions this plugin carries out live: option "
+            "changes, routing by net, sheet or selection, removing or adding tracks and vias."))
         intro.Wrap(600)
         box.Add(intro, 0, wx.ALL, 10)
         self.ai_request = wx.TextCtrl(page, style=wx.TE_MULTILINE)
@@ -319,10 +323,19 @@ class AutorouterDialog(wx.Dialog):
         self.ai_request.SetHint("e.g. Route the whole board, leave GND to the pours, keep the USB pair coupled. "
                                 "Then fix anything the DRC reports.")
         box.Add(self.ai_request, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        row0 = wx.BoxSizer(wx.HORIZONTAL)
+        row0.Add(wx.StaticText(page, label="Assistant"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.ai_provider = wx.Choice(page, choices=[ai_llm.LABELS[k] for k in ai_llm.KINDS])
+        self.ai_provider.SetSelection(ai_llm.KINDS.index(self.settings.ai_provider)
+                                      if self.settings.ai_provider in ai_llm.KINDS else 0)
+        self.ai_provider.Bind(wx.EVT_CHOICE, lambda e: self._ai_provider_changed())
+        row0.Add(self.ai_provider, 0, wx.RIGHT, 12)
+        self.ai_status = wx.StaticText(page, label="")
+        row0.Add(self.ai_status, 1, wx.ALIGN_CENTER_VERTICAL)
+        box.Add(row0, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 10)
         row = wx.BoxSizer(wx.HORIZONTAL)
         row.Add(wx.StaticText(page, label="Model"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.ai_model = wx.TextCtrl(page, value=self.settings.ai_model, size=(160, -1))
-        self.ai_model.SetHint("codex default")
         row.Add(self.ai_model, 0, wx.RIGHT, 12)
         row.Add(wx.StaticText(page, label="Rounds"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.ai_rounds = wx.SpinCtrl(page, min=1, max=10, initial=3)
@@ -343,13 +356,18 @@ class AutorouterDialog(wx.Dialog):
         row2.Add(self.ai_ask, 0, wx.RIGHT, 6)
         row2.Add(self.ai_review, 0, wx.RIGHT, 6)
         row2.Add(self.ai_score, 0, wx.RIGHT, 12)
-        binary = ai_codex.find_codex(self.settings.codex_path)
-        self.ai_status = wx.StaticText(page, label=(f"codex: {binary}  ({ai_codex.codex_version(binary)})" if binary
-                                                    else "codex CLI not found: install with  npm i -g @openai/codex"))
-        row2.Add(self.ai_status, 0, wx.ALIGN_CENTER_VERTICAL)
         box.Add(row2, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         page.SetSizer(box)
+        self._ai_provider_changed()
         return page
+
+    def _ai_provider_changed(self):
+        p = self._provider()
+        ok, line = ai_llm.status(p)
+        self.ai_status.SetLabel(line)
+        self.ai_status.SetForegroundColour(wx.Colour(0, 110, 0) if ok else wx.Colour(170, 0, 0))
+        self.ai_model.SetHint({ai_llm.CODEX_CLI: "codex default", ai_llm.CLAUDE_CLI: "claude default"}.get(
+            p.kind, ai_llm.DEFAULT_MODEL.get(p.kind, "")))
 
     # ---- the assistant ------------------------------------------------------
 
@@ -357,10 +375,10 @@ class AutorouterDialog(wx.Dialog):
         """Common start of an assistant session: codex present, settings saved,
         a job folder, the live-display route function. Returns
         (binary, route_fn, selection) or None when it cannot start."""
-        binary = ai_codex.find_codex(self.settings.codex_path)
-        if not binary:
-            wx.MessageBox("The codex CLI was not found. Install it with  npm i -g @openai/codex  and log in once.",
-                          "Autorouter", wx.ICON_ERROR, self)
+        binary = self._provider()
+        ok, why = ai_llm.status(binary)
+        if not ok:
+            wx.MessageBox(why, "Autorouter", wx.ICON_ERROR, self)
             return None
         if not self._preflight():
             return None
@@ -389,7 +407,7 @@ class AutorouterDialog(wx.Dialog):
             return
         binary, _, _ = started
         self.applied = had_applied
-        self._show_progress("Codex: testing board copies; only the best verified result will be applied.", None)
+        self._show_progress("Assistant: testing board copies; only the best verified result will be applied.", None)
         last_poll = [0.0]
 
         def pump():
@@ -412,8 +430,8 @@ class AutorouterDialog(wx.Dialog):
                 patience=self.ai_rounds.GetValue(), options=ai_headless.assistant_options(self._ai_base),
                 base=self._ai_base, log=self._append_log, cancelled=cancelled, poll=pump,
                 load_board=lambda path: ai_board_copy.load_copy(path, self.board))
-            result = optimizer.run(self.ai_request.GetValue().strip() or
-                                   "Route the board completely, then improve its routing quality.")
+            result = optimizer.run(self._guided(self.ai_request.GetValue().strip() or
+                                   "Route the board completely, then improve its routing quality."))
             if self._cancel:
                 self._show_progress("Codex search cancelled. The open board is unchanged; candidates remain in the data folder.", 0.0)
                 return
@@ -521,8 +539,12 @@ class AutorouterDialog(wx.Dialog):
                        "return vias) and what you would change. Use only 'note' actions and set done to true."
                        + (f"\nUser notes: {request}" if request else ""))
         if not request:
-            wx.MessageBox("Write what the assistant should do first.", "Autorouter", wx.ICON_INFORMATION, self)
-            return
+            if self.guide_page.guide() is None:
+                wx.MessageBox("Write what the assistant should do, or pick a routing guide.", "Autorouter",
+                              wx.ICON_INFORMATION, self)
+                return
+            request = "Route the board completely, following the routing guide."
+        request = self._guided(request)
         started = self._ai_begin("-ai")
         if started is None:
             return
@@ -536,7 +558,7 @@ class AutorouterDialog(wx.Dialog):
                                         model=self.ai_model.GetValue().strip(), max_rounds=self.ai_rounds.GetValue(),
                                         with_drc=self.ai_drc.GetValue(), poll=poll,
                                         cancelled=lambda: self._cancel, selection=selection)
-        self._show_progress("Assistant: reading the board and asking Codex...", None)
+        self._show_progress("Assistant: reading the board and asking the model...", None)
         try:
             history = helper.run(request)
         except ai_codex.CodexError as e:
@@ -668,13 +690,47 @@ class AutorouterDialog(wx.Dialog):
         except Exception as e:
             logger.exception("Design intent")
             self._append_log(f"[plugin] signal integrity settings ignored: {e!r}")
-            return native
+            return self._apply_guide(native)
         self._si_plan = plan
-        return si.apply_to_options(native, cfg, plan)
+        native = si.apply_to_options(native, cfg, plan)
+        return self._apply_guide(native)
+
+    def _apply_guide(self, native: NativeOptions) -> NativeOptions:
+        """The Routing guide tab's choice on this run's options."""
+        g = self.guide_page.guide() if hasattr(self, "guide_page") else None
+        if not g:
+            return native
+        try:
+            lines = guides.apply(self.board, g, native)
+        except Exception as e:
+            logger.exception("Routing guide")
+            self._append_log(f"[guide] not applied: {e!r}")
+            return native
+        if lines:
+            self._append_log(f"[guide] {g.get('name')}: " + "; ".join(lines))
+        return native
+
+    def _provider(self) -> ai_llm.Provider:
+        kind = ai_llm.KINDS[self.ai_provider.GetSelection()] if hasattr(self, "ai_provider") else self.settings.ai_provider
+        model = self.ai_model.GetValue().strip() if hasattr(self, "ai_model") else self.settings.ai_model
+        binary = self.settings.codex_path if kind == ai_llm.CODEX_CLI else (
+            self.settings.claude_path if kind == ai_llm.CLAUDE_CLI else "")
+        return ai_llm.Provider(kind, model=model, binary=binary)
+
+    def _guided(self, request: str) -> str:
+        """The user's request with the routing guide in front of it."""
+        g = self.guide_page.guide() if hasattr(self, "guide_page") else None
+        if g is None:
+            return request
+        return f"{guides.as_text(g)}\n\nThe user's request: {request}"
 
     def _save_settings(self):
         if hasattr(self, "ai_model"):
             self.settings.ai_model = self.ai_model.GetValue().strip()
+        if hasattr(self, "ai_provider"):
+            self.settings.ai_provider = ai_llm.KINDS[self.ai_provider.GetSelection()]
+        if hasattr(self, "guide_page"):
+            self.settings.guide_id = self.guide_page.selected_id()
         self.settings.options = self._collect_options()
         self.settings.options.remove_existing_tracks = False       # a per-run choice, not a preference
         try:

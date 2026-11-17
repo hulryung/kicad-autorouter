@@ -164,6 +164,9 @@ class NativeOptions:
     rip_limit: int = 5                 # how often one connection may be ripped up
     fine_shove: bool = True            # the finer second pass may rip up and reroute the first pass's tracks
     skip_nets: List[str] = field(default_factory=list)       # names or fnmatch patterns
+    class_widths: Dict[str, int] = field(default_factory=dict)   # net class -> track width (nm) a routing guide asks for
+    class_vias: Dict[str, Tuple[int, int]] = field(default_factory=dict)   # net class -> (via diameter, drill) nm
+    custom_rules: bool = True       # clearances from the board's .kicad_dru (an HV-to-logic gap, a fine-pitch part's relief)
     ignore_net_classes: List[str] = field(default_factory=list)
     routable_layers: Optional[List[bool]] = None             # over the board's copper stack
     horizontal_layers: Optional[List[bool]] = None
@@ -200,6 +203,12 @@ class RoutingProblem:
     connections: List[Connection]
     options: NativeOptions
     stats: Dict[str, float] = field(default_factory=dict)
+    # (key clearance, net code) -> the clearance between a net of that owner map and that net's tracks,
+    # under the board's custom rules; None = the larger of the two net clearances
+    pair_clearance: Optional[object] = None
+    # (key clearance, width, need, plain, box nm, net code) -> an isolation clearance cut back to
+    # end before the map's pads that already sit closer; None = no custom rules
+    ring_need: Optional[object] = None
     fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
     fanout_alt: Dict[int, List[int]] = field(default_factory=dict)   # exit cell -> the pad's other exits to try
     fanout_goals: Dict[int, Set[int]] = field(default_factory=dict)  # exit cell -> cells on the net's pour, within reach

@@ -1,0 +1,3 @@
+{"id": "ai-decides", "order": 0, "name": "Let the AI decide",
+ "summary": "The assistant (Claude or Codex) reads the board and picks the approach itself: layer use, what goes to pours, widths, order. It says what it chose and why.",
+ "guide": "", "style": {}, "options": {}, "preview": ""}

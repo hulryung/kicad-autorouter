@@ -24,7 +24,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 import os
 
 from . import astar
-from .grid import BLOCKED, BODY_LANE, Grid, jog
+from .grid import BLOCKED, BODY_LANE, WIDE_NM, Grid, jog
 from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem
 
 ProgressFn = Callable[[int, int, int, int, str], None]    # done, total, routed, failed, net name
@@ -91,6 +91,7 @@ class _Path:
     def __init__(self, pid: int, conn: Connection, path: RoutedPath, cells: List[int], paired: bool = False):
         self.pid, self.conn, self.path, self.cells = pid, conn, path, cells
         self.claims: Dict[Tuple[int, int], List[int]] = {}      # owner-map key -> claimed cells
+        self.boxes: Dict[Tuple[int, int], Tuple[int, int, int, int]] = {}   # key -> cell box of those claims
         self.via_cells: List[int] = []
         self.joins: List[Tuple[int, int]] = [(conn.a, conn.b)]  # cluster pairs this path connects
         self.existing = False                                   # copper that was on the board already
@@ -532,21 +533,48 @@ class Router:
         """Make a path's copper an obstacle (and remember what it claimed)."""
         grid, p, net = self.grid, self.p, self.p.nets[path.conn.net]
         rp = path.path
+        shared: Dict[int, List[int]] = {}       # maps with the same clearance + half width share the cells
+        boxes: Dict[int, Tuple[int, int, int, int]] = {}
+        parts: Dict[int, Tuple[list, list]] = {}  # grow -> (row spans, the other cells)
+        code, pid = net.code, path.pid
         for key, owners in p.owners.items():
             width, clearance = key
-            cells: List[int] = []
-            for seg in rp.segments:
-                layer, x1, y1, x2, y2 = seg[:5]
-                seg_w = seg[5] if len(seg) > 5 else rp.width
-                r = seg_w // 2 + max(clearance, net.rules.clearance) + width // 2 + p.safety
-                cells += grid.segment_cells(layer, x1, y1, x2, y2, r)
-            r_via = rp.via_diameter // 2 + max(clearance, net.rules.clearance) + width // 2 + p.safety
-            for x, y in rp.vias:
-                for layer in range(grid.layers):
-                    cells += grid.disc_cells(layer, x, y, r_via)
+            grow = self._pair_clr(clearance, net) + width // 2 + p.safety
+            ringed = self._ringed(key, net)
+            if ringed:
+                grow = ("ring", key)                    # cut back per piece: not shared
+            cells = shared.get(grow)
+            if cells is None:
+                cells, spans, loose = [], [], []
+                for kind, piece in self._pieces(key, net, rp, ringed):
+                    cells += piece
+                    if getattr(piece, "spans", None) is not None:
+                        spans += piece.spans            # a wide (isolation) claim: written by rows
+                    else:
+                        loose += piece
+                shared[grow] = cells
+                parts[grow] = (spans, loose)
+                boxes[grow] = self._cell_box(cells)
             path.claims[key] = cells
+            path.boxes[key] = boxes[grow]
             routed = self.routed[key]
-            for idx in cells:
+            spans, loose = parts[grow]
+            todo = loose
+            if spans:
+                todo = list(loose)
+                for a, b in spans:
+                    n = b - a
+                    part = owners[a:b]
+                    first = part[0]
+                    if part.count(first) == n:
+                        if first == 0:                     # free row: claimed in one slice
+                            owners[a:b] = array("i", [code]) * n
+                            routed[a:b] = array("i", [pid]) * n
+                            continue
+                        if first == code or first == BLOCKED:
+                            continue                       # nothing would change
+                    todo.extend(range(a, b))
+            for idx in todo:
                 cur = owners[idx]
                 if cur == 0:
                     owners[idx] = net.code
@@ -566,23 +594,26 @@ class Router:
         for idx in path.via_cells:
             p.via_block[idx] = 1
 
+    def _cell_box(self, cells: List[int]) -> Tuple[int, int, int, int]:
+        """(x0, y0, x1, y1) of cells on any layer: _unclaim skips paths whose
+        box misses the cells being freed (an isolation rule's wide claims
+        made checking every surviving path's cells the cost of a rip-up)."""
+        if not cells:
+            return (1, 1, 0, 0)
+        plane, w = self.grid.plane, self.grid.w
+        rows = [c % plane for c in cells]
+        ys = [r // w for r in rows]
+        xs = [r - y * w for r, y in zip(rows, ys)]
+        return (min(xs), min(ys), max(xs), max(ys))
+
     def _fits(self, path: _Path) -> bool:
         """Is this path's copper (with clearance) still clear of every other net?"""
         grid, p, net = self.grid, self.p, self.p.nets[path.conn.net]
         rp = path.path
         for key, owners in p.owners.items():
-            width, clearance = key
-            for seg in rp.segments:
-                layer, x1, y1, x2, y2 = seg[:5]
-                seg_w = seg[5] if len(seg) > 5 else rp.width
-                r = seg_w // 2 + max(clearance, net.rules.clearance) + width // 2 + p.safety
-                if any(owners[idx] not in (0, net.code) for idx in grid.segment_cells(layer, x1, y1, x2, y2, r)):
+            for kind, piece in self._pieces(key, net, rp, self._ringed(key, net)):
+                if any(owners[idx] not in (0, net.code) for idx in piece):
                     return False
-            r_via = rp.via_diameter // 2 + max(clearance, net.rules.clearance) + width // 2 + p.safety
-            for x, y in rp.vias:
-                for layer in range(grid.layers):
-                    if any(owners[idx] not in (0, net.code) for idx in grid.disc_cells(layer, x, y, r_via)):
-                        return False
         r_hole = rp.via_drill // 2 + p.hole_to_hole + p.max_via_drill // 2
         for x, y in rp.vias:
             if any(p.via_block[idx] for idx in grid.disc_cells(0, x, y, r_hole)):
@@ -598,6 +629,7 @@ class Router:
         for pid in sorted(self.paths):
             path = self.paths[pid]
             path.claims = {}
+            path.boxes = {}
             path.via_cells = []
             self._claim(path)
 
@@ -615,8 +647,14 @@ class Router:
         survivors = [self.paths[pid] for pid in sorted(self.paths)]
         for key, owners in p.owners.items():
             touched: Set[int] = set()
+            tx0 = ty0 = 1 << 30
+            tx1 = ty1 = -1
             for path in removed:
-                touched.update(path.claims.get(key, ()))
+                cells = path.claims.get(key)
+                if cells:
+                    touched.update(cells)
+                    bx0, by0, bx1, by1 = path.boxes.get(key) or self._cell_box(cells)
+                    tx0, ty0, tx1, ty1 = min(tx0, bx0), min(ty0, by0), max(tx1, bx1), max(ty1, by1)
             if not touched:
                 continue
             fixed, routed = self.fixed[key], self.routed[key]
@@ -625,12 +663,16 @@ class Router:
                 routed[idx] = 0
             for path in survivors:
                 cells = path.claims.get(key)
-                if not cells or touched.isdisjoint(cells):
+                if not cells:
+                    continue
+                box = path.boxes.get(key)
+                if box is not None and (box[2] < tx0 or box[0] > tx1 or box[3] < ty0 or box[1] > ty1):
+                    continue
+                common = touched.intersection(cells)
+                if not common:
                     continue
                 code, pid = p.nets[path.conn.net].code, path.pid
-                for idx in cells:
-                    if idx not in touched:
-                        continue
+                for idx in common:
                     cur = owners[idx]
                     if cur == 0:
                         owners[idx] = code
@@ -717,6 +759,46 @@ class Router:
                            history=self.history, layer_extra=self._layer_extra(net.code),
                            site_guard=self.p.site_guard, relief=self.p.plane_relief.get(net.code),
                            via_owners=self.p.owners.get((net.rules.via_diameter, net.rules.clearance)), **kwargs)
+
+    def _ringed(self, key, net) -> bool:
+        """Does this net keep an isolation gap (a wide custom rule) from the
+        nets of this owner map? Its rings are then cut back per piece."""
+        if self.p.ring_need is None:
+            return False
+        need = self._pair_clr(key[1], net)
+        return need >= WIDE_NM and need > max(key[1], net.rules.clearance)
+
+    def _pieces(self, key, net, rp, ringed: bool):
+        """(kind, cells) of a path's copper grown for one owner map. An
+        isolation ring stops a cell short of a pad of the map's nets that
+        already sits closer (extract.ring_need), as the fixed copper's do."""
+        grid, p = self.grid, self.p
+        width, clearance = key
+        need = self._pair_clr(clearance, net)
+        plain = max(clearance, net.rules.clearance)
+        for seg in rp.segments:
+            layer, x1, y1, x2, y2 = seg[:5]
+            seg_w = seg[5] if len(seg) > 5 else rp.width
+            n = need
+            if ringed:
+                h = seg_w // 2
+                n = p.ring_need(clearance, width, need, plain,
+                                (min(x1, x2) - h, min(y1, y2) - h, max(x1, x2) + h, max(y1, y2) + h), net.code)
+            yield "seg", grid.segment_cells(layer, x1, y1, x2, y2, seg_w // 2 + n + width // 2 + p.safety)
+        for x, y in rp.vias:
+            n = need
+            if ringed:
+                h = rp.via_diameter // 2
+                n = p.ring_need(clearance, width, need, plain, (x - h, y - h, x + h, y + h), net.code)
+            r_via = rp.via_diameter // 2 + n + width // 2 + p.safety
+            for layer in range(grid.layers):
+                yield "via", grid.disc_cells(layer, x, y, r_via)
+
+    def _pair_clr(self, key_clr: int, net) -> int:
+        """The clearance the nets of an owner map (by its key clearance) keep
+        from this net's tracks: the board's custom rules when it has any."""
+        pc = self.p.pair_clearance
+        return pc(key_clr, net.code) if pc is not None else max(key_clr, net.rules.clearance)
 
     def _layer_extra(self, code: int) -> List[int]:
         """Per layer, what a cell of track costs the net beyond its step:
@@ -1075,7 +1157,7 @@ class Router:
         self._unclaim(new)
         back = [before[pid] for pid in sorted(before) if pid not in self.paths]
         for path in back:
-            path.claims, path.via_cells = {}, []
+            path.claims, path.via_cells, path.boxes = {}, [], {}
             self.paths[path.pid] = path
             self._claim(path)
             if path.existing:

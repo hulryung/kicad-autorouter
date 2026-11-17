@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import actions as act_mod
-from . import codex, context, render
+from . import codex, context, llm, render
 
 CRITERIA = ["connectivity", "drc", "track_length", "vias", "layer_use", "aesthetics", "signal_integrity", "power_and_ground"]
 
@@ -149,7 +149,7 @@ class Reviewer:
 
     def run(self, request: str = "", apply: bool = True) -> List[dict]:
         if not self.binary:
-            raise codex.CodexError("The codex CLI was not found.")
+            raise codex.CodexError("No assistant is set up: install the Codex or Claude Code CLI, or an API SDK.")
         self.workdir.mkdir(parents=True, exist_ok=True)
         last_issues: List[dict] = list(self.previous_issues)
         best = None
@@ -176,7 +176,7 @@ class Reviewer:
                                 "\n## Board context and metrics\n", context_text,
                                 "\n\nAnswer with the JSON object only."])
             self.log(f"[review] round {round_no}: asking Codex to score the board...")
-            reply = codex.run(self.binary, prompt, self.workdir, schema=REVIEW_SCHEMA, model=self.model,
+            reply = llm.run(self.binary, prompt, self.workdir, schema=REVIEW_SCHEMA, model=self.model,
                               cancelled=self.cancelled, poll=self.poll, images=images)
             reply = act_mod.normalize(reply)
             score = int(reply.get("score", 0))

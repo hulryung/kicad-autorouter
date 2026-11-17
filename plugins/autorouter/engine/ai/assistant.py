@@ -1,4 +1,4 @@
-"""The assistant loop: request -> board context -> Codex -> actions -> results,
+"""The assistant loop: request -> board context -> model -> actions -> results,
 repeated until the model says it is done or the round limit is reached."""
 import json
 import time
@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from . import actions as act_mod
-from . import codex, context, render
+from . import codex, context, llm, render
 
 SYSTEM_PROMPT = """You are a PCB layout engineer working inside KiCad through an autorouter plugin.
 You see the open board as JSON (file board-context.json in the working directory and inline below)
@@ -90,7 +90,7 @@ class Assistant:
 
     def run(self, request: str) -> List[dict]:
         if not self.binary:
-            raise codex.CodexError("The codex CLI was not found. Install it (npm i -g @openai/codex) or set its path.")
+            raise codex.CodexError("No assistant is set up: install the Codex or Claude Code CLI, or an API SDK.")
         self.workdir.mkdir(parents=True, exist_ok=True)
         history: List[dict] = []
         for round_no in range(1, self.max_rounds + 1):
@@ -107,8 +107,9 @@ class Assistant:
                 if png:
                     images.append(png)
                     self.log(f"[ai] round {round_no}: board image attached ({png.name})")
-            self.log(f"[ai] round {round_no}: asking Codex ({self.model or 'default model'})...")
-            reply = codex.run(self.binary, prompt, self.workdir, schema=act_mod.REPLY_SCHEMA, model=self.model,
+            who = llm.as_provider(self.binary).label
+            self.log(f"[ai] round {round_no}: asking {who} ({self.model or 'default model'})...")
+            reply = llm.run(self.binary, prompt, self.workdir, schema=act_mod.REPLY_SCHEMA, model=self.model,
                               on_output=lambda line: None, cancelled=self.cancelled, poll=self.poll, images=images)
             reply = act_mod.normalize(reply)
             problems = act_mod.validate(reply)

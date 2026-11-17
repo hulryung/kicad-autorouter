@@ -1,0 +1,3 @@
+{"id": "learn-from-board", "order": 30, "name": "Like a board I made (learn)",
+ "summary": "Pick a finished, hand-routed board: its layer use, the widths each net class is really drawn at and its vias are learnt and saved as a guide of your own. The picture is a designer's board.",
+ "guide": "", "style": {}, "options": {}, "preview": "designer-reference.png", "action": "learn"}

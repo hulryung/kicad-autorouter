@@ -1,0 +1,3 @@
+{"id": "describe", "order": 40, "name": "Describe it in words (AI)",
+ "summary": "Write how you want the board routed, in any language. The assistant turns it into a guide (shown as JSON, editable) that you can keep.",
+ "guide": "", "style": {}, "options": {}, "preview": "", "action": "describe"}

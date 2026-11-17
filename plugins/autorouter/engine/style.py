@@ -96,12 +96,40 @@ def load(path: str) -> dict:
 
 
 def routable_layers(board, style: dict) -> Optional[List[bool]]:
-    """Top to bottom: False on the layers the style keeps for pours (None: no say)."""
+    """Top to bottom: False on the layers the style keeps for pours (None: no
+    say). Roles are given per layer name ("In1.Cu"), or for "inner" / "outer"
+    layers as a whole (a guide written for any board); a name wins."""
     roles = style.get("layers") or {}
     if not roles:
         return None
     stack = list(board.GetEnabledLayers().CuStack())
-    return [roles.get(board.GetLayerName(lid), "signal") != "plane" for lid in stack]
+    out = []
+    for i, lid in enumerate(stack):
+        group = "outer" if i in (0, len(stack) - 1) else "inner"
+        role = roles.get(board.GetLayerName(lid), roles.get(group, "signal"))
+        out.append(role != "plane")
+    return out if any(out) else None
+
+
+def apply_to_options(board, style: dict, options) -> List[str]:
+    """Put a style into a run's NativeOptions (the board itself is not
+    changed): plane layers, per-class widths and vias. Returns what it set."""
+    lines = []
+    mask = routable_layers(board, style)
+    if mask is not None:
+        current = options.routable_layers or [True] * len(mask)
+        options.routable_layers = [a and b for a, b in zip(mask, current)]
+        names = [board.GetLayerName(l) for l in board.GetEnabledLayers().CuStack()]
+        off = [n for n, ok in zip(names, options.routable_layers) if not ok]
+        if off:
+            lines.append("left to pours, not routed: " + ", ".join(off))
+    for name, w in (style.get("class_width_mm") or {}).items():
+        options.class_widths[name] = int(round(float(w) * MM))
+        lines.append(f"{name}: track {w:g} mm")
+    for name, (d, h) in (style.get("class_via_mm") or {}).items():
+        options.class_vias[name] = (int(round(float(d) * MM)), int(round(float(h) * MM)))
+        lines.append(f"{name}: via {d:g}/{h:g} mm")
+    return lines
 
 
 def apply_net_classes(board, style: dict) -> List[str]:
