@@ -1029,6 +1029,9 @@ class AutorouterDialog(wx.Dialog):
         text = f"Done: {result.routed} connections routed in {result.seconds:.0f}s"
         if result.timed_out:
             text = f"Time limit reached: {result.routed} connections routed in {result.seconds:.0f}s"
+        if getattr(result, "wall_capped", False):
+            text = (f"Wall-clock cap reached (the job took far longer than its time limit): "
+                    f"{result.routed} connections routed in {result.seconds:.0f}s")
         if result.escalated:
             text += f" ({result.escalated} on the finer second pass)"
         if result.fanout:

@@ -212,6 +212,11 @@ The default grid is **0.1 mm**, the search budget is **400,000 expansions per
 connection**, and the routing time limit is **10 minutes** (`0` disables it).
 The limit bounds the routing searches; pour finishing and length tuning can
 continue afterwards, so it is not a strict wall-clock deadline for the dialog.
+A hard wall-clock cap backs it up: at 3x the limit (and at least the limit
+plus 20 minutes) the routing stops, keeps what it has routed, skips the finer
+second pass and says so in the log. Boards with wide isolation rules spend
+most of their time outside the searches, which the limit alone does not
+count in benchmarks.
 **Cancel** stops the run with partial work visible.
 
 Board edits participate in KiCad's action-plugin undo. An optional subsequent

@@ -1087,11 +1087,15 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # safety margin on every obstacle keeps the DRC exact.
     safety = max(pitch // 5, 10_000)
 
-    # Isolation rings stop short of the pads the placement already put inside
+    # Isolation rings open toward the pads the placement already put inside
     # the gap: an 8 mm HV-to-logic rule on a board whose logic pads sit 3 mm
-    # from an HV part would otherwise wall those pads in. The ring then keeps
-    # the nets "no closer than the placement already is".
+    # from an HV part would otherwise wall those pads in. Behind each such
+    # pad (on the side away from the obstacle) a widening corridor is freed,
+    # never closer to the obstacle than the pad itself; everywhere else the
+    # ring keeps the rule's full width ("no closer than the placement
+    # already is", per direction).
     RING_BUCKET = 5_000_000
+    RING_FAN = 1_000_000            # how fast the corridor behind a pad widens
     ring_pads: Dict[int, Dict[Tuple[int, int], List[Tuple[int, int, int, int, int]]]] = {}
     if rules is not None:
         for pad in board.GetPads():
@@ -1105,35 +1109,92 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 for by in range(pb[1] // RING_BUCKET, pb[3] // RING_BUCKET + 1):
                     buckets.setdefault((bx, by), []).append(pb)
 
-    def ring_room(key_clr: int, box, reach: int, code: int) -> Optional[int]:
-        """The distance from an obstacle's box to the nearest pad of another
-        net in the owner map's rule group, if one lies within reach."""
+    def _box_dist(box, x: float, y: float) -> float:
+        return math.hypot(max(0, box[0] - x, x - box[2]), max(0, box[1] - y, y - box[3]))
+
+    def ring_close(key_clr: int, box, reach: int, code: int) -> List[Tuple[tuple, float]]:
+        """(pad box, distance) of the pads of other nets in the owner map's
+        rule group within reach of an obstacle's box."""
         buckets = ring_pads.get(key_clr)
         if not buckets:
-            return None
+            return []
         x0, y0, x1, y1 = box[0] - reach, box[1] - reach, box[2] + reach, box[3] + reach
-        best = None
+        out, seen = [], set()
         for bx in range(x0 // RING_BUCKET, x1 // RING_BUCKET + 1):
             for by in range(y0 // RING_BUCKET, y1 // RING_BUCKET + 1):
                 for pb in buckets.get((bx, by), ()):
-                    if pb[4] == code:
+                    if pb[4] == code or pb in seen:
                         continue
+                    seen.add(pb)
                     dx = max(0, pb[0] - box[2], box[0] - pb[2])
                     dy = max(0, pb[1] - box[3], box[1] - pb[3])
                     d = math.hypot(dx, dy)
-                    if d < reach and (best is None or d < best):
-                        best = d
-        return None if best is None else int(best)
+                    if d < reach:
+                        out.append((pb, d))
+        return out
 
-    def ring_need(key_clr: int, width: int, need: int, plain: int, box, code: int) -> int:
-        """need, cut back so the ring ends a cell before the nearest pad of
-        the map's nets that is already closer (never below plain)."""
+    def ring_free(key_clr: int, r: int, box, code: int):
+        """None, or a function taking a ring's cells (track centres within r
+        of the obstacle's box) and returning them without the corridors
+        behind the map's pads that already sit inside the ring."""
         if box is None:
-            return need
-        room = ring_room(key_clr, box, need + width // 2 + safety, code)
-        if room is None:
-            return need
-        return max(plain, min(need, room - pitch - width // 2 - safety))
+            return None
+        close = ring_close(key_clr, box, r, code)
+        if not close:
+            return None
+        cones = []
+        for pb, d in close:
+            lo = d - pitch                       # no track centre closer to the obstacle than this
+            reach = r - d + RING_FAN             # the corridor lies within this of the pad
+            cones.append((pb, d, lo, (pb[0] - reach, pb[1] - reach, pb[2] + reach, pb[3] + reach)))
+        ox, oy, gp, gw, plane = grid.ox, grid.oy, grid.pitch, grid.w, grid.plane
+
+        def freed(x: int, y: int, row_cones) -> bool:
+            do = None
+            for pb, d, lo, bb in row_cones:
+                if not (bb[0] <= x <= bb[2]):
+                    continue
+                if do is None:
+                    do = _box_dist(box, x, y)
+                if do >= lo and _box_dist(pb, x, y) + d <= do + RING_FAN:
+                    return True
+            return False
+
+        def keep_row(out, a: int, n: int) -> None:
+            """cells a .. a+n-1 of one row."""
+            rest = a % plane
+            cy, cx0 = divmod(rest, gw)
+            y = oy + cy * gp
+            row_cones = [c for c in cones if c[3][1] <= y <= c[3][3]]
+            if not row_cones:
+                out.extend(range(a, a + n))
+                return
+            lo_x = min(c[3][0] for c in row_cones)
+            hi_x = max(c[3][2] for c in row_cones)
+            for k in range(n):
+                x = ox + (cx0 + k) * gp
+                if lo_x <= x <= hi_x and freed(x, y, row_cones):
+                    continue
+                out.append(a + k)
+
+        def keep(cells):
+            out: List[int] = []
+            spans = getattr(cells, "spans", None)
+            if spans is not None:                  # a SpanCells holds its cells as spans only
+                for a, b in spans:
+                    keep_row(out, a, b - a)
+                return out
+            rest = cells
+            # loose cells, grouped by runs of one row
+            i, n = 0, len(rest)
+            while i < n:
+                j = i + 1
+                while j < n and rest[j] == rest[j - 1] + 1 and rest[j] // gw == rest[i] // gw:
+                    j += 1
+                keep_row(out, rest[i], j - i)
+                i = j
+            return out
+        return keep
 
     def claim(layer: int, code: int, cells_for, own_clr: Optional[int] = None, item=None, floor_clr: int = 0,
               box=None) -> None:
@@ -1148,16 +1209,21 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         for (width, clearance), own in owners.items():
             plain = max(clearance, own_clr)
             need = max(rule_clearance(clearance, item, plain), floor_clr)
-            if need > plain and need >= WIDE_RULE_NM:
-                need = ring_need(clearance, width, need, max(plain, floor_clr), box, code)
             r = need + width // 2 + safety
             isolation = need > plain and need >= WIDE_RULE_NM
             wide = box is not None and isolation
-            cells = done.get((r, wide))
+            cut = ring_free(clearance, r, box, code) if wide else None
+            ck = (r, wide, clearance if cut else None)
+            cells = done.get(ck)
             if cells is None:
                 cells = grid.rounded_box_cells(layer, box, r) if wide else cells_for(r)
-                done[(r, wide)] = cells
+                if cut:
+                    cells = cut(cells)
+                done[ck] = cells
             if isolation:
+                if cut:                            # the corridors keep the plain clearance
+                    r_plain = max(plain, floor_clr) + width // 2 + safety
+                    grid.mark(own, cells_for(r_plain), code if code > 0 and code in nets else BLOCKED)
                 grid.block(own, cells)             # no net of this map may come that close
             else:
                 grid.mark(own, cells, code if code > 0 and code in nets else BLOCKED)
@@ -2648,7 +2714,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     problem = RoutingProblem(grid, layers, owners, via_block, nets, connections, options,
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
                              pair_clearance=track_pair if rules is not None else None,
-                             ring_need=ring_need if rules is not None else None,
+                             ring_free=ring_free if rules is not None else None,
                              fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_strict=fanout_strict, fanout_array=fanout_array, fanout_array_cells=fanout_array_cells,
                              tied_pad_cells=tied_pad_cells, fanout_tie_only=fanout_tie_only,
                              stitch=stitch, existing=existing, via_guard=via_guard,

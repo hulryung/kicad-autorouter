@@ -158,6 +158,13 @@ class NativeOptions:
     conn_time_s: float = 20.0          # one connection's searches (a rip-up attempt: twice); 0 = no limit
     time_limit_s: float = 600.0        # the whole job (all passes); 0 = no limit. Rip-up on a big board
                                        # can otherwise grind for hours with the counter standing still
+    # A wall-clock cap on the whole job on top of time_limit_s, which benchmarks count in search work
+    # only: wide isolation rings, board reads and clean-up are not search work and once took a
+    # "10-minute" run four hours. None = automatic (3x the time limit, at least limit + 20 min;
+    # none without a time limit), 0 = no cap. wall_deadline is the absolute time (time.time()) set by
+    # the pipeline for every pass.
+    wall_limit_s: Optional[float] = None
+    wall_deadline: float = 0.0
     retry_failed: bool = True
     rip_up: bool = True                # rip up and reroute paths that block a failed connection
     rip_rounds: int = 8                # how many rip-up rounds over the failed connections
@@ -206,9 +213,9 @@ class RoutingProblem:
     # (key clearance, net code) -> the clearance between a net of that owner map and that net's tracks,
     # under the board's custom rules; None = the larger of the two net clearances
     pair_clearance: Optional[object] = None
-    # (key clearance, width, need, plain, box nm, net code) -> an isolation clearance cut back to
-    # end before the map's pads that already sit closer; None = no custom rules
-    ring_need: Optional[object] = None
+    # (key clearance, ring radius, box nm, net code) -> None or a filter taking an isolation ring's
+    # cells and dropping the corridors to the map's pads that already sit closer; None = no custom rules
+    ring_free: Optional[object] = None
     fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
     fanout_alt: Dict[int, List[int]] = field(default_factory=dict)   # exit cell -> the pad's other exits to try
     fanout_goals: Dict[int, Set[int]] = field(default_factory=dict)  # exit cell -> cells on the net's pour, within reach

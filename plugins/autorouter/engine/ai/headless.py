@@ -101,6 +101,7 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
                    "fanout_vias": job.fanout, "coupled_pairs": job.pairs, "stitching_vias": job.stitched,
                    "escalated": job.escalated, "passes": job.passes, "seconds": round(job.seconds, 1),
                    "timed_out": job.timed_out,
+                   "wall_capped": getattr(job, "wall_capped", False),
                    "pair_log": [list(x) for x in job.pair_log],
                    "failed_detail": job.failed_detail,
                    "length_matching": job.tuning_lines,

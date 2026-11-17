@@ -8,6 +8,7 @@ scoped to just those nets. That is what a designer does by hand for the last
 few stubborn connections, and what the AI assistant found by itself.
 """
 import copy
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
@@ -40,6 +41,7 @@ class JobResult:
     layers: list = field(default_factory=list)
     cancelled: bool = False
     timed_out: bool = False                                # the time limit cut a pass short
+    wall_capped: bool = False       # the job's wall-clock cap (NativeOptions.wall_limit_s) cut it short
     tuning: List[dict] = field(default_factory=list)       # length groups: target, lengths before/after
     tuning_lines: List[str] = field(default_factory=list)
     pair_exceptions: List[dict] = field(default_factory=list)   # pairs connected directly, and why
@@ -53,6 +55,19 @@ class JobResult:
 # budget, while a pass cut at 0.7 of a slower work rate left both to the
 # finer pass, which joined neither. 0.15 still gives that pass 90 s of 10 min.
 FIRST_PASS_SHARE = 0.85
+
+
+WALL_FACTOR = 3.0            # the automatic wall-clock cap: this times the time limit...
+WALL_MIN_EXTRA_S = 20 * 60.0  # ...and at least the limit plus this
+
+
+def wall_cap(options: NativeOptions) -> float:
+    """Seconds of wall clock the whole job may take (0 = no cap)."""
+    w = getattr(options, "wall_limit_s", None)
+    if w is not None:
+        return max(0.0, float(w))
+    limit = options.time_limit_s if options.time_limit_s and options.time_limit_s > 0 else 0.0
+    return max(limit * WALL_FACTOR, limit + WALL_MIN_EXTRA_S) if limit else 0.0
 
 
 def fine_options(options: NativeOptions, failed_nets: List[str], board) -> NativeOptions:
@@ -100,6 +115,14 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     paired_items: list = []                # ...of which the coupled pairs' lines
     job_started = native_astar.clock()        # the wall clock, or the search work done (benchmarks)
     limit = options.time_limit_s if options.time_limit_s and options.time_limit_s > 0 else 0.0
+    cap = wall_cap(options)
+    if cap:
+        options = copy.copy(options)
+        options.wall_deadline = time.time() + cap
+
+    def wall_over() -> bool:
+        """Past the job's wall-clock cap (see NativeOptions.wall_limit_s)?"""
+        return bool(cap) and time.time() > options.wall_deadline
 
     def job_items() -> list:
         """UUIDs of the items this job has on the board now (ripped ones gone)."""
@@ -218,6 +241,13 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         out.timed_out = True
         if status:
             status("Time limit reached: no finer second pass.")
+    elif wall_over():
+        time_for_more = False
+        out.timed_out = out.wall_capped = True
+        if status:
+            status(f"Wall-clock cap reached ({cap / 60:.0f} min): no finer second pass.")
+    if getattr(result, "wall_capped", False):
+        out.wall_capped = True
     if escalate and out.failed and not out.cancelled and time_for_more and options.pitch_mm > 0.04 \
             and not (cancelled and cancelled()):
         if status:
@@ -268,6 +298,12 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         except Exception as e:
             out.stats["pour_check_error"] = repr(e)
             apart = []
+        if apart and wall_over():
+            out.wall_capped = True
+            if status:
+                status(f"Wall-clock cap reached: {len(apart)} net(s) that came apart from their pour are left open.")
+            out.failed = sorted(set(out.failed) | set(apart))
+            apart = []
         if apart:
             if status:
                 status(f"{len(apart)} net(s) came apart from their pour at a route's end: routing them pad to pad...")
@@ -295,6 +331,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         pours = copy.deepcopy(options)
         pours.pours_only = True                       # same scope, no signal routing
         pours.time_limit_s = 0                        # the pour stages are bounded; always finish them
+        pours.wall_deadline = 0.0
         pours.movable_uuids = []                      # nothing is ripped up here: the vias are fixed copper again
         try:
             problem3, result3 = one_pass(pours)
@@ -317,6 +354,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         islands.stitch_vias = False
         islands.movable_uuids = []
         islands.time_limit_s = 0
+        islands.wall_deadline = 0.0
         if status:
             status("Checking repaired pours for isolated copper...")
         problem4, result4 = one_pass(islands)

@@ -16,6 +16,7 @@ Fixed copper (pads, pre-existing tracks, keepouts, escape stubs) is never
 ripped up; only paths this run created are.
 """
 import dataclasses
+import logging
 import math
 import time
 from array import array
@@ -26,6 +27,8 @@ import os
 from . import astar
 from .grid import BLOCKED, BODY_LANE, WIDE_NM, Grid, jog
 from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem
+
+logger = logging.getLogger(__name__)
 
 ProgressFn = Callable[[int, int, int, int, str], None]    # done, total, routed, failed, net name
 PathFn = Callable[[RoutedPath], None]
@@ -82,6 +85,7 @@ class RouteResult:
         self.seconds = 0.0
         self.cancelled = False
         self.timed_out = False                           # the time limit cut the run short
+        self.wall_capped = False                         # ...the job's wall-clock cap did
         self.pair_exceptions: List[dict] = []            # pairs connected directly instead of coupled, and why
         self.direct_links = 0                            # connections joined pad to pad before the search
 
@@ -763,36 +767,41 @@ class Router:
     def _ringed(self, key, net) -> bool:
         """Does this net keep an isolation gap (a wide custom rule) from the
         nets of this owner map? Its rings are then cut back per piece."""
-        if self.p.ring_need is None:
+        if self.p.ring_free is None:
             return False
         need = self._pair_clr(key[1], net)
         return need >= WIDE_NM and need > max(key[1], net.rules.clearance)
 
     def _pieces(self, key, net, rp, ringed: bool):
         """(kind, cells) of a path's copper grown for one owner map. An
-        isolation ring stops a cell short of a pad of the map's nets that
-        already sits closer (extract.ring_need), as the fixed copper's do."""
+        isolation ring opens toward the map's pads that already sit closer
+        (extract.ring_free), as the fixed copper's do; there the plain
+        clearance still holds."""
         grid, p = self.grid, self.p
         width, clearance = key
-        need = self._pair_clr(clearance, net)
-        plain = max(clearance, net.rules.clearance)
+        grow = self._pair_clr(clearance, net) + width // 2 + p.safety
+        plain = max(clearance, net.rules.clearance) + width // 2 + p.safety
         for seg in rp.segments:
             layer, x1, y1, x2, y2 = seg[:5]
             seg_w = seg[5] if len(seg) > 5 else rp.width
-            n = need
+            h = seg_w // 2
+            piece = grid.segment_cells(layer, x1, y1, x2, y2, h + grow)
             if ringed:
-                h = seg_w // 2
-                n = p.ring_need(clearance, width, need, plain,
-                                (min(x1, x2) - h, min(y1, y2) - h, max(x1, x2) + h, max(y1, y2) + h), net.code)
-            yield "seg", grid.segment_cells(layer, x1, y1, x2, y2, seg_w // 2 + n + width // 2 + p.safety)
+                cut = p.ring_free(clearance, h + grow,
+                                  (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)), net.code)
+                if cut:
+                    yield "seg", grid.segment_cells(layer, x1, y1, x2, y2, h + plain)
+                    piece = cut(piece)
+            yield "seg", piece
+        h = rp.via_diameter // 2
         for x, y in rp.vias:
-            n = need
-            if ringed:
-                h = rp.via_diameter // 2
-                n = p.ring_need(clearance, width, need, plain, (x - h, y - h, x + h, y + h), net.code)
-            r_via = rp.via_diameter // 2 + n + width // 2 + p.safety
+            cut = p.ring_free(clearance, h + grow, (x, y, x, y), net.code) if ringed else None
             for layer in range(grid.layers):
-                yield "via", grid.disc_cells(layer, x, y, r_via)
+                piece = grid.disc_cells(layer, x, y, h + grow)
+                if cut:
+                    yield "via", grid.disc_cells(layer, x, y, h + plain)
+                    piece = cut(piece)
+                yield "via", piece
 
     def _pair_clr(self, key_clr: int, net) -> int:
         """The clearance the nets of an owner map (by its key clearance) keep
@@ -2870,9 +2879,19 @@ class Router:
 
         deadline = clock_started + opts.time_limit_s if opts.time_limit_s and opts.time_limit_s > 0 else None
 
+        wall_deadline = getattr(opts, "wall_deadline", 0.0) or 0.0
+
         def late():
             if deadline is not None and astar.clock() > deadline:
                 result.timed_out = True
+                return True
+            if wall_deadline and time.time() > wall_deadline:
+                # the job's wall-clock cap: the work clock (benchmarks) does
+                # not count board work such as claiming isolation rings
+                if not result.timed_out:
+                    logger.warning("wall-clock cap reached: the routing pass stops here")
+                result.timed_out = True
+                result.wall_capped = True
                 return True
             return False
 

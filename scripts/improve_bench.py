@@ -403,6 +403,10 @@ def main():
     ap.add_argument("--work-rate", type=float, default=WORK_RATE,
                     help="with --time-limit: the limits count search work at this many A* expansions per second "
                     "instead of the wall clock, so a busy or slower machine gives the same result (0 = wall clock)")
+    ap.add_argument("--wall-cap", type=float, default=None,
+                    help="with --time-limit: stop the job after this many wall-clock minutes (default: the "
+                    "router's automatic cap, 3x the limit and at least limit + 20; 0 = none, for runs that "
+                    "must not depend on the machine)")
     ap.add_argument("--no-images", action="store_true")
     ap.add_argument("--focus", default="", help="extra close-ups: x,y[,half];x,y ... in mm")
     ap.add_argument("--no-creepage", action="store_true", help="leave creepage constraints out of the DRC "
@@ -488,6 +492,8 @@ def main():
         setattr(o, k, json.loads(v))          # quick experiments: AUTOROUTER_BENCH_SET=protect_groups=false
     if args.time_limit > 0:
         o.time_limit_s = args.time_limit * 60.0     # the dialog's limits: the job's, the second pass's, each connection's
+        if args.wall_cap is not None:
+            o.wall_limit_s = args.wall_cap * 60.0
     else:
         o.time_limit_s = 0         # same input, same result: no wall-clock cut-offs in a benchmark
         o.fine_budget_s = 0
@@ -604,6 +610,7 @@ def main():
         "post_route": {k: job.stats.get(k) for k in ("trimmed", "tiny_joins_snapped", "dangling_vias_removed",
                                                        "power_widened", "islands_joined")},
         "route_seconds": round(seconds, 1),
+        "wall_capped": bool(getattr(job, "wall_capped", False)),
         "search_work": _search_work(),
         "stages": stages,
         "unconnected_after": unconnected,
