@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.5.7 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.7)
+**Current release:** [0.5.8 — testing / pre-release](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.8)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -25,6 +25,17 @@ service or AI account is required.
 | Custom design rules | Clearance rules from the board's `.kicad_dru` (net class, net name and footprint conditions): an 8 mm HV-to-logic gap is kept while routing (cut back where the placement already puts pads closer, so they stay reachable), a fine-pitch part's relief lets its pins be reached. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.8
+
+- A job no longer runs for hours past its time limit. A wall-clock cap (3x
+  the limit, at least the limit plus 20 minutes) stops the routing, keeps
+  what is routed, skips the finer second pass and says so in the log. A
+  "10-minute" job on a board with 8 mm isolation rules had taken four hours,
+  as the board work there is not counted by the limit.
+- Isolation rings open only toward the pads the placement already puts
+  inside the gap (a corridor behind each pad, never closer to the high
+  voltage side than the pad), instead of shrinking the whole ring.
 
 ### New in 0.5.7
 
@@ -165,8 +176,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.5.7.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.7),
+Download `kicad-autorouter-0.5.8.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.8),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -178,7 +189,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The optional AI assistant requires one of: an authenticated `codex` or `claude`
   CLI, or the `anthropic` / `openai` package in KiCad's Python with an API key.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.5.7 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.8 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약
