@@ -12,6 +12,7 @@ import pcbnew
 import logging
 
 from . import dru
+from . import watchdog
 from .grid import BLOCKED, BODY_LANE, Grid, jog
 from .problem import (ExistingPath, Cluster, Connection, LayerInfo, NativeOptions, NetInfo, NetRules,
                       RoutedPath, RoutingProblem, SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS,
@@ -815,7 +816,14 @@ def _main_pad_components(board, conn) -> Dict[int, Set[Tuple[int, int, int]]]:
 
 def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     t0 = time.time()
-    say = status or (lambda text: None)
+    shown = status or (lambda text: None)
+
+    def say(text: str) -> None:
+        # each step is a watchdog stage: timed, its stack logged if it stalls,
+        # and stopped (Overrun) past the job's hard deadline
+        watchdog.stage("board read: " + text)
+        watchdog.check()
+        shown(text)
     pitch = max(10_000, int(round(options.pitch_mm * 1_000_000)))
     layers = copper_layers(board, options)
     if not layers:
@@ -1197,12 +1205,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         return keep
 
     def claim(layer: int, code: int, cells_for, own_clr: Optional[int] = None, item=None, floor_clr: int = 0,
-              box=None) -> None:
+              box=None, exact: bool = False) -> None:
         """cells_for(r) -> cells; one radius per owner map. item: the obstacle
         as the custom rules see it (then the rules' clearance replaces the net
         classes', floor_clr kept as a minimum: a hole's clearance). box: the
         obstacle's bounding box, rasterized by row spans when a rule's
-        clearance is wide (isolation gaps of millimetres)."""
+        clearance is wide (isolation gaps of millimetres); exact: cells_for
+        is fast at any radius (a straight track's capsule), so the box only
+        places the ring's per-direction cut."""
         if own_clr is None:
             own_clr = clearance_of(code)
         done: Dict[Tuple[int, bool], List[int]] = {}       # maps of the same radius share the cells
@@ -1216,7 +1226,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             ck = (r, wide, clearance if cut else None)
             cells = done.get(ck)
             if cells is None:
-                cells = grid.rounded_box_cells(layer, box, r) if wide else cells_for(r)
+                cells = grid.rounded_box_cells(layer, box, r) if wide and not exact else cells_for(r)
                 if cut:
                     cells = cut(cells)
                 done[ck] = cells
@@ -1366,7 +1376,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     existing_vias: Dict[int, List[Tuple[int, int]]] = {}     # net code -> via centres, for idempotent pours
     movable: Dict[int, List] = {}      # shove mode: net code -> unlocked tracks and vias the router may move
     fixed_tracks: Dict[int, List] = {} # ...and the locked ones of those nets (they still join pads)
-    for item in board.GetTracks():
+    for n_item, item in enumerate(board.GetTracks()):
+        if n_item % 200 == 0:
+            watchdog.check()
         code = item.GetNetCode()
         cls = item.GetClass()
         if cls == "PCB_VIA":
@@ -1418,10 +1430,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             add_copper(li, shape, code if code in nets else 0, item_clearance(item, item.GetLayer(), code), box, t_item)
             if is_movable:
                 continue
-            claim(li, code, lambda r, shape=shape, box=box, li=li:
-                  grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
-                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)),
-                  item_clearance(item, item.GetLayer(), code), t_item)
+            if cls == "PCB_TRACK":
+                # a straight track: its capsule in Python, not a KiCad
+                # collision call per cell (a routed board read back with
+                # 8 mm isolation rings once spent 15 minutes here)
+                a, b, hw = item.GetStart(), item.GetEnd(), item.GetWidth() // 2
+                claim(li, code, lambda r, li=li, a=a, b=b, hw=hw:
+                      grid.segment_cells(li, a.x, a.y, b.x, b.y, hw + r),
+                      item_clearance(item, item.GetLayer(), code), t_item, box=box, exact=True)
+            else:
+                claim(li, code, lambda r, shape=shape, box=box, li=li:
+                      grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
+                                       lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)),
+                      item_clearance(item, item.GetLayer(), code), t_item, box=box)
 
     # Copper graphics and text (board and footprint level): netless obstacles.
     say("Rasterizing copper graphics...")

@@ -197,9 +197,31 @@ class Grid:
         return out
 
     def disc_cells(self, layer: int, x: int, y: int, r: int) -> List[int]:
+        """Cells whose centre is within r of (x, y), by row spans: the same
+        cells as the per-cell test (integer square roots), without a Python
+        call per cell (an 8 mm isolation disc is 25 000 cells)."""
+        x, y, r = int(x), int(y), int(r)
+        if r < 0:
+            return SpanCells()
+        p, ox, oy = self.pitch, self.ox, self.oy
+        cy0 = max(0, -((oy - (y - r)) // p))           # ceil((y - r - oy) / p)
+        cy1 = min(self.h - 1, (y + r - oy) // p)
+        cx_lo, cx_hi = 0, self.w - 1
+        base = layer * self.plane
         r2 = r * r
-        return self.cells_where(layer, (x - r, y - r, x + r, y + r),
-                                lambda px, py: (px - x) ** 2 + (py - y) ** 2 <= r2)
+        out = SpanCells()
+        for cy in range(cy0, cy1 + 1):
+            dy = oy + cy * p - y
+            d = r2 - dy * dy
+            if d < 0:
+                continue
+            half = math.isqrt(d)
+            cx0 = max(cx_lo, -((ox - (x - half)) // p))
+            cx1 = min(cx_hi, (x + half - ox) // p)
+            if cx1 >= cx0:
+                row = base + cy * self.w
+                out.add_span(row + cx0, row + cx1 + 1)
+        return out
 
     def segment_cells(self, layer: int, x1: int, y1: int, x2: int, y2: int, r: int) -> List[int]:
         """Cells within r of the segment (a track of width 2r around its centreline)."""

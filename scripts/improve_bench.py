@@ -500,6 +500,16 @@ def main():
         o.conn_time_s = 0
     stages = []
     t0 = time.time()
+    from autorouter.engine.native import pipeline as _pl
+    cap = _pl.wall_cap(o)
+    if cap:
+        # the last resort, if even the job's own hard stop (cap + grace) does
+        # not end it: every thread's stack to the log, and the process exits
+        import faulthandler
+        hard = cap + _pl.post_cap_grace(cap) + 15 * 60.0
+        faulthandler.dump_traceback_later(hard, exit=True)
+        print(f"  wall-clock cap {cap / 60:.0f} min, hard stop {(cap + _pl.post_cap_grace(cap)) / 60:.0f} min, "
+              f"process killed after {hard / 60:.0f} min", flush=True)
 
     def status(text):
         stages.append((round(time.time() - t0, 1), text))
@@ -611,6 +621,10 @@ def main():
                                                        "power_widened", "islands_joined")},
         "route_seconds": round(seconds, 1),
         "wall_capped": bool(getattr(job, "wall_capped", False)),
+        # steps of 60 s or more, the stalls the watchdog caught (with where), a hard stop
+        "slow_stages": job.stats.get("slow_stages", [])[:15],
+        "stalls": job.stats.get("stalls", [])[:30],
+        "overrun": job.stats.get("overrun_passes", []),
         "search_work": _search_work(),
         "stages": stages,
         "unconnected_after": unconnected,
@@ -674,7 +688,9 @@ def main():
     print(json.dumps({k: metrics[k] for k in ("routed", "open_nets", "unconnected_after", "drc_errors", "rule_errors",
                                               "dangling", "acute_corners",
                                               "off_45", "doubled_back", "length_mm", "vias", "route_seconds",
-                                              "escape_side_agreement")}), flush=True)
+                                              "escape_side_agreement", "wall_capped", "overrun")}), flush=True)
+    if metrics["slow_stages"]:
+        print("slow steps: " + "; ".join(f"{n} {sec:.0f}s" for n, sec in metrics["slow_stages"][:8]), flush=True)
     if intent:
         print(json.dumps({"impedance_width_ok_pct": intent["impedance_width_ok_pct"],
                           "length_groups_ok": intent["length_groups_ok"],

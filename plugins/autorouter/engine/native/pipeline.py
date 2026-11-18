@@ -15,6 +15,7 @@ from typing import Callable, List, Optional
 
 import pcbnew
 
+from . import watchdog
 from . import apply as native_apply, astar as native_astar, extract as native_extract, router as native_router, tuning as native_tuning
 from .problem import NativeOptions, SCOPE_SELECTION
 
@@ -59,6 +60,15 @@ FIRST_PASS_SHARE = 0.85
 
 WALL_FACTOR = 3.0            # the automatic wall-clock cap: this times the time limit...
 WALL_MIN_EXTRA_S = 20 * 60.0  # ...and at least the limit plus this
+# Past the cap the pour passes still run (a pad without its plane via is an
+# open connection), within this grace; then the job stops hard: a board read
+# or pour stage still going is cut off (watchdog.Overrun) and reported.
+POST_CAP_SHARE = 0.2
+POST_CAP_MIN_S = 5 * 60.0
+
+
+def post_cap_grace(cap: float) -> float:
+    return max(POST_CAP_MIN_S, POST_CAP_SHARE * cap) if cap else 0.0
 
 
 def wall_cap(options: NativeOptions) -> float:
@@ -97,6 +107,35 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
 def run_job(board, options: NativeOptions, status=None, progress=None, on_path=None, on_remove=None,
             cancelled: Optional[Callable[[], bool]] = None, escalate: bool = True,
             apply_paths: bool = True, extract_fn=None, on_layers=None, placed=None, on_board=None) -> JobResult:
+    """The job under a watchdog (see watchdog.py): its steps timed, a step
+    that stalls reported with where it is, and a hard stop at the wall cap
+    plus the pour passes' grace. The slow steps land in stats["slow_stages"]
+    ([name, seconds]) and stats["stalls"] ([name, seconds, where])."""
+    cap = wall_cap(options)
+    hard = time.time() + cap + post_cap_grace(cap) if cap else 0.0
+    w = watchdog.start(status, hard_deadline=hard)
+    try:
+        out = _run_job(board, options, status, progress, on_path, on_remove, cancelled, escalate,
+                       apply_paths, extract_fn, on_layers, placed, on_board)
+    finally:
+        watchdog.stop(w)
+    out.stats["slow_stages"] = [list(t) for t in w.slow()]
+    out.stats["stalls"] = [[n, round(sec), where] for n, sec, where in w.stalls]
+    if w.overrun:
+        out.stats["overrun"] = w.overrun
+    return out
+
+
+def _overrun(out, e, status, what: str) -> None:
+    """A pass cut off at the job's hard deadline: keep what the job has."""
+    out.timed_out = out.wall_capped = True
+    out.stats.setdefault("overrun_passes", []).append(what)
+    if status:
+        status(f"Hard stop: {what} cut off past the wall-clock cap and its grace ({e}).")
+
+
+def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove, cancelled, escalate,
+             apply_paths, extract_fn, on_layers, placed, on_board) -> JobResult:
     """The whole job, in the order a designer works:
       1. signals at the normal grid (pour vias held back);
       2. a finer second pass on what is still open;
@@ -212,7 +251,11 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         # better with the same minutes on what is still open
         share = FIRST_PASS_SHARE if escalate and options.pitch_mm > 0.04 else 1.0
         first.time_limit_s = max(1.0, remaining() * share)
-    problem, result = one_pass(first)
+    try:
+        problem, result = one_pass(first)
+    except watchdog.Overrun as e:
+        _overrun(out, e, status, "the routing pass")
+        return out
     if problem is None:
         return out
     out.layers = problem.layers
@@ -267,6 +310,9 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             fine.time_limit_s = budget or 0
         try:
             problem2, result2 = one_pass(fine)
+        except watchdog.Overrun as e:
+            _overrun(out, e, status, "the finer second pass")
+            problem2 = None
         except Exception as e:
             out.stats["escalation_error"] = str(e)
             problem2 = None
@@ -315,6 +361,9 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             again.time_limit_s = max(1.0, min(60.0, remaining())) if limit else 60.0
             try:
                 problem5, result5 = one_pass(again)
+            except watchdog.Overrun as e:
+                _overrun(out, e, status, "the pour re-route")
+                problem5 = None
             except Exception as e:
                 out.stats["pour_check_error"] = repr(e)
                 problem5 = None
@@ -330,11 +379,14 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
             status("Pour nets: fanout vias, ties and stitching in the remaining room...")
         pours = copy.deepcopy(options)
         pours.pours_only = True                       # same scope, no signal routing
-        pours.time_limit_s = 0                        # the pour stages are bounded; always finish them
+        pours.time_limit_s = 0                        # the pour stages run on past the cap, to the hard stop
         pours.wall_deadline = 0.0
         pours.movable_uuids = []                      # nothing is ripped up here: the vias are fixed copper again
         try:
             problem3, result3 = one_pass(pours)
+        except watchdog.Overrun as e:
+            _overrun(out, e, status, "the pour pass")
+            problem3 = None
         except Exception as e:
             out.stats["pour_error"] = str(e)
             problem3 = None
@@ -355,9 +407,17 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         islands.movable_uuids = []
         islands.time_limit_s = 0
         islands.wall_deadline = 0.0
-        if status:
-            status("Checking repaired pours for isolated copper...")
-        problem4, result4 = one_pass(islands)
+        if watchdog.overdue():
+            problem4 = None
+            _overrun(out, "no time left", status, "the pour island check")
+        else:
+            if status:
+                status("Checking repaired pours for isolated copper...")
+            try:
+                problem4, result4 = one_pass(islands)
+            except watchdog.Overrun as e:
+                _overrun(out, e, status, "the pour island check")
+                problem4 = None
         if problem4 is not None:
             out.stitched += result4.stitched
             out.seconds += result4.seconds
@@ -365,8 +425,10 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         # SWIG wrappers do not compare by item: tell the ripped-up ones apart by UUID
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
         live = [t for t in added if str(t.m_Uuid.AsString()) not in gone]
+        watchdog.stage("clean-up of the copper")
         out.stats.update(finish_copper(board, live, options, cancelled))
     if apply_paths and not (cancelled and cancelled()):
+        watchdog.stage("length tuning")
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
             out.tuning, out.tuning_lines = report.groups, report.lines()

@@ -1032,6 +1032,9 @@ class AutorouterDialog(wx.Dialog):
         if getattr(result, "wall_capped", False):
             text = (f"Wall-clock cap reached (the job took far longer than its time limit): "
                     f"{result.routed} connections routed in {result.seconds:.0f}s")
+        stats = getattr(result, "stats", None) or {}
+        if stats.get("overrun_passes"):
+            text += f" (hard stop past the cap: {', '.join(stats['overrun_passes'])} cut off)"
         if result.escalated:
             text += f" ({result.escalated} on the finer second pass)"
         if result.fanout:

@@ -232,7 +232,12 @@ A hard wall-clock cap backs it up: at 3x the limit (and at least the limit
 plus 20 minutes) the routing stops, keeps what it has routed, skips the finer
 second pass and says so in the log. Boards with wide isolation rules spend
 most of their time outside the searches, which the limit alone does not
-count in benchmarks.
+count in benchmarks. The pour passes still run after the cap, within a grace
+of a fifth of the cap (at least 5 minutes); past that the job stops hard and
+the log names the pass it cut off. Any step that runs two minutes or more is
+reported in the log while it is still going ("Slow step: ..."), with where it
+is, and the job's stats list the slow steps, so a stall shows up early instead
+of at the end.
 **Cancel** stops the run with partial work visible.
 
 Board edits participate in KiCad's action-plugin undo. An optional subsequent

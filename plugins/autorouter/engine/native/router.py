@@ -25,6 +25,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 import os
 
 from . import astar
+from . import watchdog
 from .grid import BLOCKED, BODY_LANE, WIDE_NM, Grid, jog
 from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem
 
@@ -2874,6 +2875,7 @@ class Router:
             # the stage goes in front of the net name so a status line (or the
             # dialog log) shows which phase of the run is working, not only
             # the counter that stands still through the rip-up rounds
+            watchdog.stage(f"{stage}{name}")       # timed; its stack logged if it stalls
             if progress:
                 progress(done, total, len(self.paths), len(failed), f"{stage}{name}")
 
@@ -2899,6 +2901,11 @@ class Router:
 
         def halted():
             return bool(user_cancel and user_cancel())
+
+        def pour_halt():
+            # the pour stages are not cut by the time limit, only by the
+            # user or the job's hard stop (the wall cap plus its grace)
+            return halted() or watchdog.overdue()
 
         def stop():
             return halted() or late()
@@ -3118,9 +3125,9 @@ class Router:
                 members = cluster.cells & self.p.fanout_strict
                 for cell in members:
                     strict_groups[(code, cell)] = members
-        if not halted():
+        if not pour_halt():
             for i, (code, cell) in enumerate(wanted):
-                if halted():
+                if pour_halt():
                     break
                 if cell in fanned:
                     continue
@@ -3171,7 +3178,7 @@ class Router:
         # a stitch placed before). The rest of the plane is left alone, as
         # a designer leaves it; a blanket of vias is not artwork.
         stitch_paths: List[RoutedPath] = []
-        if self.p.stitch and not halted():
+        if self.p.stitch and not pour_halt():
             reach = int(self.opts.stitch_pitch_mm * 1_000_000 * 0.75)      # beyond the candidate grid's half diagonal
             changes: List[Tuple[int, int]] = []                              # where the signals change layer
             pour_vias: Dict[int, List[Tuple[int, int]]] = {}                 # pour net -> its vias so far
@@ -3214,7 +3221,7 @@ class Router:
                 return best
 
             for code, spots in self.p.stitch.items():
-                if halted():
+                if pour_halt():
                     break
                 # the spots closest to a layer change first: the via lands
                 # beside the change, and the spots around it are then covered
@@ -3239,7 +3246,7 @@ class Router:
 
         # A filled island needs a connection even with no nearby signal via.
         for code, spots in self.p.island_stitch:
-            if halted():
+            if pour_halt():
                 break
             for cx, cy in spots:
                 rp = self._stitch_via(code, cx, cy)
@@ -3252,11 +3259,11 @@ class Router:
         # 6. pour-net pads that got no via: a short track to the nearest
         # copper of their net (a via, another pad, a stub) instead
         tied_paths: List[RoutedPath] = []
-        if not halted():
+        if not pour_halt():
             for code, cell in wanted:
                 if cell in fanned:
                     continue
-                if halted():
+                if pour_halt():
                     break
                 report(self.p.nets[code].name, "tying pour pads: ")
                 for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
