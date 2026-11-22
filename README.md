@@ -337,7 +337,10 @@ scope remains part of the obstacle model.
 
 **Move existing tracks** allows eligible unlocked copper to be ripped up and
 rerouted to make space. It is not KiCad's interactive push-and-shove engine;
-locked copper remains fixed.
+locked copper remains fixed. In a scoped job, other nets' tracks move only
+within 5 mm of the scope's nets and footprints (`shove_margin_mm`, 0 for the
+whole board), and coupled pairs and length-tuned nets outside the scope keep
+their tracks.
 
 ## Use with LCSC Manager
 

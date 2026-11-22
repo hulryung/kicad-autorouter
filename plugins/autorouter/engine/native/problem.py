@@ -141,6 +141,9 @@ class NativeOptions:
     # 8 open nets must not lengthen a tuned pair it was never asked about);
     # plain signals outside the scope stay movable, to make room
     scope_locks_pairs: bool = True
+    # ...and moves another net's track only within this many mm of the
+    # scope's pads (0: anywhere on the board)
+    shove_margin_mm: float = 5.0
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     # ...only where the pour on the pad's layer does not reach it, or reaches it on an island with no
     # through-hole pin or via of the net (a designer lets the pour join the pads it covers; the pour

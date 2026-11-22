@@ -1029,6 +1029,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # shove mode in a scoped job: the pairs and length-group nets outside the
     # scope keep their tracks (read as locked copper, not movable paths)
     scope_frozen: Set[int] = _scope_frozen(board, nets, options) if options.shove else set()
+    region = _shove_region(board, nets, options)       # ...and the other nets' tracks far from it
+    far_kept = 0
     # The board's custom clearance rules (.kicad_dru): nets the rules treat
     # differently (an HV net 8 mm from logic, the nets of a fine-pitch HV part
     # 0.14 mm apart) get owner maps of their own, told apart by a clearance a
@@ -1494,7 +1496,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         # exact-shape copper index so pad escapes are planned around it
         is_movable = False
         if options.shove and code in nets and nets[code].route and cls in ("PCB_TRACK", "PCB_VIA"):
-            if item.IsLocked() or code in scope_frozen or (locked_items and str(item.m_Uuid.AsString()) in locked_items):
+            far = False
+            if region is not None and code not in region[0] and not item.IsLocked():
+                bb = item.GetBoundingBox()
+                far = not region[1]((bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()))
+                far_kept += far
+            if far or item.IsLocked() or code in scope_frozen or \
+                    (locked_items and str(item.m_Uuid.AsString()) in locked_items):
                 fixed_tracks.setdefault(code, []).append(item)
             else:
                 movable.setdefault(code, []).append(item)
@@ -3156,10 +3164,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         problem.stitch = {}
         problem.island_stitch = island_stitch or []
     problem.escape_sides = problem_escape_sides
+    if far_kept:
+        say(f"Shove: {far_kept} unlocked tracks and vias more than {options.shove_margin_mm:g} mm from the scope stay put")
     problem.stats = {"groups": dict(Counter(n.group for n in nets.values() if n.route)),
                      "net_groups": {n.name: n.group for n in nets.values() if n.route},
                      "extract_seconds": time.time() - t0, "cells": grid.size,
-                     "nets": len(nets), "connections": len(connections), "movable_paths": len(existing),
+                     "nets": len(nets), "connections": len(connections), "movable_paths": len(existing), "shove_far_kept": far_kept,
                      "all_connections": all_connections, "owner_maps": len(owners),
                      "fanout_vias": len(fanout), "stranded_pads": stranded_pads, "plane_nets": len(plane_codes), "stitch_spots": sum(len(v) for v in stitch.values()),
                      "escapes": dict(escape_stats),
@@ -3458,14 +3468,8 @@ def _movable_pieces(pads, items, fixed, layer_of: Dict[int, int]) -> List[dict]:
     return out
 
 
-def _scope_frozen(board, nets: Dict[int, NetInfo], options: NativeOptions) -> Set[int]:
-    """In a scoped job, the routed nets outside the scope whose tracks shove
-    mode must not move: coupled pairs (both nets out of scope), nets of the
-    pair routing group, and length-group nets. A net is in scope when its
-    name is, or one of its pads is on a footprint in scope (selected, or on
-    a chosen sheet), as in_scope judges connections."""
-    if options.scope == SCOPE_BOARD or options.pours_only or not getattr(options, "scope_locks_pairs", True):
-        return set()
+def _scoped_codes(board, nets: Dict[int, NetInfo], options: NativeOptions) -> Tuple[Set[int], Set[str]]:
+    """(net codes in scope, footprint references in scope) of a scoped job."""
     refs: Set[str] = set(options.scope_refs)
     names: Set[str] = set(options.scope_nets)
     if options.scope == SCOPE_SHEETS:
@@ -3477,6 +3481,63 @@ def _scope_frozen(board, nets: Dict[int, NetInfo], options: NativeOptions) -> Se
         for fp in board.GetFootprints():
             if fp.GetReference() in refs:
                 scoped.update(p.GetNetCode() for p in fp.Pads() if p.GetNetCode() in nets)
+    return scoped, refs
+
+
+REGION_BUCKET_NM = 1_000_000
+
+
+def _shove_region(board, nets: Dict[int, NetInfo], options: NativeOptions):
+    """Shove mode in a scoped job: which out-of-scope tracks may move.
+
+    Returns (net codes in scope, test(box) -> bool), or None for no limit. The
+    in-scope nets' tracks all move; another net's track moves only when it
+    comes within ``shove_margin_mm`` of the box of an in-scope net's pads
+    (its routes run there) or of a pad of the scope's footprints. Reading every unlocked track of a
+    9 000-track board as movable for a 12 x 8 mm job took two minutes and
+    gigabytes of claims; the far tracks are never in a scoped route's way."""
+    margin = int(round(getattr(options, "shove_margin_mm", 5.0) * 1e6))
+    if not options.shove or options.scope == SCOPE_BOARD or options.pours_only or margin <= 0:
+        return None
+    scoped, refs = _scoped_codes(board, nets, options)
+    b = REGION_BUCKET_NM
+    cells: Set[Tuple[int, int]] = set()
+    spans: Dict[int, List[int]] = {}        # routed in-scope net -> the box of its pads
+
+    def mark(x0, y0, x1, y1):
+        for i in range((x0 - margin) // b, (x1 + margin) // b + 1):
+            for j in range((y0 - margin) // b, (y1 + margin) // b + 1):
+                cells.add((i, j))
+    for fp in board.GetFootprints():
+        in_fp = fp.GetReference() in refs
+        for pad in fp.Pads():
+            code = pad.GetNetCode()
+            bb = pad.GetBoundingBox()
+            box = (bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom())
+            if in_fp:
+                mark(*box)
+            if code in scoped and code in nets and nets[code].route:
+                s = spans.get(code)
+                spans[code] = list(box) if s is None else \
+                    [min(s[0], box[0]), min(s[1], box[1]), max(s[2], box[2]), max(s[3], box[3])]
+    for box in spans.values():
+        mark(*box)              # the routes run between their pads: a track across that span is in the way
+
+    def near(box) -> bool:
+        x0, y0, x1, y1 = box
+        return any((i, j) in cells for i in range(x0 // b, x1 // b + 1) for j in range(y0 // b, y1 // b + 1))
+    return scoped, near
+
+
+def _scope_frozen(board, nets: Dict[int, NetInfo], options: NativeOptions) -> Set[int]:
+    """In a scoped job, the routed nets outside the scope whose tracks shove
+    mode must not move: coupled pairs (both nets out of scope), nets of the
+    pair routing group, and length-group nets. A net is in scope when its
+    name is, or one of its pads is on a footprint in scope (selected, or on
+    a chosen sheet), as in_scope judges connections."""
+    if options.scope == SCOPE_BOARD or options.pours_only or not getattr(options, "scope_locks_pairs", True):
+        return set()
+    scoped, _refs = _scoped_codes(board, nets, options)
     tuned = [pat for g in options.length_groups for pat in g.get("nets", [])]
     from .. import si
     out: Set[int] = set()

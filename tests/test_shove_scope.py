@@ -11,6 +11,10 @@
    for shove (not movable pieces), its lengths unchanged by the job; with
    scope_locks_pairs off they are movable again, and a whole-board job
    leaves them movable as before.
+3. Only the tracks near the scope move: a plain net's unlocked track
+   crossing the scope's route is movable, one 30 mm away stays put (a
+   9 000-track board read every unlocked track as movable for a 12 x 8 mm
+   job: two minutes, gigabytes); shove_margin_mm=0 moves them all again.
 
 Builds the boards in memory. Needs KiCad's Python; skips otherwise.
 
@@ -158,6 +162,31 @@ def pair_board():
     return board, nets
 
 
+def far_board():
+    """60 x 20 mm, 2 layers: SIG from top to bottom at x 15, NEAR's unlocked
+    track across it, FAR's unlocked track at x 45-55."""
+    board = pcbnew.BOARD()
+    ds = board.GetDesignSettings()
+    ds.m_NetSettings.GetDefaultNetclass().SetTrackWidth(int(0.2 * MM))
+    ds.m_NetSettings.GetDefaultNetclass().SetClearance(int(0.15 * MM))
+    nets = {}
+    for name in ("SIG", "NEAR", "FAR"):
+        nets[name] = pcbnew.NETINFO_ITEM(board, name)
+        board.Add(nets[name])
+    outline(board, 60, 20)
+    for ref, name, (a, b) in (("R1", "SIG", ((15, 3), (15, 17))), ("R2", "NEAR", ((5, 10), (25, 10))),
+                              ("R3", "FAR", ((45, 10), (55, 10)))):
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference(ref)
+        board.Add(fp)
+        add_pad(fp, 1, *a, nets[name])
+        add_pad(fp, 2, *b, nets[name])
+        if name != "SIG":
+            add_track(board, nets[name], pcbnew.F_Cu, a, b, 0.2)
+    board.BuildConnectivity()
+    return board, nets
+
+
 def new_tracks(board, code, before):
     return [t for t in board.GetTracks() if t.GetNetCode() == code and t.GetClass() == "PCB_TRACK"
             and str(t.m_Uuid.AsString()) not in before]
@@ -225,6 +254,18 @@ def main():
     check("scoped job: the pair outside the scope keeps its lengths", lengths(board, names) == start
           and after.get("USB_DN / USB_DP") == [start["USB_DN"], start["USB_DP"]],
           f"{start} -> {lengths(board, names)}, stats {after}")
+    for margin, far_moves in ((5.0, False), (0.0, True)):
+        board, nets = far_board()
+        opts = NativeOptions(pitch_mm=0.1, shove=True, scope=SCOPE_SELECTION, scope_nets=["SIG"],
+                             shove_margin_mm=margin)
+        problem = extract.extract(board, opts)
+        moving = {problem.nets[ex.path.net].name for ex in problem.existing}
+        check(f"margin {margin:g}: the near track is movable", "NEAR" in moving, str(moving))
+        check(f"margin {margin:g}: the far track {'moves' if far_moves else 'stays put'}",
+              ("FAR" in moving) == far_moves, str(moving))
+    board, nets = far_board()
+    job = pipeline.run_job(board, NativeOptions(pitch_mm=0.1, shove=True, scope=SCOPE_SELECTION, scope_nets=["SIG"]))
+    check("near/far: SIG is routed", not job.failed, str(job.failed))
     print("test_shove_scope: all passed")
 
 
