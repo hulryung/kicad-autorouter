@@ -159,6 +159,8 @@ class NativeOptions:
     plane_layer_cost: int = 8          # per straight cell (10) extra on another net's inner plane layer: a track
                                        # there cuts up the pour, so a designer uses the plane only as a last resort
     allow_vias: bool = True
+    via_in_small_pads: bool = False    # vias may be drilled into SMD pads smaller than via_in_pad_min_mm (fab fills them)
+    via_in_pad_min_mm: float = 1.2     # SMD pads with both sides at least this big (exposed/thermal pads) may hold vias
     flat_first: bool = True            # a route with vias is tried on one outer layer alone; the flat route wins when nearly direct
     max_expansions: int = 400_000
     fine_budget_s: Optional[float] = None   # the finer second pass's own time budget; None = 60 s + 20 s per
