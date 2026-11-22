@@ -812,9 +812,14 @@ class Router:
 
     def _layer_extra(self, code: int) -> List[int]:
         """Per layer, what a cell of track costs the net beyond its step:
-        an inner plane of another net is the last resort."""
+        an inner plane of another net is the last resort. A plane net's own
+        strays (pads its fill does not reach) run on the signal layers and
+        drop into the plane at the end: a track on the plane layer itself
+        would only cut the pour of another net over it there."""
         cost = self.opts.plane_layer_cost
-        return [cost if pn and pn != code else 0 for pn in self.plane_nets]
+        net = self.p.nets.get(code)
+        own = net is not None and not net.route
+        return [cost if pn and (pn != code or own) else 0 for pn in self.plane_nets]
 
     def _tight(self, code: int, i: int) -> bool:
         """Does the component holding initial cluster i hold a fine-pitch

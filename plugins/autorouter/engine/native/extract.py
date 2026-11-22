@@ -2327,6 +2327,179 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         big = max(areas)
         return polys, [i for i, a in enumerate(areas) if a * 4 >= big]
 
+    def _main_pieces(polys):
+        """The pieces of a polygon set that make a net's plane: those at least
+        a quarter the size of the largest (not a pocket the other net's pour
+        walls off, round one pin or via). None when it is empty. By size
+        alone: before the plane's first vias nothing is joined to it, and the
+        "main" pad component is any one pad."""
+        n = polys.OutlineCount()
+        if not n:
+            return None
+        areas = [abs(polys.Outline(i).Area()) for i in range(n)]
+        big = max(areas)
+        keep = [i for i in range(n) if areas[i] * 4 >= big]
+        if len(keep) == n:
+            return polys
+        out = pcbnew.SHAPE_POLY_SET()
+        for i in keep:
+            piece = pcbnew.SHAPE_POLY_SET(polys.Outline(i))
+            for hole in range(polys.HoleCount(i)):
+                piece.AddHole(polys.Hole(i, hole), 0)
+            out.Append(piece)
+        return out
+
+    pour_area_cache: Dict[Tuple[int, int], Optional[object]] = {}
+    board_zones = [z for z in board.Zones()]
+
+    def _erosion(z) -> int:
+        """How far in from its outline a zone's fill stays: its clearance
+        plus its minimum width."""
+        try:
+            return max(int(z.GetLocalClearance() or 0), 0) + max(int(z.GetMinThickness() or 0), 0)
+        except Exception:
+            return 0
+
+    def _pour_area(z, lid):
+        """Where the zone's pour can lie on a layer: its outline less the
+        fill (or, unfilled, the outline) of every zone of another net there
+        that takes priority over it, and less the keepouts that forbid fills.
+        A spot inside the outline but under a +12V corridor of priority 1
+        over a full-board +3V3 plane is +12V copper, whatever the +3V3
+        outline says. Pulled in by the fill's clearance and width, and only
+        the pieces at least a quarter the size of the largest (_main_pieces):
+        a pocket the foreign pour walls off is not the plane. One
+        SHAPE_POLY_SET; None when nothing is left, False when the polygon
+        work failed (the caller judges by the outline). Judged from the
+        outlines and the foreign fills, not from this zone's own fill: KiCad
+        drops every piece of a plane no via reaches yet, so before the
+        plane's first vias its own fill can be empty."""
+        key = (id(z), lid)
+        if key in pour_area_cache:
+            return pour_area_cache[key]
+        out = None
+        try:
+            area = pcbnew.SHAPE_POLY_SET(z.Outline())
+            for other in board_zones:
+                if other is z or not other.IsOnLayer(lid):
+                    continue
+                if other.GetIsRuleArea():
+                    if not other.GetDoNotAllowZoneFills():
+                        continue
+                    cut = other.Outline()
+                elif other.GetNetCode() == z.GetNetCode() or not other.HigherPriority(z):
+                    continue
+                else:
+                    cut = other.GetFilledPolysList(lid) if other.IsFilled() else None
+                    if cut is None or not cut.OutlineCount():
+                        cut = other.Outline()
+                if cut.OutlineCount() and cut.BBox().Intersects(area.BBox()):
+                    area.BooleanSubtract(pcbnew.SHAPE_POLY_SET(cut))
+            # a strip left between the foreign pour and the outline's edge,
+            # narrower than the fill's clearance plus its minimum width,
+            # never fills
+            erode = _erosion(z)
+            if erode > 0:
+                area.Inflate(-erode, pcbnew.CORNER_STRATEGY_ALLOW_ACUTE_CORNERS, 5_000)
+            out = _main_pieces(area)
+        except Exception:
+            out = False                              # judged by the outline alone
+        pour_area_cache[key] = out
+        return out
+
+    def _pour_reaches(zones, x: int, y: int, margin: int, skip_layers=()) -> bool:
+        """Does the net's own pour (_pour_area) come within margin of the
+        point on a layer of layer_of (other than skip_layers)? A spot inside
+        the zone's outline may still be under a higher-priority pour of
+        another net (a +12V corridor over a full-board +3V3 plane): a via
+        there lands in that net's fill, an island of its own."""
+        pt = pcbnew.VECTOR2I(x, y)
+        for z in zones:
+            for lid in z.GetLayerSet().CuStack():
+                if lid not in layer_of or layer_of[lid] in skip_layers:
+                    continue
+                fill = _pour_area(z, lid)
+                if fill is False:
+                    if _zone_covers(z, x, y, margin):
+                        return True
+                elif fill is not None and fill.Collide(pt, margin + _erosion(z)):
+                    return True             # (the margin as from the uneroded edge)
+        return False
+
+    def _pour_cluster(net, zones, strays) -> Optional[Cluster]:
+        """The net's own pour (_pour_area) on its routable layers near the
+        strays, as a cluster a stray's route may end in: the cells well
+        inside it (a via there lands on the pour) within a box round the
+        strays, and its nearest points to them, which are its anchors."""
+        inset = 350_000
+        found = []                                   # (layer index, fill)
+        for z in zones:
+            for lid in z.GetLayerSet().CuStack():
+                li = layer_of.get(lid)
+                if li is None or not layers[li].routable:
+                    continue
+                area = _pour_area(z, lid)
+                if area is None or area is False:
+                    continue
+                # where the zone is filled already, its fill's own edge: the
+                # area above is pulled in from the outline by the fill's
+                # clearance and width. Only the fill along that area: the
+                # board's fill may be stale, or hold just an island round a
+                # through-hole pin of the net inside the other net's pour
+                area = pcbnew.SHAPE_POLY_SET(area)
+                try:
+                    fill = z.GetFilledPolysList(lid) if z.IsFilled() else None
+                    if fill is not None and fill.OutlineCount():
+                        near = pcbnew.SHAPE_POLY_SET(area)
+                        near.Inflate(_erosion(z) + grid.pitch, pcbnew.CORNER_STRATEGY_ALLOW_ACUTE_CORNERS, 5_000)
+                        near.BooleanIntersection(pcbnew.SHAPE_POLY_SET(fill))
+                        if near.OutlineCount():
+                            area.BooleanAdd(near)
+                except Exception:
+                    pass
+                found.append((li, area))
+        if not found:
+            return None
+        points = [(grid.nm_x(ax), grid.nm_y(ay)) for i in strays for ax, ay in net.clusters[i].anchors]
+        if not points:
+            return None
+        anchors: List[Tuple[int, int]] = []
+        reach = 0
+        for li, fill in found:
+            for x, y in points:
+                near = pcbnew.VECTOR2I(0, 0)
+                try:
+                    d2 = fill.SquaredDistance(pcbnew.VECTOR2I(x, y), False, near)
+                except Exception:
+                    continue
+                reach = max(reach, int(math.sqrt(d2)))
+                a = (grid.cell_x(near.x), grid.cell_y(near.y))
+                if a not in anchors:
+                    anchors.append(a)
+        if not anchors:
+            return None
+        margin = reach + 3_000_000
+        box = pcbnew.SHAPE_POLY_SET()
+        box.NewOutline()
+        bx0, by0 = min(x for x, _ in points) - margin, min(y for _, y in points) - margin
+        bx1, by1 = max(x for x, _ in points) + margin, max(y for _, y in points) + margin
+        for x, y in ((bx0, by0), (bx1, by0), (bx1, by1), (bx0, by1)):
+            box.Append(x, y)
+        cells: Set[int] = set()
+        for li, fill in found:
+            part = pcbnew.SHAPE_POLY_SET(fill)
+            try:
+                part.BooleanIntersection(box)
+            except TypeError:
+                part.BooleanIntersection(box, pcbnew.SHAPE_POLY_SET.PM_FAST)
+            if not part.OutlineCount():
+                continue
+            for idx in _filled_goal_cells(grid, part, range(part.OutlineCount()), inset):
+                cells.add(li * grid.plane + idx)
+        if not cells:
+            return None
+        return Cluster(cells=cells, anchors=anchors)
+
     filled_goal_cells = {}
 
     def _plane_goals(code: int, pos, pl, filled: bool = False, reach_nm: int = 3_000_000) -> Set[int]:
@@ -2404,9 +2577,18 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 continue                          # through every layer already
             if not (zone_layers[code] - set(pl)):
                 continue                          # no plane on another layer to tie to
-            if not any(_zone_covers(z, pos.x, pos.y, 1_500_000) for z in plane_zones.get(code, ())
-                       if {layer_of[l] for l in z.GetLayerSet().CuStack() if l in layer_of} - set(pl)):
-                continue                          # the pour does not come under this pad
+            if tie == 2:
+                # a via stranded in an island of the pour: the search below
+                # bridges to the main fill, wherever the outline reaches
+                if not any(_zone_covers(z, pos.x, pos.y, 1_500_000) for z in plane_zones.get(code, ())
+                           if {layer_of[l] for l in z.GetLayerSet().CuStack() if l in layer_of} - set(pl)):
+                    continue
+            elif not _pour_reaches(plane_zones.get(code, ()), pos.x, pos.y, 1_500_000, skip_layers=set(pl)):
+                # the pour's own fill does not come under this pad (its
+                # outline may: another net's pour over it takes the spot,
+                # and a via there is an island); a plane net routes it as
+                # a stray to its pour instead
+                continue
             if options.fanout_only_unconnected and _pour_ties(pad):
                 continue                          # the pour on its own layer already connects it, through-hole pins or vias tie that pour
             exits = _pad_exits(code, pos)
@@ -2749,7 +2931,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             zones = pour_zones.get(code) if code not in user_skipped else None
             if not zones:
                 continue
-            covered = [any(_zone_covers(z, pp.x, pp.y, 1_500_000) for z in zones for pp in cluster_pads.get(i, []))
+            # reached by the net's own fill, not merely inside its outline: a
+            # higher-priority pour of another net over the spot leaves the
+            # pad's via an island there
+            covered = [any(_pour_reaches(zones, pp.x, pp.y, 1_500_000) for pp in cluster_pads.get(i, []))
                        for i in range(len(net.clusters))]
             for i, cl in enumerate(net.clusters):
                 # a piece of track or a via with no pad, inside the pour: the
@@ -2758,13 +2943,32 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 if i not in cluster_pads and any(_zone_covers(z, grid.nm_x(ax), grid.nm_y(ay)) for z in zones
                                                  for ax, ay in cl.anchors):
                     covered[i] = True
+            strays = [i for i in range(len(net.clusters)) if not covered[i]]
+            if strays and options.pour_goals and not options.shove and not options.pours_only:
+                # the net's own fill as a group of its own: a stray under
+                # another net's pour runs to the nearest piece of its pour
+                # (and drops a via into it) instead of to a far pad
+                pour = _pour_cluster(net, zones, strays)
+                if pour is not None:
+                    net.clusters.append(pour)
+                    covered.append(True)
+                    pour_joined[code] = len(cluster_index)
             if not any(covered):
                 continue
-            for i, cl in enumerate(net.clusters):
-                if covered[i]:
-                    continue
-                j = min((j for j in range(len(net.clusters)) if covered[j]), key=lambda j: dist(cl, net.clusters[j]))
-                connections.append(Connection(code, i, j, dist(cl, net.clusters[j]), 1, net.rules.width, rank=net.rank))
+            # the strays grown onto the covered groups nearest first (Prim):
+            # a stray next to another stray joins that one, so a group of
+            # them (a regulator's output caps) takes one run to the pour
+            tree = [j for j in range(len(net.clusters)) if covered[j]]
+            best_edge = {i: min(((dist(net.clusters[i], net.clusters[j]), j) for j in tree))
+                         for i in range(len(net.clusters)) if not covered[i]}
+            while best_edge:
+                i = min(best_edge, key=lambda x: best_edge[x])
+                d, j = best_edge.pop(i)
+                connections.append(Connection(code, i, j, d, 1, net.rules.width, rank=net.rank))
+                for m in best_edge:
+                    dm = dist(net.clusters[m], net.clusters[i])
+                    if dm < best_edge[m][0]:
+                        best_edge[m] = (dm, i)
             continue
         # Minimum spanning tree over clusters by nearest anchor distance (Prim).
         k = len(net.clusters)
