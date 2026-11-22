@@ -17,6 +17,7 @@ the larger of the two net-class clearances. The board's minimum clearance
 stays the floor.
 """
 import fnmatch
+import functools
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -39,7 +40,15 @@ class Unsupported(Exception):
 
 # ---- s-expressions -------------------------------------------------------------
 
+def _strip_comments(text: str) -> str:
+    """KiCad's rule files take a line whose first non-blank is '#' as a
+    comment. Left in, a comment such as "Net-(<ref>-*" opens a list that never
+    closes and every rule after it disappears into it."""
+    return re.sub(r"(?m)^[ \t]*#.*$", "", text)
+
+
 def _sexpr(text: str):
+    text = _strip_comments(text)
     tokens = re.findall(r'\(|\)|"(?:\\.|[^"\\])*"|[^\s()]+', text)
     stack: List[list] = [[]]
     for tok in tokens:
@@ -83,7 +92,10 @@ def _tokens(expr: str) -> List[str]:
     return out
 
 
+@functools.lru_cache(maxsize=None)
 def _wild(value: str, pattern: str) -> bool:
+    # memoised: a board's rule pairs ask the same (net, pattern) thousands of
+    # times (44 wildcard rules x 380 nets took minutes per pair table)
     return fnmatch.fnmatchcase(value, pattern) if any(c in pattern for c in "*?") else value == pattern
 
 
@@ -290,8 +302,16 @@ class ClearanceRules:
         return max([r.clearance for r in self.rules] + list(self.class_clearance.values()) + [self.floor])
 
 
+# why the last for_board() call found no usable rule in a file that has some
+# ("" when it read them, or when there is no file): the board read says so
+LAST_PROBLEM = ""
+
+
 def for_board(board) -> Optional[ClearanceRules]:
-    """The board's .kicad_dru next to its file (None when there is none or it holds no clearance rule)."""
+    """The board's .kicad_dru next to its file (None when there is none or it
+    holds no clearance rule; then LAST_PROBLEM says why, if the file has rules)."""
+    global LAST_PROBLEM
+    LAST_PROBLEM = ""
     import os
     name = board.GetFileName()
     if not name:
@@ -305,4 +325,11 @@ def for_board(board) -> Optional[ClearanceRules]:
     classes = {str(n): int(c.GetClearance()) for n, c in ns.GetNetclasses().items()}
     classes["Default"] = int(ns.GetDefaultNetclass().GetClearance())
     rules = ClearanceRules.parse(text, classes, int(board.GetDesignSettings().m_MinClearance))
-    return rules if rules.rules else None
+    if not rules.rules:
+        written = len(re.findall(r"\(\s*rule\b", _strip_comments(text)))
+        if written:
+            LAST_PROBLEM = (f"{os.path.basename(path)} has {written} rule(s) but the router could read none "
+                            f"({'; '.join(rules.skipped[:3]) or 'unbalanced parentheses?'}): "
+                            f"net-class clearances only")
+        return None
+    return rules

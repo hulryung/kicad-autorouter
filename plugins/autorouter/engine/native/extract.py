@@ -1009,9 +1009,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     if getattr(options, "custom_rules", True):
         try:
             rules = dru.for_board(board)
-        except Exception:
+        except Exception as e:
             logger.exception("Reading the custom rules failed")
+            say(f"Custom rules: reading the .kicad_dru failed ({e}): net-class clearances only")
             rules = None
+        if rules is None and dru.LAST_PROBLEM:
+            # never silently: an isolation rule lost here is a safety gap on the board
+            logger.warning("%s", dru.LAST_PROBLEM)
+            say("Custom rules: " + dru.LAST_PROBLEM)
     net_item: Dict[int, "dru.Item"] = {}
     if rules is not None:
         for code, ni in board.GetNetsByNetcode().items():
@@ -1039,6 +1044,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             f"{sum(len(v) for v in offsets.values())} rule groups of nets")
         for line in rules.skipped:
             logger.warning("custom rule not used by the router: %s", line)
+        if rules.skipped:
+            say(f"Custom rules: {len(rules.skipped)} not fully used by the router "
+                f"({'; '.join(rules.skipped[:2])}{'; ...' if len(rules.skipped) > 2 else ''})")
 
     def rule_clearance(key_clr: int, other, fallback: int) -> int:
         """The clearance between the nets of an owner map (by its key's
