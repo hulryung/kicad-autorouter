@@ -16,7 +16,7 @@ class NoViaInSmallPadsTests(unittest.TestCase):
         self.board = pcbnew.LoadBoard(str(Path(__file__).parent / 'fixtures/obd2-adapter.kicad_pcb'))
         smd = [p for p in self.board.GetPads() if p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD and p.GetNetCode() > 0]
         self.small = min(smd, key=lambda p: min(p.GetSize().x, p.GetSize().y))
-        big = [p for p in smd if min(p.GetSize().x, p.GetSize().y) >= 1_200_000]
+        big = [p for p in smd if min(p.GetSize().x, p.GetSize().y) >= 1_500_000]
         self.big = big[0] if big else None
 
     def centre(self, problem, pad):
