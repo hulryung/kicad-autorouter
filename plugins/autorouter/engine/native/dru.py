@@ -218,8 +218,17 @@ def compile_condition(expr: str, uses: Optional[dict] = None):
 
 def _eq(x, y) -> bool:
     if isinstance(x, str) and isinstance(y, str):
-        return _wild(x, y) or _wild(y, x)
+        return _str_eq(x, y)
     return x == y
+
+
+@functools.lru_cache(maxsize=1 << 18)
+def _str_eq(x: str, y: str) -> bool:
+    """== between two strings, either side a wildcard pattern. Cached: a
+    board's pair table asks the same (net name, pattern) questions for
+    every pair a rule's other side is tried with (44 wildcard rules x 380
+    nets spent 16 s in fnmatch at each board read)."""
+    return _wild(x, y) or _wild(y, x)
 
 
 # ---- the rules -----------------------------------------------------------------

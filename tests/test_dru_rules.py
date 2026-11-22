@@ -96,8 +96,71 @@ def test_wide_rasterizers():
     print("ok   row-span capsule and box rings match the exact cells; span marking matches")
 
 
+def test_narrow_rasterizers():
+    """Narrow tracks are rasterized by rows too (closed form, the per-cell
+    test only at near ties): the same cells, in the same order, as testing
+    every cell of the box, ties on grid-aligned tracks included. Convex
+    cells_where and the polygon rasterizers keep their cells too."""
+    import random
+    rnd = random.Random(7)
+    for _ in range(3000):
+        p = rnd.choice([50_000, 100_000, 200_000])
+        g = grid_mod.Grid(rnd.choice([0, -1_234_567, rnd.randrange(p)]), rnd.choice([0, rnd.randrange(10 ** 6)]),
+                          p, 120, 90, 2)
+        snap = rnd.choice([1, 10_000, 50_000, p])
+        c = lambda lo, hi: (rnd.randrange(lo, hi) // snap) * snap
+        x1, y1 = c(g.ox - 2 * p, g.ox + 122 * p), c(g.oy - 2 * p, g.oy + 92 * p)
+        d = rnd.choice([0, p, 6 * p, 50 * p])
+        k = rnd.random()
+        dx, dy = c(-d - 1, d + 1), c(-d - 1, d + 1)
+        x2, y2 = (x1 + dx, y1) if k < 0.3 else (x1, y1 + dy) if k < 0.6 else \
+            (x1 + dx, y1 + rnd.choice([dx, -dx])) if k < 0.8 else (x1 + dx, y1 + dy)
+        r = max(1, rnd.choice([p // 2, p, 2 * p, 5 * p]) + rnd.choice([0, 1, -1, p // 5, rnd.randrange(p)]))
+        L2 = (x2 - x1) ** 2 + (y2 - y1) ** 2
+
+        def hit(px, py):
+            t = 0.0 if L2 == 0 else ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / L2
+            t = 0.0 if t < 0 else 1.0 if t > 1 else t
+            ex, ey = px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1))
+            return ex * ex + ey * ey <= r * r
+        box = (min(x1, x2) - r, min(y1, y2) - r, max(x1, x2) + r, max(y1, y2) + r)
+        exact = list(g.cells_where(1, box, hit))
+        got = g.segment_cells(1, x1, y1, x2, y2, r)
+        assert list(got) == exact, (p, g.ox, g.oy, x1, y1, x2, y2, r)
+        assert [i for a, b in got.spans for i in range(a, b)] == exact
+        assert list(g.cells_where(1, box, hit, True)) == exact          # a capsule is convex
+    g = grid_mod.Grid(0, 0, 100_000, 100, 100, 1)
+    poly = [(1e6, 1e6), (8e6, 1.5e6), (6e6, 7e6), (4e6, 3e6), (1.5e6, 6e6)]
+    poly = [(int(x), int(y)) for x, y in poly]
+    hole = [(5_000_000, 2_500_000), (6_000_000, 2_500_000), (6_000_000, 3_500_000)]
+    for r in (0, 150_000, 1_200_000):
+        cells = g.polygon_cells(0, poly, [hole], r)
+        assert len(set(cells)) == len(cells) and [i for a, b in cells.spans for i in range(a, b)] == list(cells)
+        inside = set(g.polygon_cells(0, poly, [hole], 0))
+        ref = set(inside)
+        for ring in ((poly, hole) if r else ()):
+            for i in range(len(ring)):
+                ref.update(g.segment_cells(0, *ring[i], *ring[(i + 1) % len(ring)], r))
+        assert set(cells) == ref
+        out = g.outside_polygon_cells(0, poly, [hole], r)
+        ref_out = {i for i in range(g.plane) if i not in inside}
+        for ring in (poly, hole):
+            for i in range(len(ring)):
+                ref_out.update(g.segment_cells(0, *ring[i], *ring[(i + 1) % len(ring)], r))
+        assert set(out) == ref_out and len(set(out)) == len(out)
+    # a span list changed in place drops its spans (marked cell by cell)
+    s = g.segment_cells(0, 1_000_000, 1_000_000, 3_000_000, 1_000_000, 200_000)
+    s.append(5)
+    assert s.spans is None
+    s2 = g.disc_cells(0, 5e6, 5e6, 300_000)
+    s2 += g.disc_cells(0, 6e6, 5e6, 300_000)
+    assert [i for a, b in s2.spans for i in range(a, b)] == list(s2)
+    print("ok   narrow capsules by rows match the per-cell test; convex walk; polygon spans")
+
+
 if __name__ == "__main__":
     test_rules()
     test_floor_and_units()
     test_wide_rasterizers()
+    test_narrow_rasterizers()
     print("test_dru_rules: all passed")

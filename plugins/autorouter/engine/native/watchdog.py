@@ -51,6 +51,8 @@ class Watch:
         self._lock = threading.Lock()
         self._name = ""
         self._started = time.time()
+        self._cpu_started = time.process_time()
+        self._awake_started = time.monotonic()
         self._next_report = stall_s
         self._done = threading.Event()
         self._thread = threading.Thread(target=self._watch, name="autorouter-watchdog", daemon=True)
@@ -63,6 +65,8 @@ class Watch:
         with self._lock:
             self._close(now)
             self._name, self._started, self._next_report = name, now, self.stall_s
+            self._cpu_started = time.process_time()
+            self._awake_started = time.monotonic()
             self.thread_id = threading.get_ident()
             fresh = self.stalls[self._told:]
             self._told = len(self.stalls)
@@ -103,6 +107,7 @@ class Watch:
         while not self._done.wait(min(POLL_S, max(0.05, self.stall_s / 4))):
             with self._lock:
                 name, started, due = self._name, self._started, self._next_report
+                cpu0, awake0 = self._cpu_started, self._awake_started
                 if not name or time.time() - started < due:
                     continue
                 self._next_report = due * 2
@@ -112,10 +117,28 @@ class Watch:
             ours = [f for f in stack if "autorouter" in f.filename] or stack
             where = " <- ".join(f"{f.filename.rsplit('/', 1)[-1]}:{f.lineno} {f.name}"
                                 for f in reversed(ours[-4:]))
+            # CPU time well below the wall time: the process was starved
+            # (another job, efficiency cores) or paging, not computing; or
+            # the machine slept (a closed lid on battery): the monotonic
+            # clock (mach_absolute_time on macOS) stops while the wall clock runs on
+            where += f"; CPU {time.process_time() - cpu0:.0f} s of {secs:.0f} s" + _peak_memory()
+            asleep = secs - (time.monotonic() - awake0)
+            if asleep > max(5.0, 0.05 * secs):
+                where += f", system asleep {asleep:.0f} s"
             with self._lock:
                 self.stalls.append((name, secs, where))
             logger.warning("slow step '%s': %.0f s so far\n%s", name, secs,
                            "".join(traceback.format_list(ours[-8:])))
+
+
+def _peak_memory() -> str:
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        peak *= 1 if sys.platform == "darwin" else 1024            # bytes on macOS, KiB elsewhere
+        return f", peak memory {peak / 1e9:.1f} GB"
+    except Exception:
+        return ""
 
 
 _active: Optional[Watch] = None

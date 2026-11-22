@@ -240,6 +240,7 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
             # those vias are the job's own: a signal pass may rip one up that
             # walls in a connection, and the pour pass drops it again if room is left
             options.movable_uuids = job_items()
+        problem0 = result0 = None       # its owner maps (a GB at 0.1 mm) need not live on through the job
     first = copy.deepcopy(options)
     if pours_later:
         first.fanout_vias = False
@@ -273,6 +274,12 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
     out.pair_exceptions = list(getattr(result, "pair_exceptions", []))
     out.pair_loose = list(getattr(result, "pair_loose", []))
     out.stats["budget_cuts"] = getattr(result, "budget_cuts", 0)
+    # The pass's owner maps are not read again: let them go before the next
+    # board read (the finer pass's maps are four times the size, and holding
+    # both on a big board is gigabytes). The result stays (its failures).
+    pour_joins = dict(problem.stats.get("pour_joins", {}))
+    first_nets = problem.nets
+    problem = None
     if options.movable_uuids and (apply_paths or placed):
         # the plane vias as they stand now (ripped ones gone, restored ones in)
         options = copy.copy(options)
@@ -330,13 +337,14 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
             # time limit: only report that when the job's limit was what ended it
             if result2.timed_out and limit and remaining() <= 1.0:
                 out.timed_out = True
+        problem2 = None                 # (its maps: as the first pass's, above)
 
     # Routes that ended on their net's pour rather than at a pad: the pour
     # was the one filled before this run, and a route of another net laid
     # across it since (or the refill pulling back from the new copper) can
     # leave such an end in a piece the pads are no longer in. Refill, and
     # route what came apart again, pad to pad this time.
-    joins = {name: info for name, info in problem.stats.get("pour_joins", {}).items() if name not in out.failed}
+    joins = {name: info for name, info in pour_joins.items() if name not in out.failed}
     if joins and (apply_paths or on_path) and not out.cancelled and not (cancelled and cancelled()):
         try:
             check = lambda: _open_pour_joins(board, joins, result)
@@ -372,6 +380,7 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
                 out.routed += result5.routed
                 out.seconds += result5.seconds
                 out.failed = sorted(set(out.failed) | {problem5.nets[c.net].name for c in result5.failed})
+            problem5 = None
 
     problem3 = None
     if pours_later and not (cancelled and cancelled()):
@@ -394,10 +403,13 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
             out.fanout += result3.fanout
             out.stitched = result3.stitched
             out.seconds += result3.seconds
+    pours_done = problem3 is not None
+    pour_nets = problem3.nets if pours_done else first_nets
+    problem3 = None
     # Signal rerouting as well as power repairs can split surface copper.
     # Refill once more and reconnect isolated islands; extraction returns
     # immediately when there are no stitch candidates.
-    if (pours_later and problem3 is not None and options.stitch_vias
+    if (pours_later and pours_done and options.stitch_vias
             and not (cancelled and cancelled())):
         islands = copy.deepcopy(options)
         islands.pours_only = True
@@ -432,7 +444,7 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         # via could not reach stays open without a word in `failed` (one net
         # reported, 23 opens). Ask the board, after the refill.
         watchdog.stage("pour nets left open")
-        pour_codes = {code for code, net in (problem3 or problem).nets.items() if not net.route}
+        pour_codes = {code for code, net in pour_nets.items() if not net.route}
         try:
             still = _open_pour_nets(board, pour_codes, options.skip_nets)
         except Exception as e:
@@ -447,11 +459,11 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
             out.tuning, out.tuning_lines = report.groups, report.lines()
-    if apply_paths and problem is not None:
+    if apply_paths and first_nets is not None:
         # each pair's two lengths and vias as routed and tuned: a 9.5 mm skew on a pair
         # nobody gave a length group was in no report
         try:
-            out.stats["pair_lengths"] = _pair_lengths(board, problem.nets)
+            out.stats["pair_lengths"] = _pair_lengths(board, first_nets)
         except Exception as e:
             out.stats["pair_lengths_error"] = repr(e)
         for d in out.stats.get("pair_lengths", []):

@@ -613,6 +613,33 @@ def _shapes_touch(pad_shape, shape, pad) -> bool:
     return bool(shape.Collide(pad.GetPosition(), min(size.x, size.y) // 2))
 
 
+_CONVEX_PADS = {getattr(pcbnew, n) for n in ("PAD_SHAPE_CIRCLE", "PAD_SHAPE_RECTANGLE", "PAD_SHAPE_RECT",
+                                              "PAD_SHAPE_OVAL", "PAD_SHAPE_TRAPEZOID", "PAD_SHAPE_ROUNDRECT",
+                                              "PAD_SHAPE_CHAMFERED_RECT") if hasattr(pcbnew, n)}
+
+
+def _convex_pad(pad, kicad_layer) -> bool:
+    """Is the pad's copper on this layer a convex shape (Grid.cells_where's
+    convex walk)? Custom pads, and anything not known, are not."""
+    try:
+        try:
+            shape = pad.GetShape(kicad_layer)          # KiCad 9+: per-layer pad stacks
+        except TypeError:
+            shape = pad.GetShape()
+        if shape not in _CONVEX_PADS:
+            return False
+        if shape == getattr(pcbnew, "PAD_SHAPE_TRAPEZOID", None):
+            # a delta past the pad's size crosses the sides over (a bow tie)
+            try:
+                delta, size = pad.GetDelta(kicad_layer), pad.GetSize(kicad_layer)
+            except TypeError:
+                delta, size = pad.GetDelta(), pad.GetSize()
+            return abs(delta.x) < size.y and abs(delta.y) < size.x
+        return True
+    except Exception:
+        return False
+
+
 def footprint_of(pad):
     parent = pad.GetParentFootprint()
     if parent is None:
@@ -1324,8 +1351,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 cells = edge_cells[width] = grid.outside_polygon_cells(layer.index, main_outline, holes,
                                                                        edge_clr + width // 2)
             grid.mark(own, cells, BLOCKED)
+    first_map = owners[keys[0]]
     for idx in range(grid.plane):
-        if owners[keys[0]][idx] == BLOCKED:
+        if first_map[idx] == BLOCKED:
             via_block[idx] = 1
 
     # Temporary keepouts for this run (the assistant's "avoid" areas).
@@ -1408,10 +1436,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             box = _box(shape)
             clr = item_clearance(pad, kicad_layer, code)
             p_item = pad_item(pad, code)
+            convex = _convex_pad(pad, kicad_layer)
             add_copper(li, shape, code if code in nets else 0, clr, box, p_item)
-            claim(li, code, lambda r, shape=shape, box=box, li=li:
+            claim(li, code, lambda r, shape=shape, box=box, li=li, convex=convex:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
-                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)), clr, p_item, box=box)
+                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r), convex), clr, p_item, box=box)
             if hole_radius:
                 # the hole itself, under the hole-clearance rule, on every layer
                 # (inner layers may carry no annular ring at all)
@@ -1420,7 +1449,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                       max(hole_clr, pth_clr if attr == pcbnew.PAD_ATTRIB_PTH else 0),
                       box=(pos.x - hole_radius, pos.y - hole_radius, pos.x + hole_radius, pos.y + hole_radius))
             if code in nets:
-                inside = grid.cells_where(li, box, lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), 0))
+                inside = grid.cells_where(li, box, lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), 0), convex)
                 own_cells.update(inside)
                 if grid.inside(*centre):
                     own_cells.add(grid.index(li, *centre))
