@@ -1473,7 +1473,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if attr == pcbnew.PAD_ATTRIB_SMD and not options.via_in_small_pads and nets:
             # No via drilled into a small SMD pad, its own net's included: an open
             # via there wicks the solder off the joint (a 0603 cap, a SOT-23 pin).
-            # Exposed and thermal pads (both sides >= via_in_pad_min_mm) keep their vias.
+            # Exposed and thermal pads (both sides >= via_in_pad_min_mm, 1.5 mm: a 3225 crystal pad is not one) keep their vias.
             size = pad.GetSize()
             if min(size.x, size.y) < int(options.via_in_pad_min_mm * 1_000_000):
                 shape0 = pad.GetEffectiveShape(layers[pl[0]].kicad_id)
