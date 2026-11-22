@@ -175,9 +175,10 @@ class _Room:
         for pad in board.GetPads():
             self._add(pad, list(pad.GetLayerSet().CuStack()))
         self.keepouts = []
-        for zone in board.Zones():
+        from .extract import rule_areas
+        for zone in rule_areas(board):
             try:
-                if zone.GetIsRuleArea() and zone.GetDoNotAllowTracks():
+                if zone.GetDoNotAllowTracks():
                     self.keepouts.append(zone)
             except Exception:
                 pass

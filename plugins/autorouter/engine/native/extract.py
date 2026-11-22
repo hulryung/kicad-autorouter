@@ -24,6 +24,19 @@ MARGIN_NM = 500_000
 WIDE_RULE_NM = 1_000_000     # a custom-rule clearance this wide is rasterized from the item's box
 
 
+
+def rule_areas(board):
+    """Every rule area (keepout) on the board: the board's own and the ones a
+    footprint carries (a battery's "no copper under the cell", a card socket's
+    keepouts). board.Zones() lists only the board's."""
+    areas = [z for z in board.Zones() if z.GetIsRuleArea()]
+    for fp in board.GetFootprints():
+        try:
+            areas += [z for z in fp.Zones() if z.GetIsRuleArea()]
+        except Exception:
+            pass
+    return areas
+
 def _poly_rings(poly) -> List[Tuple[List[Tuple[int, int]], List[List[Tuple[int, int]]]]]:
     """[(outline points, [hole points, ...]), ...] of a SHAPE_POLY_SET."""
     out = []
@@ -1270,10 +1283,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             for idx in grid.cells_where(layer.index, bounds, lambda x, y: True):
                 via_block[idx % grid.plane] = 1
 
-    # Rule areas (keepouts).
-    for zone in board.Zones():
-        if not zone.GetIsRuleArea():
-            continue
+    # Rule areas (keepouts), the footprints' included.
+    for zone in rule_areas(board):
         zl = [layer_of[l] for l in zone.GetLayerSet().CuStack() if l in layer_of]
         if not zl:
             continue

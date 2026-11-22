@@ -31,5 +31,36 @@ class KeepoutFootprintTests(unittest.TestCase):
         self.assertEqual(after.via_block[point % after.grid.plane], 0)
 
 
+    def test_footprint_rule_area_blocks_vias(self):
+        """A keepout drawn inside a footprint (a coin cell's "no via under the
+        cell") bans vias like a board keepout. board.Zones() leaves it out."""
+        from autorouter.engine.native import extract
+        source = Path(__file__).parent / 'fixtures/obd2-adapter.kicad_pcb'
+        board = pcbnew.LoadBoard(str(source))
+        box = board.GetBoardEdgesBoundingBox()
+        cx, cy = box.GetCenter().x, box.GetCenter().y
+        fp = pcbnew.FOOTPRINT(board)
+        fp.SetReference('BT99')
+        zone = pcbnew.ZONE(fp)
+        zone.SetIsRuleArea(True)
+        zone.SetDoNotAllowVias(True)
+        zone.SetDoNotAllowTracks(False)
+        zone.SetDoNotAllowZoneFills(True)
+        zone.SetLayer(pcbnew.F_Cu)
+        half = 1_000_000
+        outline = zone.Outline()
+        outline.NewOutline()
+        for x, y in ((cx - half, cy - half), (cx + half, cy - half), (cx + half, cy + half), (cx - half, cy + half)):
+            outline.Append(x, y)
+        fp.Add(zone)
+        board.Add(fp)
+        self.assertNotIn(zone.m_Uuid.AsString(), [z.m_Uuid.AsString() for z in board.Zones()])
+        self.assertEqual(len([z for z in extract.rule_areas(board) if z.GetDoNotAllowVias()]) >= 1, True)
+        problem = extract.extract(board, NativeOptions(fanout_vias=False, stitch_vias=False))
+        g = problem.grid
+        centre = g.index(0, g.cell_x(cx), g.cell_y(cy)) % g.plane
+        self.assertEqual(problem.via_block[centre], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
