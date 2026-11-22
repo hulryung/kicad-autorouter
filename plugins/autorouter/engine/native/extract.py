@@ -160,6 +160,13 @@ def net_rules(board, net, options: Optional[NativeOptions] = None,
             width = options.class_widths[cls]
         if options.class_vias.get(cls):
             via_d, via_drill = options.class_vias[cls]
+        # one net's own width beats its class's (an analog supply ring round
+        # a fine-pitch part, narrower than the rest of the power class)
+        name = str(net.GetNetname())
+        for pattern, w in (options.net_widths or {}).items():
+            if w and (pattern == name or fnmatch.fnmatchcase(name, pattern)):
+                width = w
+                break
     return NetRules(width=max(int(width), ds.m_TrackMinWidth),
                     clearance=max(nc.GetClearance(), ds.m_MinClearance),
                     via_diameter=max(int(via_d), ds.m_ViasMinSize),
@@ -248,12 +255,12 @@ _DEBUG = bool(os.environ.get("AUTOROUTER_DEBUG"))
 OUTLET_NM = 600_000          # how far past a pad exit stays clear of other nets' vias and tracks
 LINK_NM = 4_000_000          # two exits of a net on one layer this close keep the run between them open
 
-PAIR_SUFFIXES = (("+", "-"), ("_P", "_N"), ("_p", "_n"), ("DP", "DN"), ("D+", "D-"), ("P", "N"))
+PAIR_SUFFIXES = (("+", "-"), ("_P", "_N"), ("_p", "_n"), ("DP", "DN"), ("DP", "DM"), ("D+", "D-"), ("P", "N"))
 
 
 def pair_partner(name: str, names: Set[str]) -> Optional[str]:
     """The other net of a differential pair, found by the usual name
-    conventions (USB_DP/USB_DN, TX+/TX-, RX_P/RX_N, D+/D-); None if none."""
+    conventions (USB_DP/USB_DN or USB_DM, TX+/TX-, RX_P/RX_N, D+/D-); None if none."""
     for a, b in PAIR_SUFFIXES:
         for first, second in ((a, b), (b, a)):
             if name.endswith(first) and len(name) > len(first):

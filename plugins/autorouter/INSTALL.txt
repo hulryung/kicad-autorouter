@@ -1,15 +1,16 @@
-KiCad Autorouter 0.3.0
+KiCad Autorouter 0.5.10
 
 Install or update from this ZIP
 1. Open the KiCad project manager and choose Plugin and Content Manager.
-2. Choose Install from File and select kicad-autorouter-0.3.0.zip.
+2. Choose Install from File and select kicad-autorouter-0.5.10.zip.
 3. Apply pending changes, then restart the PCB editor or refresh its plugins.
 4. Open Tools > External Plugins > Autorouter (or its toolbar button).
 
 Requirements
 KiCad 9 or 10, using the SWIG action-plugin API. The built-in router requires
 no external routing program or AI account. The optional AI assistant requires
-a separately installed and authenticated Codex CLI.
+an authenticated codex or claude CLI, or the anthropic / openai package in
+KiCad's Python with an API key.
 Validated for this release on KiCad 10.0.7 on macOS.
 
 Using the router
@@ -18,11 +19,8 @@ keeps existing copper and routes open connections. Review the saved board
 with KiCad DRC after routing. Connectivity and clearance checks do not replace
 signal-integrity or manufacturing review.
 
-Changes in 0.3.0
-- Signal via clearance uses barrel-sized maps instead of double inflation.
-- Isolated copper is repaired after signal and power routing.
-- Temporary keepouts account for track and via copper footprints.
-- Fine-pitch via-site protection and connected-plane landing repairs.
+Release notes: README.md in this folder ("New in ...") or the release page
+https://github.com/hulryung/kicad-autorouter/releases
 
 PCM repository (for versions already published)
 https://raw.githubusercontent.com/hulryung/kicad-autorouter-pcm/main/repository.json

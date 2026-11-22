@@ -240,12 +240,12 @@ The default grid is **0.1 mm**, the search budget is **400,000 expansions per
 connection**, and the routing time limit is **10 minutes** (`0` disables it).
 The limit bounds the routing searches; pour finishing and length tuning can
 continue afterwards, so it is not a strict wall-clock deadline for the dialog.
-A hard wall-clock cap backs it up: at 3x the limit (and at least the limit
-plus 20 minutes) the routing stops, keeps what it has routed, skips the finer
+A hard wall-clock cap backs it up: at 1.5x the limit plus 2 minutes (17
+minutes for the default 10) the routing stops, keeps what it has routed, skips the finer
 second pass and says so in the log. Boards with wide isolation rules spend
 most of their time outside the searches, which the limit alone does not
 count in benchmarks. The pour passes still run after the cap, within a grace
-of a fifth of the cap (at least 5 minutes); past that the job stops hard and
+of a fifth of the cap (at least a minute); past that the job stops hard and
 the log names the pass it cut off. Any step that runs two minutes or more is
 reported in the log while it is still going ("Slow step: ..."), with where it
 is, and the job's stats list the slow steps, so a stall shows up early instead
@@ -291,6 +291,10 @@ assistant), `style` and `options` are what the router executes:
  "style": {"layers": {"inner": "plane"}, "class_width_mm": {"PWR_OUT": 1.5}, "class_via_mm": {"HV": [0.6, 0.3]}},
  "options": {"via_cost": 20}}
 ```
+
+`net_width_mm` (`{"/USB_ETH/+3V3A_ETH": 0.25}`, names or wildcards) sets one
+net's width over its class's; headless scripts set `NativeOptions.net_widths`
+(nm) the same way.
 
 Words alone would leave the router guessing and change from run to run;
 JSON alone is hard to write. So a plain-language request goes through the

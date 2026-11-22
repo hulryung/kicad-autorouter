@@ -58,13 +58,13 @@ class JobResult:
 FIRST_PASS_SHARE = 0.85
 
 
-WALL_FACTOR = 3.0            # the automatic wall-clock cap: this times the time limit...
-WALL_MIN_EXTRA_S = 20 * 60.0  # ...and at least the limit plus this
+WALL_FACTOR = 1.5            # the automatic wall-clock cap: this times the time limit...
+WALL_MIN_EXTRA_S = 2 * 60.0  # ...plus this (a 4-minute job stops by 8 minutes, a 10-minute one by 17)
 # Past the cap the pour passes still run (a pad without its plane via is an
 # open connection), within this grace; then the job stops hard: a board read
 # or pour stage still going is cut off (watchdog.Overrun) and reported.
 POST_CAP_SHARE = 0.2
-POST_CAP_MIN_S = 5 * 60.0
+POST_CAP_MIN_S = 60.0
 
 
 def post_cap_grace(cap: float) -> float:
@@ -77,7 +77,7 @@ def wall_cap(options: NativeOptions) -> float:
     if w is not None:
         return max(0.0, float(w))
     limit = options.time_limit_s if options.time_limit_s and options.time_limit_s > 0 else 0.0
-    return max(limit * WALL_FACTOR, limit + WALL_MIN_EXTRA_S) if limit else 0.0
+    return limit * WALL_FACTOR + WALL_MIN_EXTRA_S if limit else 0.0
 
 
 def fine_options(options: NativeOptions, failed_nets: List[str], board) -> NativeOptions:
@@ -428,10 +428,90 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         watchdog.stage("clean-up of the copper")
         out.stats.update(finish_copper(board, live, options, cancelled))
     if apply_paths and not (cancelled and cancelled()):
+        # pour nets are not connections the router lists: a pad its plane
+        # via could not reach stays open without a word in `failed` (one net
+        # reported, 23 opens). Ask the board, after the refill.
+        watchdog.stage("pour nets left open")
+        pour_codes = {code for code, net in (problem3 or problem).nets.items() if not net.route}
+        try:
+            still = _open_pour_nets(board, pour_codes, options.skip_nets)
+        except Exception as e:
+            out.stats["pour_open_error"] = repr(e)
+            still = []
+        if still:
+            out.stats["pour_nets_open"] = still
+            out.failed = sorted(set(out.failed) | {d["net"] for d in still})
+            out.failed_detail = list(out.failed_detail) + still
+    if apply_paths and not (cancelled and cancelled()):
         watchdog.stage("length tuning")
         report = tune_lengths(board, options, status, out.pair_exceptions)
         if report is not None:
             out.tuning, out.tuning_lines = report.groups, report.lines()
+    if apply_paths and problem is not None:
+        # each pair's two lengths and vias as routed and tuned: a 9.5 mm skew on a pair
+        # nobody gave a length group was in no report
+        try:
+            out.stats["pair_lengths"] = _pair_lengths(board, problem.nets)
+        except Exception as e:
+            out.stats["pair_lengths_error"] = repr(e)
+        for d in out.stats.get("pair_lengths", []):
+            out.pair_log.append((d["pair"], f"lengths {d['length_mm'][0]:.1f} / {d['length_mm'][1]:.1f} mm "
+                                             f"(skew {d['skew_mm']:.1f} mm), vias {d['vias'][0]} / {d['vias'][1]}"))
+    return out
+
+
+def _pair_lengths(board, nets) -> List[dict]:
+    """Track length and via count of both nets of every coupled pair the
+    job knew of, as the board has them now."""
+    pairs = sorted({tuple(sorted((code, net.partner))) for code, net in nets.items()
+                    if net.partner and net.partner in nets})
+    if not pairs:
+        return []
+    want = {c for pair in pairs for c in pair}
+    length = {c: 0.0 for c in want}
+    vias = {c: 0 for c in want}
+    for item in board.GetTracks():
+        code = item.GetNetCode()
+        if code not in want:
+            continue
+        if item.GetClass() == "PCB_VIA":
+            vias[code] += 1
+        else:
+            length[code] += item.GetLength() / 1e6
+    out = []
+    for a, b in pairs:
+        if nets[a].name > nets[b].name:
+            a, b = b, a
+        out.append({"pair": f"{nets[a].name} / {nets[b].name}",
+                    "length_mm": [round(length[a], 2), round(length[b], 2)],
+                    "skew_mm": round(abs(length[a] - length[b]), 2),
+                    "vias": [vias[a], vias[b]]})
+    return out
+
+
+def _open_pour_nets(board, codes, skip_patterns=()) -> List[dict]:
+    """Pour nets whose pads the refilled board still holds in more than one
+    group: [{"net", "pour": True, "groups", "pads": [ref.pad of each group
+    apart from the biggest, up to 8], "reason"}]."""
+    import fnmatch
+    if not codes:
+        return []
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    board.BuildConnectivity()
+    conn = board.GetConnectivity()
+    out = []
+    for code in sorted(codes):
+        net = board.FindNet(code) if hasattr(board, "FindNet") else None
+        name = str(net.GetNetname()) if net is not None else ""
+        if not name or any(fnmatch.fnmatchcase(name, pat) or name == pat for pat in skip_patterns or ()):
+            continue
+        groups = native_apply._pad_groups(board, conn, code)
+        if len(groups) <= 1:
+            continue
+        apart = [f"{p.GetParentFootprint().GetReference()}.{p.GetNumber()}" for g in groups[1:] for p in g][:8]
+        out.append({"net": name, "pour": True, "groups": len(groups), "pads": apart,
+                    "reason": f"{len(groups) - 1} pad group(s) not joined to the pour or the rest of the net "
+                              f"(no via reached this net's fill, or the via landed in another net's pour)"})
     return out
 
 
@@ -512,7 +592,10 @@ def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> 
     # pieces of a pour that the finished copper cut off with only their own
     # pads in them: a stub and via to the net's connected fill
     try:
-        stats["islands_joined"] = native_apply.repair_islands(board, live, cancelled=cancelled)
+        # the job's hard stop bounds the island repair too (after a scoped
+        # pass it was the slow step: 20 minutes of a "4-minute" job)
+        stop = lambda: bool(cancelled and cancelled()) or watchdog.overdue()
+        stats["islands_joined"] = native_apply.repair_islands(board, live, cancelled=stop)
     except Exception as e:
         stats["island_error"] = repr(e)
     return stats

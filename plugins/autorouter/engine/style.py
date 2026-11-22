@@ -126,6 +126,9 @@ def apply_to_options(board, style: dict, options) -> List[str]:
     for name, w in (style.get("class_width_mm") or {}).items():
         options.class_widths[name] = int(round(float(w) * MM))
         lines.append(f"{name}: track {w:g} mm")
+    for name, w in (style.get("net_width_mm") or {}).items():
+        options.net_widths[name] = int(round(float(w) * MM))
+        lines.append(f"net {name}: track {w:g} mm")
     for name, (d, h) in (style.get("class_via_mm") or {}).items():
         options.class_vias[name] = (int(round(float(d) * MM)), int(round(float(h) * MM)))
         lines.append(f"{name}: via {d:g}/{h:g} mm")

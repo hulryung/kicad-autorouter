@@ -405,7 +405,7 @@ def main():
                     "instead of the wall clock, so a busy or slower machine gives the same result (0 = wall clock)")
     ap.add_argument("--wall-cap", type=float, default=None,
                     help="with --time-limit: stop the job after this many wall-clock minutes (default: the "
-                    "router's automatic cap, 3x the limit and at least limit + 20; 0 = none, for runs that "
+                    "router's automatic cap, 1.5x the limit + 2; 0 = none, for runs that "
                     "must not depend on the machine)")
     ap.add_argument("--no-images", action="store_true")
     ap.add_argument("--focus", default="", help="extra close-ups: x,y[,half];x,y ... in mm")

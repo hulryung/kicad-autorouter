@@ -173,6 +173,7 @@ class NativeOptions:
     skip_nets: List[str] = field(default_factory=list)       # names or fnmatch patterns
     class_widths: Dict[str, int] = field(default_factory=dict)   # net class -> track width (nm) a routing guide asks for
     class_vias: Dict[str, Tuple[int, int]] = field(default_factory=dict)   # net class -> (via diameter, drill) nm
+    net_widths: Dict[str, int] = field(default_factory=dict)     # net name or fnmatch pattern -> track width (nm), beats class_widths
     custom_rules: bool = True       # clearances from the board's .kicad_dru (an HV-to-logic gap, a fine-pitch part's relief)
     ignore_net_classes: List[str] = field(default_factory=list)
     routable_layers: Optional[List[bool]] = None             # over the board's copper stack

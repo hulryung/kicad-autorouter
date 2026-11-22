@@ -34,6 +34,12 @@ class PackageBuildTests(unittest.TestCase):
                 self.assertEqual(json.loads(archive.read('metadata.json'))['versions'][0]['version'], build.version())
                 self.assertIsNone(archive.testzip())
 
+    def test_install_notes_name_the_version(self):
+        # INSTALL.txt is read by people choosing the ZIP: it said 0.3.0 for five releases
+        text = (ROOT / 'plugins/autorouter/INSTALL.txt').read_text(encoding='utf-8')
+        self.assertIn(f'KiCad Autorouter {build.version()}', text)
+        self.assertIn(f'kicad-autorouter-{build.version()}.zip', text)
+
     def test_rejects_version_mismatch(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(build, 'version', return_value='999.0.0'):
             with self.assertRaisesRegex(AssertionError, 'disagree'):

@@ -28,9 +28,10 @@ HERE = Path(__file__).resolve().parent
 def test_automatic_cap():
     o = NativeOptions()
     o.time_limit_s = 600.0
-    assert pipeline.wall_cap(o) == 600.0 + 20 * 60.0          # limit + 20 min beats 3x for short limits
-    o.time_limit_s = 3600.0
-    assert pipeline.wall_cap(o) == 3 * 3600.0
+    assert pipeline.wall_cap(o) == 1.5 * 600.0 + 120.0         # 1.5x the limit plus 2 min: 17 min
+    o.time_limit_s = 240.0
+    assert pipeline.wall_cap(o) == 480.0                      # a "4-minute" job stops by 8
+    assert pipeline.post_cap_grace(480.0) == 96.0             # then a fifth of the cap for the pours
     o.time_limit_s = 0
     assert pipeline.wall_cap(o) == 0                          # no time limit: no cap
     o.wall_limit_s = 90.0
