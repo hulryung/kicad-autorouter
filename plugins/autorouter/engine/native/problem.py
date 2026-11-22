@@ -136,6 +136,11 @@ class NativeOptions:
     # connection's only corridor; the pour pass places them again where room is left
     movable_uuids: List[str] = field(default_factory=list)
     locked_uuids: List[str] = field(default_factory=list)    # board items shove mode may not move (a coupled pair's lines)
+    # a scoped job in shove mode leaves the tracks of coupled pairs and
+    # length-group nets outside its scope where they are (a scoped pass for
+    # 8 open nets must not lengthen a tuned pair it was never asked about);
+    # plain signals outside the scope stay movable, to make room
+    scope_locks_pairs: bool = True
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     # ...only where the pour on the pad's layer does not reach it, or reaches it on an island with no
     # through-hole pin or via of the net (a designer lets the pour join the pads it covers; the pour

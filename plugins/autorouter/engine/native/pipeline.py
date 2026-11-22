@@ -17,7 +17,7 @@ import pcbnew
 
 from . import watchdog
 from . import apply as native_apply, astar as native_astar, extract as native_extract, router as native_router, tuning as native_tuning
-from .problem import NativeOptions, SCOPE_SELECTION
+from .problem import NativeOptions, SCOPE_BOARD, SCOPE_SELECTION
 
 _REMOVED: list = []        # board items taken off headless; Python must not free them
 
@@ -88,6 +88,9 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.via_cost = max(5, options.via_cost // 3)
     fine.max_expansions = options.max_expansions * 3
     fine.scope, fine.scope_nets, fine.scope_refs = SCOPE_SELECTION, list(failed_nets), []
+    # the pairs outside a scope the user chose stay put; a whole-board job's
+    # own pairs are this job's to move (its coupled lines are locked anyway)
+    fine.scope_locks_pairs = options.scope_locks_pairs and options.scope != SCOPE_BOARD
     fine.fanout_vias = False
     fine.dual_escapes = True       # leave a stubborn pad by either end, whichever the search finds open
     fine.stitch_vias = False
@@ -364,6 +367,7 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
             again = copy.deepcopy(options)
             again.pour_goals = False
             again.scope, again.scope_nets, again.scope_refs = SCOPE_SELECTION, list(apart), []
+            again.scope_locks_pairs = options.scope_locks_pairs and options.scope != SCOPE_BOARD
             again.fanout_vias = False
             again.stitch_vias = False
             again.time_limit_s = max(1.0, min(60.0, remaining())) if limit else 60.0
