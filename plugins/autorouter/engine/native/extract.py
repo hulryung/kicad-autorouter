@@ -173,11 +173,32 @@ def net_rules(board, net, options: Optional[NativeOptions] = None,
                     via_drill=max(int(via_drill), 1))
 
 
+def class_widths(board) -> List[int]:
+    """The track widths of the board's net classes (Default included)."""
+    out: Set[int] = set()
+    try:
+        ns = board.GetDesignSettings().m_NetSettings
+        classes = list(ns.GetNetclasses().values()) + [ns.GetDefaultNetclass()]
+        for nc in classes:
+            w = int(nc.GetTrackWidth())
+            if w > 0:
+                out.add(w)
+    except Exception:
+        pass
+    return sorted(out)
+
+
 def neck_width(board, rules: NetRules) -> int:
     """The narrowest pre-defined track width the board offers (not below the
-    board minimum); the net's own width if there is nothing narrower."""
+    board minimum). A board with no pre-defined width narrower than the net's
+    (an empty Board Setup > Pre-defined Sizes list) necks to its narrowest
+    net-class width instead: a 0.5 mm PWR rail at a 0.5 mm pitch pin goes
+    down to the Default class's 0.2 mm. The net's own width if there is
+    nothing narrower."""
     sizes = board_sizes(board)
     candidates = [w for w in sizes["track_widths"] if sizes["min_track_width"] <= w < rules.width]
+    if not candidates:
+        candidates = [w for w in class_widths(board) if sizes["min_track_width"] <= w < rules.width]
     return min(candidates) if candidates else rules.width
 
 
@@ -1578,6 +1599,51 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         except Exception:
             return False
 
+    fit_sizes = board_sizes(board)
+    fit_widths = sorted(set(fit_sizes["track_widths"]) | set(class_widths(board)))
+
+    def centre_fit(pad, pos, pl, code: int, width: int) -> int:
+        """The widest stub width up to `width` whose copper at the pad centre
+        keeps its clearance to every other net's copper (checked exactly, as
+        the DRC would): `width` itself, else a pre-defined or net-class width,
+        else the pad's own narrow side (copper the pad already is)."""
+        rules = nets[code].rules
+        reach = width // 2 + rules.clearance + 2 * safety
+        box = (pos.x - reach, pos.y - reach, pos.x + reach, pos.y + reach)
+        nearby = [(shape, other_clr, other_item) for li in pl
+                  for shape, other, other_clr, other_item in copper_near(li, box) if other != code]
+        if not nearby:
+            return width
+        at = pcbnew.VECTOR2I(pos.x, pos.y)
+
+        def clear(w: int) -> bool:
+            dot = pcbnew.SHAPE_SEGMENT(at, at, w)
+            for shape, other_clr, other_item in nearby:
+                need = rule_clearance(rules.clearance, other_item, max(rules.clearance, other_clr)) + safety
+                if _collides(shape, dot, need):
+                    return False
+            return True
+        if clear(width):
+            return width
+        floor_w = fit_sizes["min_track_width"]
+        candidates = {w for w in fit_widths if floor_w <= w < width}
+        if 0 < floor_w < width:
+            candidates.add(floor_w)
+        try:
+            angle = pad.GetOrientationDegrees() % 90
+            if angle < 1e-6 or angle > 90 - 1e-6:
+                b = _box(pad.GetEffectiveShape(layers[pl[0]].kicad_id))
+                narrow = min(b[2] - b[0], b[3] - b[1]) // 10_000 * 10_000
+                if floor_w <= narrow < width:
+                    candidates.add(narrow)
+        except Exception:
+            pass
+        for w in sorted(candidates, reverse=True):
+            if clear(w):
+                escape_stats["centre_fit"] = escape_stats.get("centre_fit", 0) + 1
+                return w
+        return min(candidates) if candidates else width
+
     for pad, code, pl, pos, own_cells, centre in pending:
         fp = footprint_of(pad)
         net = nets[code]
@@ -1609,6 +1675,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 tight_by_fp[key] = tight_pads(fp, net.rules.width + 2 * net.rules.clearance + pitch + 60_000)
             if pad.GetNumber() in tight_by_fp[key]:
                 stub_w = neck_width(board, net.rules)
+        # Whatever leaves this pad (an escape stub, or a fanout via's stub and
+        # a route from the centre cell when no lane is free) starts at the pad
+        # centre, inside the pad's own cells, where the owner maps see only
+        # this net. A stub wider than fits there grazed the neighbouring pin:
+        # a 0.5 mm +3V3 stub on a 0.35 mm MSOP pin at 0.5 mm pitch came within
+        # 0.075 mm of pin 2. The stub gets the widest width that clears.
+        stub_w = centre_fit(pad, pos, pl, code, stub_w)
         pad_key = (fp.GetReference() if fp else "", pad.GetNumber())
         remembered = options.escape_sides.get(pad_key)
         # A pin of a dense two-row connector: the pins alternate between
