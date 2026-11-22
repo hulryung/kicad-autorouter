@@ -259,6 +259,16 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         problem, result = one_pass(first)
     except watchdog.Overrun as e:
         _overrun(out, e, status, "the routing pass")
+        # nothing was tried: not "0 routed, 0 failed". The scoped nets are
+        # open (a whole-board job names no list, the flag says it)
+        out.stats["routing_not_tried"] = True
+        if options.scope == SCOPE_SELECTION and options.scope_nets:
+            out.failed = sorted(set(options.scope_nets))
+            out.failed_detail = [{"net": n, "reason": "not tried: the board read was cut off at the hard stop"}
+                                 for n in out.failed]
+        if status:
+            status("Nothing was routed: the board read did not finish before the hard stop "
+                   "(a finer pitch multiplies the read time; try a coarser pitch or a longer limit).")
         return out
     if problem is None:
         return out

@@ -83,7 +83,20 @@ def test_pipeline_hard_stop():
     assert job.stats.get("overrun_passes"), job.stats.get("overrun_passes")
     assert "slow_stages" in job.stats and "stalls" in job.stats
     assert watchdog.current() is None
-    print(f"pipeline hard stop: ok (cut off: {job.stats['overrun_passes']})")
+    assert job.stats.get("routing_not_tried")
+    # a scoped job cut off in the board read lists its nets as open, not "0 routed, 0 failed"
+    from autorouter.engine.native.problem import SCOPE_SELECTION
+    name = next(str(n.GetNetname()) for n in board.GetNetsByNetcode().values() if n.GetNetCode() > 0)
+    o2 = NativeOptions()
+    o2.pitch_mm, o2.time_limit_s, o2.wall_limit_s = 0.1, 600.0, 0.001
+    o2.scope, o2.scope_nets = SCOPE_SELECTION, [name]
+    pipeline.POST_CAP_MIN_S, pipeline.POST_CAP_SHARE = 0.0, 0.0
+    try:
+        job2 = pipeline.run_job(board, o2, escalate=True, apply_paths=False)
+    finally:
+        pipeline.POST_CAP_MIN_S, pipeline.POST_CAP_SHARE = saved
+    assert job2.failed == [name] and job2.failed_detail[0]["reason"].startswith("not tried"), (job2.failed, job2.failed_detail)
+    print(f"pipeline hard stop: ok (cut off: {job.stats['overrun_passes']}; scoped job lists {name} open)")
 
 
 if __name__ == "__main__":

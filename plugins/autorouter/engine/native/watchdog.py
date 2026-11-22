@@ -174,6 +174,17 @@ def check() -> None:
         _active.check()
 
 
+_ticks = [0]
+
+
+def tick(every: int = 200) -> None:
+    """check() on every 200th call: for loops over pads or items, where one
+    step at a fine pitch can run for many minutes."""
+    _ticks[0] += 1
+    if _ticks[0] % every == 0 and _active is not None:
+        _active.check()
+
+
 def overdue() -> bool:
     """Past the job's hard deadline? (Loops that can stop cleanly ask this.)"""
     return _active is not None and _active.overdue()

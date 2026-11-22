@@ -1421,6 +1421,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 out.extend(copper.get((layer, bx, by), ()))
         return out
     for pad in board.GetPads():
+        watchdog.tick()                                  # the hard stop reaches into a long step
         code = pad.GetNetCode()
         pl = [layer_of[l] for l in pad.GetLayerSet().CuStack() if l in layer_of]
         attr = pad.GetAttribute()
@@ -1554,6 +1555,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     for fp in board.GetFootprints():
         items.extend(fp.GraphicalItems())
     for item in items:
+        watchdog.tick()                                  # the hard stop reaches into a long step
         for layer in layers:
             if not item.IsOnLayer(layer.kicad_id):
                 continue
@@ -1645,6 +1647,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     positions_by_net: Dict[int, List[Tuple[int, int]]] = {}
     refs_by_net: Dict[int, List[str]] = {}
     for pad, code, pl, pos, own_cells, centre in pending:
+        watchdog.tick()                                  # the hard stop reaches into a long step
         positions_by_net.setdefault(code, []).append((pos.x, pos.y))
         fp = footprint_of(pad)
         refs_by_net.setdefault(code, []).append(fp.GetReference() if fp else "")
@@ -1721,6 +1724,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         return min(candidates) if candidates else width
 
     for pad, code, pl, pos, own_cells, centre in pending:
+        watchdog.tick()                                  # the hard stop reaches into a long step
         fp = footprint_of(pad)
         net = nets[code]
         if not net.route and not options.fanout_vias and not (job_items and _touched_by_job(pad)):
