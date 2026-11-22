@@ -971,7 +971,8 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
     hole_hole = int(ds.m_HoleToHoleMin)
     edge_clear = int(ds.m_CopperEdgeClearance)
     copper = list(board.GetEnabledLayers().CuStack())
-    keepouts = [z for z in board.Zones() if z.GetIsRuleArea()]
+    from .extract import rule_areas
+    keepouts = rule_areas(board)
     edges = [d for d in board.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts]
     for fp in board.GetFootprints():
         edges += [d for d in fp.GraphicalItems() if d.GetLayer() == pcbnew.Edge_Cuts]
