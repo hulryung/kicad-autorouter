@@ -15,6 +15,13 @@ Precedence is KiCad's: a later rule wins over an earlier one, both orders
 of the pair (A, B) and (B, A) are tried, and a pair no rule matches keeps
 the larger of the two net-class clearances. The board's minimum clearance
 stays the floor.
+
+A rule with (layer outer), (layer inner) or (layer "<name>") holds on those
+copper layers only: rules are tried last to first and the first whose
+condition and layer both match wins, so an inner 1.0 mm / outer 1.5 mm pair
+asks 1.0 mm on In1.Cu and 1.5 mm on F.Cu. between() takes the layer's
+canonical name ("F.Cu", "In2.Cu"); without one it answers the strictest of
+the layers the rules tell apart (a via, which spans them all).
 """
 import fnmatch
 import functools
@@ -217,11 +224,32 @@ def _eq(x, y) -> bool:
 
 # ---- the rules -----------------------------------------------------------------
 
+OUTER = ("F.Cu", "B.Cu")
+
+
+def layer_matches(spec: Optional[str], layer: str) -> bool:
+    """Does a rule's (layer ...) clause hold on this copper layer (canonical
+    name)? None: the rule has no layer clause."""
+    if spec is None:
+        return True
+    s = spec.strip()
+    low = s.lower()
+    if low == "outer":
+        return layer in OUTER
+    if low == "inner":
+        return layer.endswith(".Cu") and layer not in OUTER
+    return _wild(layer, s) or _wild(layer.lower(), low)
+
+
 @dataclass
 class Rule:
     name: str
     test: object             # (a, b) -> bool
     clearance: int           # nm
+    layer: Optional[str] = None    # the (layer ...) clause: "outer", "inner", a layer name; None = every layer
+
+    def on(self, layer: Optional[str]) -> bool:
+        return layer is None or layer_matches(self.layer, layer)
 
 
 class ClearanceRules:
@@ -234,7 +262,15 @@ class ClearanceRules:
         self.class_clearance = class_clearance
         self.floor = floor
         self.skipped = skipped or []
-        self._cache: Dict[Tuple[Item, Item], int] = {}
+        self._cache: Dict[Tuple[Item, Item], Tuple[int, ...]] = {}
+        # Layers the rules tell apart: one "profile" per distinct set of rules
+        # that hold on a layer. Rules without a layer clause give one profile.
+        self._profiles: List[Tuple[bool, ...]] = []
+        self._profile_of: Dict[Optional[str], int] = {}
+        self.layered = any(r.layer is not None for r in rules)
+        named = sorted({r.layer for r in rules if r.layer is not None and r.layer.lower() not in ("inner", "outer")})
+        for name in ["F.Cu", "In1.Cu"] + named:
+            self.profile(name)
 
     @classmethod
     def parse(cls, text: str, class_clearance: Dict[str, int], floor: int = 0) -> "ClearanceRules":
@@ -244,14 +280,14 @@ class ClearanceRules:
             if not isinstance(node, list) or not node or node[0] != "rule":
                 continue
             name = node[1] if len(node) > 1 and isinstance(node[1], str) else "?"
-            cond, clr, layered = None, None, False
+            cond, clr, layer = None, None, None
             for part in node[2:]:
                 if not isinstance(part, list) or not part:
                     continue
                 if part[0] == "condition" and len(part) > 1:
                     cond = part[1]
-                elif part[0] == "layer":
-                    layered = True
+                elif part[0] == "layer" and len(part) > 1 and isinstance(part[1], str):
+                    layer = part[1]
                 elif part[0] == "constraint" and len(part) > 1 and part[1] == "clearance":
                     for sub in part[2:]:
                         if isinstance(sub, list) and sub and sub[0] == "min" and len(sub) > 1:
@@ -264,9 +300,7 @@ class ClearanceRules:
             except Unsupported as e:
                 skipped.append(f"{name}: {e}")
                 continue
-            if layered:
-                skipped.append(f"{name}: per-layer rule, applied on every layer")
-            rules.append(Rule(name, test, value))
+            rules.append(Rule(name, test, value, layer))
         return cls(rules, class_clearance, floor, skipped, uses)
 
     def normalise(self, item: Item) -> Item:
@@ -280,22 +314,58 @@ class ClearanceRules:
     def _class(self, item: Item) -> int:
         return self.class_clearance.get(item.netclass, self.class_clearance.get("Default", 0))
 
-    def rule_between(self, a: Item, b: Item) -> Optional[Rule]:
+    def profile(self, layer: Optional[str]) -> int:
+        """The index of the layer's rule profile (None: every rule, as a via
+        or an item with no layer sees them)."""
+        got = self._profile_of.get(layer)
+        if got is None:
+            prof = tuple(r.on(layer) for r in self.rules) if layer is not None else None
+            if prof is None:
+                got = -1
+            else:
+                if prof not in self._profiles:
+                    self._profiles.append(prof)
+                got = self._profiles.index(prof)
+            self._profile_of[layer] = got
+        return got
+
+    def rule_between(self, a: Item, b: Item, layer: Optional[str] = None) -> Optional[Rule]:
+        """The rule KiCad applies between a and b on this layer (None: the
+        last matching rule whatever its layer)."""
         for rule in reversed(self.rules):
-            if rule.test(a, b) or rule.test(b, a):
+            if rule.on(layer) and (rule.test(a, b) or rule.test(b, a)):
                 return rule
         return None
 
-    def between(self, a: Item, b: Item) -> int:
-        """The clearance KiCad's DRC asks between a and b."""
+    def _per_profile(self, a: Item, b: Item) -> Tuple[int, ...]:
+        """The clearance between a and b in every layer profile, each rule's
+        condition evaluated at most once."""
+        n = len(self._profiles)
+        out: List[Optional[int]] = [None] * n
+        left = n
+        for i in range(len(self.rules) - 1, -1, -1):
+            open_ = [k for k in range(n) if out[k] is None and self._profiles[k][i]]
+            if not open_:
+                continue
+            rule = self.rules[i]
+            if rule.test(a, b) or rule.test(b, a):
+                for k in open_:
+                    out[k] = rule.clearance
+                left -= len(open_)
+                if not left:
+                    break
+        fallback = max(self._class(a), self._class(b))
+        return tuple(max(fallback if v is None else v, self.floor) for v in out)
+
+    def between(self, a: Item, b: Item, layer: Optional[str] = None) -> int:
+        """The clearance KiCad's DRC asks between a and b on this copper layer
+        (canonical name); with no layer, the strictest over the layers."""
         key = (a, b) if (a.netname, a.ref, a.kind) <= (b.netname, b.ref, b.kind) else (b, a)
+        k = self.profile(layer)
         got = self._cache.get(key)
-        if got is None:
-            rule = self.rule_between(a, b)
-            got = rule.clearance if rule is not None else max(self._class(a), self._class(b))
-            got = max(got, self.floor)
-            self._cache[key] = got
-        return got
+        if got is None or (k >= 0 and k >= len(got)):
+            got = self._cache[key] = self._per_profile(a, b)
+        return max(got) if k < 0 else got[k]
 
     @property
     def max_clearance(self) -> int:

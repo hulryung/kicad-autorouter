@@ -544,7 +544,9 @@ class Router:
         code, pid = net.code, path.pid
         for key, owners in p.owners.items():
             width, clearance = key
-            grow = self._pair_clr(clearance, net) + width // 2 + p.safety
+            # per layer: a (layer inner) / (layer outer) rule pair asks less on In*.Cu
+            grow = tuple(self._pair_clr(clearance, net, li) for li in range(grid.layers))
+            grow = (grow, width // 2 + p.safety)
             ringed = self._ringed(key, net)
             if ringed:
                 grow = ("ring", key)                    # cut back per piece: not shared
@@ -765,12 +767,15 @@ class Router:
                            site_guard=self.p.site_guard, relief=self.p.plane_relief.get(net.code),
                            via_owners=self.p.owners.get((net.rules.via_diameter, net.rules.clearance)), **kwargs)
 
-    def _ringed(self, key, net) -> bool:
+    def _ringed(self, key, net, layer: Optional[int] = None) -> bool:
         """Does this net keep an isolation gap (a wide custom rule) from the
-        nets of this owner map? Its rings are then cut back per piece."""
+        nets of this owner map, on a grid layer (None: on any)? Its rings
+        are then cut back per piece."""
         if self.p.ring_free is None:
             return False
-        need = self._pair_clr(key[1], net)
+        if layer is None:
+            return any(self._ringed(key, net, li) for li in range(self.grid.layers))
+        need = self._pair_clr(key[1], net, layer)
         return need >= WIDE_NM and need > max(key[1], net.rules.clearance)
 
     def _pieces(self, key, net, rp, ringed: bool):
@@ -780,35 +785,43 @@ class Router:
         clearance still holds."""
         grid, p = self.grid, self.p
         width, clearance = key
-        grow = self._pair_clr(clearance, net) + width // 2 + p.safety
+        # the rule's clearance on each layer ((layer inner) / (layer outer)),
+        # and whether it is an isolation ring there
+        grows = [self._pair_clr(clearance, net, li) + width // 2 + p.safety for li in range(grid.layers)]
+        rings = [ringed and self._ringed(key, net, li) for li in range(grid.layers)]
         plain = max(clearance, net.rules.clearance) + width // 2 + p.safety
         for seg in rp.segments:
             layer, x1, y1, x2, y2 = seg[:5]
             seg_w = seg[5] if len(seg) > 5 else rp.width
             h = seg_w // 2
+            grow = grows[layer]
             piece = grid.segment_cells(layer, x1, y1, x2, y2, h + grow)
-            if ringed:
+            if rings[layer]:
                 cut = p.ring_free(clearance, h + grow,
-                                  (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)), net.code)
+                                  (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)), net.code, layer)
                 if cut:
                     yield "seg", grid.segment_cells(layer, x1, y1, x2, y2, h + plain)
                     piece = cut(piece)
             yield "seg", piece
         h = rp.via_diameter // 2
         for x, y in rp.vias:
-            cut = p.ring_free(clearance, h + grow, (x, y, x, y), net.code) if ringed else None
+            # a via is copper on every layer: each layer's rule, and only the
+            # pads on that layer open its ring there
             for layer in range(grid.layers):
+                grow = grows[layer]
                 piece = grid.disc_cells(layer, x, y, h + grow)
+                cut = p.ring_free(clearance, h + grow, (x, y, x, y), net.code, layer) if rings[layer] else None
                 if cut:
                     yield "via", grid.disc_cells(layer, x, y, h + plain)
                     piece = cut(piece)
                 yield "via", piece
 
-    def _pair_clr(self, key_clr: int, net) -> int:
+    def _pair_clr(self, key_clr: int, net, layer: Optional[int] = None) -> int:
         """The clearance the nets of an owner map (by its key clearance) keep
-        from this net's tracks: the board's custom rules when it has any."""
+        from this net's tracks on a grid layer (None: the strictest over the
+        layers): the board's custom rules when it has any."""
         pc = self.p.pair_clearance
-        return pc(key_clr, net.code) if pc is not None else max(key_clr, net.rules.clearance)
+        return pc(key_clr, net.code, layer) if pc is not None else max(key_clr, net.rules.clearance)
 
     def _layer_extra(self, code: int) -> List[int]:
         """Per layer, what a cell of track costs the net beyond its step:

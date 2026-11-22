@@ -1018,6 +1018,19 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             logger.warning("%s", dru.LAST_PROBLEM)
             say("Custom rules: " + dru.LAST_PROBLEM)
     net_item: Dict[int, "dru.Item"] = {}
+    # each grid layer's canonical name, as a rule's (layer ...) clause names it
+    rule_layer: List[str] = []
+    for l in layers:
+        try:
+            rule_layer.append(str(pcbnew.BOARD.GetStandardLayerName(l.kicad_id)))
+        except Exception:
+            rule_layer.append(l.name)
+    sig_layers: List[Optional[str]] = [None]
+    if rules is not None and rules.layered:
+        seen_prof: Dict[int, str] = {}
+        for name in rule_layer:
+            seen_prof.setdefault(rules.profile(name), name)
+        sig_layers = list(seen_prof.values())
     if rules is not None:
         for code, ni in board.GetNetsByNetcode().items():
             if code > 0:
@@ -1029,11 +1042,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             base = net_item.get(code, dru.Item())
             probes.add(rules.normalise(dru.Item(base.netclass, base.netname, fp.GetReference() if fp else "", "Pad")))
         probes = sorted(probes, key=lambda it: (it.netclass, it.netname, it.ref, it.kind))
+        # (layer inner) / (layer outer) rules: one clearance per layer class.
+        # Nets are told apart by what they ask on every routing layer.
         offsets: Dict[int, Dict[tuple, int]] = {}
         for code in sorted(nets):
             n = nets[code]
             me = net_item.get(code, dru.Item())
-            sig = tuple(rules.between(me, other) for other in probes)
+            sig = tuple(rules.between(me, other, name) for name in sig_layers for other in probes)
             seen = offsets.setdefault(n.rules.clearance, {})
             off = seen.setdefault(sig, len(seen))
             clr = n.rules.clearance + off
@@ -1048,24 +1063,28 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             say(f"Custom rules: {len(rules.skipped)} not fully used by the router "
                 f"({'; '.join(rules.skipped[:2])}{'; ...' if len(rules.skipped) > 2 else ''})")
 
-    def rule_clearance(key_clr: int, other, fallback: int) -> int:
+    def rule_clearance(key_clr: int, other, fallback: int, layer: Optional[int] = None) -> int:
         """The clearance between the nets of an owner map (by its key's
-        clearance) and an obstacle item; fallback without rules."""
+        clearance) and an obstacle item on a grid layer (None: the strictest
+        over the layers, as a via spanning them needs); fallback without rules."""
         if rules is None or other is None:
             return fallback
         me = rule_rep.get(key_clr)
         if me is None:
             return fallback
-        return rules.between(me, other)
+        return rules.between(me, other, rule_layer[layer] if layer is not None else None)
 
-    pair_cache: Dict[Tuple[int, int], int] = {}
+    pair_cache: Dict[Tuple[int, int, Optional[int]], int] = {}
 
-    def track_pair(key_clr: int, code: int) -> int:
-        got = pair_cache.get((key_clr, code))
+    def track_pair(key_clr: int, code: int, layer: Optional[int] = None) -> int:
+        """The clearance the nets of an owner map keep from a routed track of
+        net `code` on a grid layer (None: the strictest over the layers)."""
+        ck = (key_clr, code, layer)
+        got = pair_cache.get(ck)
         if got is None:
             fallback = max(key_clr, nets[code].rules.clearance if code in nets else 0)
-            got = rule_clearance(key_clr, net_item.get(code), fallback)
-            pair_cache[(key_clr, code)] = got
+            got = rule_clearance(key_clr, net_item.get(code), fallback, layer)
+            pair_cache[ck] = got
         return got
 
     def pad_item(pad, code: int):
@@ -1140,14 +1159,28 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # already is", per direction).
     RING_BUCKET = 5_000_000
     RING_FAN = 1_000_000            # how fast the corridor behind a pad widens
-    ring_pads: Dict[int, Dict[Tuple[int, int], List[Tuple[int, int, int, int, int]]]] = {}
+    # A pad opens a ring only on the copper layers it is on: an SMD part on
+    # F.Cu sitting over a locked In2.Cu lane is no reason to let another
+    # net's via come closer to that lane on In2.Cu (it did, 0.2 mm from a
+    # 1.0 mm inner-layer rule). Each entry carries the pad's layer mask.
+    all_layers_mask = (1 << len(layers)) - 1
+    ring_pads: Dict[int, Dict[Tuple[int, int], List[Tuple[int, int, int, int, int, int]]]] = {}
     if rules is not None:
         for pad in board.GetPads():
             code = pad.GetNetCode()
             if code not in nets:
                 continue
             bb = pad.GetBoundingBox()
-            pb = (bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom(), code)
+            if pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+                mask = all_layers_mask                 # its hole is on every layer, as the pad claims are
+            else:
+                mask = 0
+                for l in pad.GetLayerSet().CuStack():
+                    if l in layer_of:
+                        mask |= 1 << layer_of[l]
+            if not mask:
+                continue
+            pb = (bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom(), code, mask)
             buckets = ring_pads.setdefault(nets[code].rules.clearance, {})
             for bx in range(pb[0] // RING_BUCKET, pb[2] // RING_BUCKET + 1):
                 for by in range(pb[1] // RING_BUCKET, pb[3] // RING_BUCKET + 1):
@@ -1156,18 +1189,20 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     def _box_dist(box, x: float, y: float) -> float:
         return math.hypot(max(0, box[0] - x, x - box[2]), max(0, box[1] - y, y - box[3]))
 
-    def ring_close(key_clr: int, box, reach: int, code: int) -> List[Tuple[tuple, float]]:
+    def ring_close(key_clr: int, box, reach: int, code: int, layer: Optional[int] = None) -> List[Tuple[tuple, float]]:
         """(pad box, distance) of the pads of other nets in the owner map's
-        rule group within reach of an obstacle's box."""
+        rule group within reach of an obstacle's box, on a grid layer (None:
+        on any layer)."""
         buckets = ring_pads.get(key_clr)
         if not buckets:
             return []
+        bit = all_layers_mask if layer is None else 1 << layer
         x0, y0, x1, y1 = box[0] - reach, box[1] - reach, box[2] + reach, box[3] + reach
         out, seen = [], set()
         for bx in range(x0 // RING_BUCKET, x1 // RING_BUCKET + 1):
             for by in range(y0 // RING_BUCKET, y1 // RING_BUCKET + 1):
                 for pb in buckets.get((bx, by), ()):
-                    if pb[4] == code or pb in seen:
+                    if pb[4] == code or not (pb[5] & bit) or pb in seen:
                         continue
                     seen.add(pb)
                     dx = max(0, pb[0] - box[2], box[0] - pb[2])
@@ -1177,13 +1212,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                         out.append((pb, d))
         return out
 
-    def ring_free(key_clr: int, r: int, box, code: int):
+    def ring_free(key_clr: int, r: int, box, code: int, layer: Optional[int] = None):
         """None, or a function taking a ring's cells (track centres within r
         of the obstacle's box) and returning them without the corridors
-        behind the map's pads that already sit inside the ring."""
+        behind the map's pads that already sit inside the ring. layer: the
+        grid layer of the ring's cells; only pads on that layer open one."""
         if box is None:
             return None
-        close = ring_close(key_clr, box, r, code)
+        close = ring_close(key_clr, box, r, code, layer)
         if not close:
             return None
         cones = []
@@ -1254,11 +1290,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         done: Dict[Tuple[int, bool], List[int]] = {}       # maps of the same radius share the cells
         for (width, clearance), own in owners.items():
             plain = max(clearance, own_clr)
-            need = max(rule_clearance(clearance, item, plain), floor_clr)
+            need = max(rule_clearance(clearance, item, plain, layer), floor_clr)
             r = need + width // 2 + safety
             isolation = need > plain and need >= WIDE_RULE_NM
             wide = box is not None and isolation
-            cut = ring_free(clearance, r, box, code) if wide else None
+            cut = ring_free(clearance, r, box, code, layer) if wide else None
             ck = (r, wide, clearance if cut else None)
             cells = done.get(ck)
             if cells is None:
@@ -1618,7 +1654,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         rules = nets[code].rules
         reach = width // 2 + rules.clearance + 2 * safety
         box = (pos.x - reach, pos.y - reach, pos.x + reach, pos.y + reach)
-        nearby = [(shape, other_clr, other_item) for li in pl
+        nearby = [(shape, other_clr, other_item, li) for li in pl
                   for shape, other, other_clr, other_item in copper_near(li, box) if other != code]
         if not nearby:
             return width
@@ -1626,8 +1662,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
 
         def clear(w: int) -> bool:
             dot = pcbnew.SHAPE_SEGMENT(at, at, w)
-            for shape, other_clr, other_item in nearby:
-                need = rule_clearance(rules.clearance, other_item, max(rules.clearance, other_clr)) + safety
+            for shape, other_clr, other_item, li in nearby:
+                need = rule_clearance(rules.clearance, other_item, max(rules.clearance, other_clr), li) + safety
                 if _collides(shape, dot, need):
                     return False
             return True
@@ -1908,12 +1944,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             margin = stub_w // 2 + net.rules.clearance + 2 * safety
             lane_box = (min(pos.x, ex, gx) - margin, min(pos.y, ey, gy) - margin,
                         max(pos.x, ex, gx) + margin, max(pos.y, ey, gy) + margin)
-            nearby = [(shape, other, other_clr, other_item) for li in pl
+            nearby = [(shape, other, other_clr, other_item, li) for li in pl
                       for shape, other, other_clr, other_item in copper_near(li, lane_box) if other != code]
 
             def lane_clear(shapes):
-                for shape, other, other_clr, other_item in nearby:
-                    need = rule_clearance(net.rules.clearance, other_item, max(net.rules.clearance, other_clr)) + safety
+                for shape, other, other_clr, other_item, li in nearby:
+                    need = rule_clearance(net.rules.clearance, other_item, max(net.rules.clearance, other_clr), li) + safety
                     if any(_collides(shape, stub, need) for stub in shapes):
                         if _DEBUG:
                             print(f"[escape] {net.name} {fp.GetReference() if fp else '?'}.{pad.GetNumber()} lane to "
