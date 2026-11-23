@@ -1433,6 +1433,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             for by in range(box[1] // BUCKET, box[3] // BUCKET + 1):
                 out.extend(copper.get((layer, bx, by), ()))
         return out
+    small_pad_r: List[Optional[int]] = [None]     # via radius + 50 µm round a small SMD pad (once)
     for pad in board.GetPads():
         watchdog.tick()                                  # the hard stop reaches into a long step
         code = pad.GetNetCode()
@@ -1478,9 +1479,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if min(size.x, size.y) < int(options.via_in_pad_min_mm * 1_000_000):
                 shape0 = pad.GetEffectiveShape(layers[pl[0]].kicad_id)
                 box0 = _box(shape0)
-                r_via = max(n.rules.via_diameter for n in nets.values()) // 2 + 50_000
+                if small_pad_r[0] is None:          # once: the largest via any net may drill
+                    small_pad_r[0] = max(n.rules.via_diameter for n in nets.values()) // 2 + 50_000
+                r_via = small_pad_r[0]
+                # a convex pad is walked by rows (its edge cells per row), not one collision per cell
                 for idx in grid.cells_where(0, (box0[0] - r_via, box0[1] - r_via, box0[2] + r_via, box0[3] + r_via),
-                                            lambda x, y: shape0.Collide(pcbnew.VECTOR2I(x, y), r_via)):
+                                            lambda x, y: shape0.Collide(pcbnew.VECTOR2I(x, y), r_via),
+                                            _convex_pad(pad, layers[pl[0]].kicad_id)):
                     via_block[idx] = 1
         if hole_radius:
             block_vias_near_hole(pos.x, pos.y, hole_radius)
