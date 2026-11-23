@@ -7,7 +7,7 @@ with a built-in router, signal-integrity settings and an optional AI assistant.
 The built-in router runs locally using KiCad's board model; no external routing
 service or AI account is required.
 
-**Current release:** [0.5.12 — stable](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.12)
+**Current release:** [0.5.13 — stable](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.13)
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
@@ -25,6 +25,25 @@ service or AI account is required.
 | Custom design rules | Clearance rules from the board's `.kicad_dru` (net class, net name and footprint conditions): an 8 mm HV-to-logic gap is kept while routing (cut back where the placement already puts pads closer, so they stay reachable), a fine-pitch part's relief lets its pins be reached. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### New in 0.5.13
+
+- No vias drilled into small SMD pads (0603 caps, SOT-23 pins: under 1.5 mm
+  on the short side, `via_in_pad_min_mm`); exposed and thermal pads keep
+  theirs. The finer second pass may still drill one as a last resort for a
+  net that is otherwise open, and the job names each such pad.
+  `via_in_small_pads` allows them everywhere, for fabs that fill vias.
+- Keepouts drawn inside footprints (a battery's "no via under the cell", a
+  card socket's) are honoured by routing, via placement and length tuning.
+- Plane-net pads a job cut off their pour are reported as failed, and routed
+  to the rest of their net where a way is left.
+- Auto track width never goes below the net class width (a 0.5 mm CHASSIS
+  class had been routed at 0.2 mm); the fine-pitch neck-down is unchanged.
+- A route joining a locked track no longer splits or moves it.
+- Pairs named after a connector pin by KiCad (`Net-(J7-TD+)` /
+  `Net-(J7-TD-)`) are recognised as pairs.
+- A `.kicad_dru` holding fabrication rules only no longer warns that rules
+  were lost.
 
 ### New in 0.5.12
 
@@ -225,8 +244,8 @@ tab; settings and job logs remain in the [data folder](#data-folder).
 
 ### Install from a ZIP
 
-Download `kicad-autorouter-0.5.12.zip` from the
-[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.12),
+Download `kicad-autorouter-0.5.13.zip` from the
+[release page](https://github.com/hulryung/kicad-autorouter/releases/tag/v0.5.13),
 then choose **Plugin and Content Manager → Install from File…** and restart
 KiCad. The release and PCM repositories distribute the same ZIP.
 
@@ -238,7 +257,7 @@ KiCad. The release and PCM repositories distribute the same ZIP.
 - The optional AI assistant requires one of: an authenticated `codex` or `claude`
   CLI, or the `anthropic` / `openai` package in KiCad's Python with an API key.
   DRC feedback uses `kicad-cli`.
-- The plugin has macOS, Windows and Linux paths. The 0.5.12 release was tested
+- The plugin has macOS, Windows and Linux paths. The 0.5.13 release was tested
   on **macOS with KiCad 10.0.7**; that is the verified release environment.
 
 ### 한국어 설치 요약

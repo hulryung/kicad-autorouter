@@ -1,8 +1,8 @@
-KiCad Autorouter 0.5.12
+KiCad Autorouter 0.5.13
 
 Install or update from this ZIP
 1. Open the KiCad project manager and choose Plugin and Content Manager.
-2. Choose Install from File and select kicad-autorouter-0.5.12.zip.
+2. Choose Install from File and select kicad-autorouter-0.5.13.zip.
 3. Apply pending changes, then restart the PCB editor or refresh its plugins.
 4. Open Tools > External Plugins > Autorouter (or its toolbar button).
 
