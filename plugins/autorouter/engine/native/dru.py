@@ -405,9 +405,12 @@ def for_board(board) -> Optional[ClearanceRules]:
     classes["Default"] = int(ns.GetDefaultNetclass().GetClearance())
     rules = ClearanceRules.parse(text, classes, int(board.GetDesignSettings().m_MinClearance))
     if not rules.rules:
-        written = len(re.findall(r"\(\s*rule\b", _strip_comments(text)))
+        # only rules with a clearance constraint count: a file of fabrication
+        # rules (hole sizes, silkscreen, the plugin's own fab presets) has
+        # nothing for the router, and losing none of it is no problem
+        written = len(re.findall(r"\(\s*constraint\s+clearance\b", _strip_comments(text)))
         if written:
-            LAST_PROBLEM = (f"{os.path.basename(path)} has {written} rule(s) but the router could read none "
+            LAST_PROBLEM = (f"{os.path.basename(path)} has {written} clearance rule(s) but the router could read none "
                             f"({'; '.join(rules.skipped[:3]) or 'unbalanced parentheses?'}): "
                             f"net-class clearances only")
         return None
