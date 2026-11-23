@@ -500,7 +500,9 @@ class AutorouterDialog(wx.Dialog):
             try:
                 live = [t for t in self._run_added if str(t.m_Uuid.AsString()) not in self._run_removed]
                 native_pipeline.finish_copper(self.board, live, o)
-                report = native_pipeline.tune_lengths(self.board, o, status=self._status_now,
+                if not job.cancelled:
+                    self._check_plane_pads(job)
+                report =native_pipeline.tune_lengths(self.board, o, status=self._status_now,
                                                       pair_exceptions=job.pair_exceptions)
                 if report is not None:
                     job.tuning, job.tuning_lines = report.groups, report.lines()
@@ -985,6 +987,10 @@ class AutorouterDialog(wx.Dialog):
             except Exception as e:
                 logger.exception("Finishing the copper failed")
                 self._append_log(f"[plugin] could not finish the copper: {e!r}")
+            # the pour nets on the finished, refilled board: pads the new
+            # copper cut off their pour are no connection the router lists
+            if not result.cancelled:
+                self._check_plane_pads(result)
             # length matching on the finished copper (meanders)
             if not result.cancelled and getattr(self, "_native_opts", None) is not None:
                 try:
@@ -1064,6 +1070,17 @@ class AutorouterDialog(wx.Dialog):
         text += ".  Undo (Ctrl+Z) reverts it."
         self._show_progress(text, 1.0)
         self._append_log("[plugin] " + text)
+
+    def _check_plane_pads(self, job):
+        """pipeline.check_plane_pads after the dialog's own clean-up: what it
+        finds goes into job.failed / failed_detail and the log."""
+        try:
+            self._show_progress("Checking the pour nets' pads...", None)
+            for line in native_pipeline.check_plane_pads(self.board, job):
+                self._append_log("[plugin] open: " + line)
+        except Exception as e:
+            logger.exception("Pour net check failed")
+            self._append_log(f"[plugin] could not check the pour nets: {e!r}")
 
     def _refill_if_wanted(self):
         if not self.refill.GetValue():

@@ -2994,6 +2994,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             # a piece of route with no pad: a cluster of its own, to be joined
             net.clusters.append(Cluster(cells=cells, anchors=ends))
 
+    # plane-net pads to route as strays whatever the pour's outline says (the
+    # pipeline's pass for pads the job's copper cut off their pour)
+    forced_strays: Set[Tuple[int, int, int]] = set()
+    if options.stray_pads:
+        wanted_strays = set(options.stray_pads)
+        forced_strays = {(p.GetNetCode(), p.GetPosition().x, p.GetPosition().y) for p in board.GetPads()
+                         if str(p.m_Uuid.AsString()) in wanted_strays}
     for code, entries in pad_cells.items():
         net = nets[code]
         pads = [pad for pad, _, _, _, _ in entries]
@@ -3113,6 +3120,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 if i not in cluster_pads and any(_zone_covers(z, grid.nm_x(ax), grid.nm_y(ay)) for z in zones
                                                  for ax, ay in cl.anchors):
                     covered[i] = True
+            for i in range(len(net.clusters)):
+                # a group of only pads the pour no longer joins (see above)
+                if cluster_pads.get(i) and all((code, pp.x, pp.y) in forced_strays for pp in cluster_pads[i]):
+                    covered[i] = False
             strays = [i for i in range(len(net.clusters)) if not covered[i]]
             if strays and options.pour_goals and not options.shove and not options.pours_only:
                 # the net's own fill as a group of its own: a stray under

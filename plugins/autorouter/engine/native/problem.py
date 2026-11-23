@@ -145,6 +145,10 @@ class NativeOptions:
     # scope's pads (0: anywhere on the board)
     shove_margin_mm: float = 5.0
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
+    # UUIDs of plane-net pads routed as strays of their net even where its
+    # pour's outline covers them: the pipeline's pass for pads the job's
+    # copper cut off their pour (no via site there; see pipeline.lost_plane_pads)
+    stray_pads: List[str] = field(default_factory=list)
     # ...only where the pour on the pad's layer does not reach it, or reaches it on an island with no
     # through-hole pin or via of the net (a designer lets the pour join the pads it covers; the pour
     # pass refills the pours first, so an island the new tracks cut off gets its via)

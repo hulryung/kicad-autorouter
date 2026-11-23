@@ -47,6 +47,13 @@ class JobResult:
     tuning_lines: List[str] = field(default_factory=list)
     pair_exceptions: List[dict] = field(default_factory=list)   # pairs connected directly, and why
     pair_loose: List[dict] = field(default_factory=list)        # pairs coupled but finished single-ended at one end
+    # The pads of every net with a copper pour, as its copper (the fills
+    # included) joined them when the job started: {net code: [pad UUIDs of
+    # each group of two or more]}. check_plane_pads compares the finished,
+    # refilled board with it: a pad the pour joined before the job and the
+    # job's copper cut off is no connection the router lists (issue #10).
+    plane_start: dict = field(default_factory=dict)
+    plane_codes: List[int] = field(default_factory=list)   # the job's pour nets (not routed with tracks)
 
 
 # Of the time limit; the finer second pass gets the rest. The rip-up rounds
@@ -261,6 +268,15 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
                 except Exception:
                     pass
         return problem, result
+
+    if apply_paths or on_path:
+        # which pads each pour joins before this job lays any copper (the
+        # board's fills as they are: nothing refilled, nothing changed)
+        try:
+            snap = lambda: plane_pad_snapshot(board, options.skip_nets)
+            out.plane_start = (on_board(snap) if on_board else snap()) or {}
+        except Exception as e:
+            out.stats["plane_snapshot_error"] = repr(e)
 
     pours_later = options.fanout_vias or options.stitch_vias
     if options.fanout_vias and options.fanout_first and not options.pours_only:
@@ -491,6 +507,16 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         if problem4 is not None:
             out.stitched += result4.stitched
             out.seconds += result4.seconds
+    pour_codes = {code for code, net in (pour_nets or {}).items() if not net.route}
+    out.plane_codes = sorted(c for c in pour_codes if not _skipped(pour_nets[c].name, options.skip_nets))
+    if out.plane_start and (apply_paths or on_path) and not out.cancelled and not (cancelled and cancelled()):
+        # A pad its pour joined before the job, that the job's copper has cut
+        # off (two routes closing the pour's way in between a QFP's pins):
+        # no connection of the job, and no via site where the pour pass or
+        # the island check could tie it. Route it as a stray of its net, pad
+        # to the nearest pad (and its copper) the net still has.
+        _rejoin_cut_off(board, out, options, one_pass, on_board, status,
+                        remaining() if limit else 0.0, wall_over())
     if apply_paths and added:
         # SWIG wrappers do not compare by item: tell the ripped-up ones apart by UUID
         gone = {str(item.m_Uuid.AsString()) for item in _REMOVED}
@@ -499,19 +525,14 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         out.stats.update(finish_copper(board, live, options, cancelled))
     if apply_paths and not (cancelled and cancelled()):
         # pour nets are not connections the router lists: a pad its plane
-        # via could not reach stays open without a word in `failed` (one net
-        # reported, 23 opens). Ask the board, after the refill.
+        # via could not reach, or one the job's copper cut off its pour,
+        # stays open without a word in `failed` (one net reported, 23 opens).
+        # Ask the board, after the refill. (A caller that places the paths
+        # itself runs check_plane_pads after its own clean-up.)
         watchdog.stage("pour nets left open")
-        pour_codes = {code for code, net in pour_nets.items() if not net.route}
-        try:
-            still = _open_pour_nets(board, pour_codes, options.skip_nets)
-        except Exception as e:
-            out.stats["pour_open_error"] = repr(e)
-            still = []
-        if still:
-            out.stats["pour_nets_open"] = still
-            out.failed = sorted(set(out.failed) | {d["net"] for d in still})
-            out.failed_detail = list(out.failed_detail) + still
+        for line in check_plane_pads(board, out, options.skip_nets):
+            if status:
+                status(line)
     if apply_paths and not (cancelled and cancelled()):
         watchdog.stage("length tuning")
         report = tune_lengths(board, options, status, out.pair_exceptions)
@@ -559,21 +580,224 @@ def _pair_lengths(board, nets) -> List[dict]:
     return out
 
 
-def _open_pour_nets(board, codes, skip_patterns=()) -> List[dict]:
+def _skipped(name: str, skip_patterns) -> bool:
+    import fnmatch
+    return any(fnmatch.fnmatchcase(name, pat) or name == pat for pat in skip_patterns or ())
+
+
+def _uid(item) -> str:
+    return str(item.m_Uuid.AsString())
+
+
+def _pad_label(pad) -> str:
+    fp = pad.GetParentFootprint()
+    return f"{fp.GetReference() if fp is not None else '?'}.{pad.GetNumber()}"
+
+
+def _refill(board) -> None:
+    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    board.BuildConnectivity()
+
+
+def plane_pad_snapshot(board, skip_patterns=()) -> dict:
+    """{net code: [set of pad UUIDs per group of two or more pads]} for every
+    net with a copper pour (rule areas aside), as the board's copper and its
+    fills join the pads now. Taken before a job lays any copper: nothing is
+    refilled (a job must not change what it starts from), so a stale fill is
+    what it is compared with."""
+    codes = {z.GetNetCode() for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0}
+    if not codes:
+        return {}
+    board.BuildConnectivity()
+    conn = board.GetConnectivity()
+    out = {}
+    for code in sorted(codes):
+        net = board.FindNet(code)
+        name = str(net.GetNetname()) if net is not None else ""
+        if not name or _skipped(name, skip_patterns):
+            continue
+        groups = [{_uid(p) for p in g} for g in native_apply._pad_groups(board, conn, code) if len(g) > 1]
+        if groups:
+            out[code] = groups
+    return out
+
+
+def _fill_area_at(board, pad) -> float:
+    """The area (mm^2) of the biggest piece of its net's fill under the pad's
+    centre on any of its layers: 0 for a pad no fill reaches."""
+    best = 0.0
+    pos = pad.GetPosition()
+    for z in board.Zones():
+        if z.GetIsRuleArea() or z.GetNetCode() != pad.GetNetCode():
+            continue
+        for lid in z.GetLayerSet().CuStack():
+            if not pad.IsOnLayer(lid):
+                continue
+            try:
+                polys = z.GetFilledPolysList(lid)
+                for i in range(polys.OutlineCount()):
+                    if polys.Contains(pos, i):
+                        best = max(best, abs(polys.Outline(i).Area()) / 1e12)
+            except Exception:
+                continue
+    return best
+
+
+def lost_plane_pads(board, start: dict) -> List[dict]:
+    """The pads of start (plane_pad_snapshot) that the board's copper, as
+    filled now, no longer joins to the rest of their group: [{"net", "pour":
+    True, "lost": True, "pads": [ref.pad, up to 8], "uuids", "reason"}], one
+    entry per net. Of a group that came apart, the part with most of its
+    pads stays (then the bigger group now, then the bigger fill under it);
+    the other parts are the lost ones. Call it on a refilled board."""
+    if not start:
+        return []
+    conn = board.GetConnectivity()
+    out = []
+    for code, groups in sorted(start.items()):
+        now = native_apply._pad_groups(board, conn, code)
+        where, pad_of = {}, {}
+        for k, g in enumerate(now):
+            for p in g:
+                where[_uid(p)] = k
+                pad_of[_uid(p)] = p
+        lost = []
+        for g in groups:
+            parts: dict = {}
+            for u in g:
+                if u in where:
+                    parts.setdefault(where[u], []).append(u)
+            if len(parts) < 2:
+                continue
+            keep = max(parts, key=lambda k: (len(parts[k]), len(now[k]),
+                                              max(_fill_area_at(board, pad_of[u]) for u in parts[k])))
+            lost += sorted((u for k, us in parts.items() if k != keep for u in us),
+                           key=lambda u: _pad_label(pad_of[u]))
+        if not lost:
+            continue
+        net = board.FindNet(code)
+        name = str(net.GetNetname()) if net is not None else str(code)
+        labels = [_pad_label(pad_of[u]) for u in lost]
+        out.append({"net": name, "pour": True, "lost": True, "pads": labels[:8], "uuids": lost,
+                    "reason": f"{len(lost)} pad(s) its pour joined before the job are cut off after the "
+                              f"final refill: the job's copper closed the pour's way in, and no via or "
+                              f"track joined them again"})
+    return out
+
+
+def _rejoin_cut_off(board, out: JobResult, options: NativeOptions, one_pass, on_board, status,
+                    left: float, over: bool) -> None:
+    """Refill, find the pads the job cut off their pour (lost_plane_pads) and
+    route each as a stray of its net, pad to the nearest pad of the net
+    (with its copper), on any routable layer, the way the router joins a
+    pad no pour reaches. What stays cut off is reported by check_plane_pads."""
+    try:
+        def check():
+            _refill(board)
+            return lost_plane_pads(board, out.plane_start)
+        lost = on_board(check) if on_board else check()
+    except Exception as e:
+        out.stats["plane_rejoin_error"] = repr(e)
+        return
+    if not lost:
+        return
+    if over:
+        out.wall_capped = True
+        return
+    nets = sorted({d["net"] for d in lost})
+    n = sum(len(d["uuids"]) for d in lost)
+    if status:
+        status(f"{n} pad(s) of {', '.join(nets)} cut off their pour by the new copper: routing them to their net...")
+    again = copy.deepcopy(options)
+    again.scope, again.scope_nets, again.scope_refs = SCOPE_SELECTION, nets, []
+    again.stray_pads = [u for d in lost for u in d["uuids"]]
+    again.pour_goals = False           # pad to pad: the pour near the pad is the piece it was cut off with
+    again.fanout_vias = again.stitch_vias = False
+    again.pours_only = again.repair_islands_only = False
+    again.shove = False
+    again.movable_uuids = []
+    again.time_limit_s = max(1.0, min(60.0, left)) if left else 60.0
+    try:
+        problem, result = one_pass(again)
+    except watchdog.Overrun as e:
+        _overrun(out, e, status, "the cut-off pads' routes")
+        return
+    except Exception as e:
+        out.stats["plane_rejoin_error"] = repr(e)
+        return
+    if problem is not None:
+        out.stats["cut_off_pads"] = n
+        out.stats["cut_off_routed"] = result.routed
+        out.routed += result.routed
+        out.seconds += result.seconds
+        detail = list(getattr(result, "failed_detail", []))
+        if detail:
+            out.stats["cut_off_detail"] = detail
+
+
+def check_plane_pads(board, out: JobResult, skip_patterns=(), refill: bool = True) -> List[str]:
+    """The job's last word on its pour nets, on the finished board (after
+    the clean-up; refilled here): the pads a pour joined at the start that
+    it no longer joins (lost_plane_pads), and the pour nets whose pads are
+    in more than one group (_open_pour_nets). Both go into out.failed and
+    out.failed_detail (stats "plane_pads_lost", "pour_nets_open"); returns
+    status lines. Once per job: the pipeline runs it when it placed the
+    paths, a caller that placed them itself (the dialog) after its own
+    finish_copper."""
+    if out.stats.get("plane_checked"):
+        return []
+    out.stats["plane_checked"] = True
+    try:
+        if refill:
+            _refill(board)
+        lost = lost_plane_pads(board, out.plane_start)
+    except Exception as e:
+        out.stats["plane_lost_error"] = repr(e)
+        lost = []
+    try:
+        still = _open_pour_nets(board, set(out.plane_codes), skip_patterns, refill=False)
+    except Exception as e:
+        out.stats["pour_open_error"] = repr(e)
+        still = []
+    lines = []
+    if lost:
+        if out.stats.get("cut_off_pads"):
+            for d in lost:
+                d["reason"] += " (a route from the pad to the rest of the net found no way either)"
+        out.stats["plane_pads_lost"] = [{k: v for k, v in d.items() if k != "uuids"} for d in lost]
+        for d in lost:
+            more = len(d["uuids"]) - len(d["pads"])
+            lines.append(f"{d['net']}: {', '.join(d['pads'])}{f' and {more} more' if more > 0 else ''} "
+                         f"cut off its pour by the new copper (open after the refill)")
+    # a net already named by its lost pads: its group count says the same
+    named = {d["net"] for d in lost}
+    still = [d for d in still if d["net"] not in named]
+    if still:
+        out.stats["pour_nets_open"] = still
+        for d in still:
+            lines.append(f"{d['net']}: {d['groups'] - 1} pad group(s) not joined to the pour "
+                         f"({', '.join(d['pads'])})")
+    found = [{k: v for k, v in d.items() if k != "uuids"} for d in lost] + still
+    if found:
+        out.failed = sorted(set(out.failed) | {d["net"] for d in found})
+        out.failed_detail = list(out.failed_detail) + found
+    return lines
+
+
+def _open_pour_nets(board, codes, skip_patterns=(), refill: bool = True) -> List[dict]:
     """Pour nets whose pads the refilled board still holds in more than one
     group: [{"net", "pour": True, "groups", "pads": [ref.pad of each group
     apart from the biggest, up to 8], "reason"}]."""
-    import fnmatch
     if not codes:
         return []
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
-    board.BuildConnectivity()
+    if refill:
+        _refill(board)
     conn = board.GetConnectivity()
     out = []
     for code in sorted(codes):
         net = board.FindNet(code) if hasattr(board, "FindNet") else None
         name = str(net.GetNetname()) if net is not None else ""
-        if not name or any(fnmatch.fnmatchcase(name, pat) or name == pat for pat in skip_patterns or ()):
+        if not name or _skipped(name, skip_patterns):
             continue
         groups = native_apply._pad_groups(board, conn, code)
         if len(groups) <= 1:

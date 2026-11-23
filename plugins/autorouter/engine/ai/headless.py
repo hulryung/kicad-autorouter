@@ -86,6 +86,15 @@ def make_route_fn(board, base: Optional[NativeOptions] = None, on_path: Optional
                                    escalate=spec.get("options", {}).get("escalate", True), cancelled=cancelled)
         except Exception as e:
             return {"error": f"could not read the board: {e}"}
+        if on_path is not None and not job.cancelled:
+            # the caller placed the paths: the pour nets' check is ours to run
+            # (pads the new copper cut off their pour are open, not routed)
+            try:
+                for line in pipeline.check_plane_pads(board, job):
+                    if log:
+                        log("[ai] open: " + line)
+            except Exception:
+                pass
         from .. import session
         try:
             session.refill_zones(board)
