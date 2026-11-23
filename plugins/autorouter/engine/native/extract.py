@@ -125,16 +125,21 @@ class BoardHints:
 
 
 def auto_width(board, net, nc, hints: BoardHints, options: NativeOptions) -> int:
-    """The width a designer would pick:
+    """The width a designer would pick, never below the net class width (a
+    class wider than Default is a deliberate choice: chassis, high current,
+    HV; the fine-pitch neck-down is drawn later, from this width):
     1. tracks already on the board for this net: their usual width;
     2. a power net (by name): the widest pre-defined width that still fits the
-       narrowest pad it lands on, never below the net class;
-    3. otherwise the net class width (explicit classes included)."""
+       narrowest pad it lands on;
+    3. otherwise the net class width (explicit classes included).
+    A CHASSIS net (class 0.5 mm) whose board carried mostly 0.2 mm stubs used
+    to be routed at 0.2 mm for 300 mm along the board edge (issue #11)."""
     code = net.GetNetCode()
     name = net.GetNetname()
+    floor = int(nc.GetTrackWidth())
     existing = hints.existing_width(code)
     if existing:
-        return existing
+        return max(existing, floor)
     if any(fnmatch.fnmatchcase(name, pat) or fnmatch.fnmatchcase(name.upper(), pat.upper())
            for pat in options.power_patterns):
         # power: as wide as the narrowest pad allows, never below the class
@@ -142,8 +147,8 @@ def auto_width(board, net, nc, hints: BoardHints, options: NativeOptions) -> int
         pad = hints.pad_min.get(code, 0)
         fitting = [w for w in sizes["track_widths"] if w <= pad]
         if fitting:
-            return max(max(fitting), nc.GetTrackWidth())
-    return nc.GetTrackWidth()
+            return max(max(fitting), floor)
+    return floor
 
 
 def net_rules(board, net, options: Optional[NativeOptions] = None,
