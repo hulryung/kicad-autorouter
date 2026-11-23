@@ -125,6 +125,9 @@ def exact_pattern(name: str) -> str:
 
 def pair_family(name: str) -> Optional[str]:
     up = name.rsplit("/", 1)[-1].upper()
+    auto = re.fullmatch(r"NET-\([^-]*-(.+)\)", up)
+    if auto:
+        up = auto.group(1)              # "Net-(J6-D+)": the pin name D+ is what says USB
     for family, patterns, _ in PAIR_FAMILIES:
         if any(fnmatch.fnmatchcase(up, p.upper()) for p in patterns):
             return family

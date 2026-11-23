@@ -297,16 +297,38 @@ LINK_NM = 4_000_000          # two exits of a net on one layer this close keep t
 PAIR_SUFFIXES = (("+", "-"), ("_P", "_N"), ("_p", "_n"), ("DP", "DN"), ("DP", "DM"), ("D+", "D-"), ("P", "N"))
 
 
+def _auto_net_parts(name: str) -> Optional[Tuple[str, str, str]]:
+    """A net KiCad named after one pin, "Net-(J7-TD+)" or with a sheet path
+    "/eth/Net-(J7-TD+)": (head "…Net-(J7-", pin name "TD+", tail ")"); None
+    for any other name."""
+    i = name.rfind("Net-(")
+    if i < 0 or not name.endswith(")"):
+        return None
+    inner = name[i + 5:-1]
+    ref, dash, pin = inner.partition("-")
+    if not ref or not dash or not pin:
+        return None
+    return name[:i + 5] + ref + "-", pin, ")"
+
+
 def pair_partner(name: str, names: Set[str]) -> Optional[str]:
     """The other net of a differential pair, found by the usual name
-    conventions (USB_DP/USB_DN or USB_DM, TX+/TX-, RX_P/RX_N, D+/D-); None if none."""
+    conventions (USB_DP/USB_DN or USB_DM, TX+/TX-, RX_P/RX_N, D+/D-); None if none.
+    A net KiCad named after a pin ("Net-(J7-TD+)") is matched on the pin
+    name, so Net-(J7-TD+) pairs with Net-(J7-TD-) on the same footprint and
+    Net-(U1-DP) with Net-(U1-DM); a pin named only "+" or "P" (a battery's
+    "+"/"-") is not a pair."""
+    auto = _auto_net_parts(name)
+    head, stem, tail = auto if auto else ("", name, "")
     for a, b in PAIR_SUFFIXES:
         for first, second in ((a, b), (b, a)):
-            if name.endswith(first) and len(name) > len(first):
-                base = name[:-len(first)]
+            # a whole pin name may be the suffix when it says enough (pins DP
+            # and DM), not when it is one sign or letter (a battery's + and -)
+            if stem.endswith(first) and len(stem) > len(first) - (1 if auto and len(first) > 1 else 0):
+                base = stem[:-len(first)]
                 if first in ("P", "N") and (not base or base[-1].isalpha() and base[-1] not in "DXR"):
                     continue                     # STOP/STON are not a pair
-                other = base + second
+                other = head + base + second + tail
                 if other in names and other != name:
                     return other
     return None
