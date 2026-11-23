@@ -11,7 +11,7 @@ import copy
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import pcbnew
 
@@ -93,6 +93,9 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.scope_locks_pairs = options.scope_locks_pairs and options.scope != SCOPE_BOARD
     fine.fanout_vias = False
     fine.dual_escapes = True       # leave a stubborn pad by either end, whichever the search finds open
+    # a stubborn pad may take a via in a small pad of its net as a last
+    # resort (run_job names each one): an open net is worse than a via in pad
+    fine.via_in_small_pads = True
     fine.stitch_vias = False
     fine.rip_rounds = max(fine.rip_rounds, 12)
     fine.rip_limit = max(fine.rip_limit, 8)
@@ -117,16 +120,57 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     cap = wall_cap(options)
     hard = time.time() + cap + post_cap_grace(cap) if cap else 0.0
     w = watchdog.start(status, hard_deadline=hard)
+    vias_before = _via_ids(board) if apply_paths and not options.via_in_small_pads else None
     try:
         out = _run_job(board, options, status, progress, on_path, on_remove, cancelled, escalate,
                        apply_paths, extract_fn, on_layers, placed, on_board)
     finally:
         watchdog.stop(w)
+    if vias_before is not None:
+        # the finer second pass may drill a small pad as a last resort (an
+        # open net is worse): name every one, for the designer to look at
+        try:
+            hits = _vias_in_small_pads(board, vias_before, int(options.via_in_pad_min_mm * 1_000_000))
+        except Exception as e:
+            hits = []
+            out.stats["via_in_pad_error"] = repr(e)
+        if hits:
+            out.stats["vias_in_small_pads"] = hits
+            if status:
+                status(f"{len(hits)} via(s) drilled into small SMD pads as a last resort: {', '.join(hits[:8])}"
+                       + (" ..." if len(hits) > 8 else ""))
     out.stats["slow_stages"] = [list(t) for t in w.slow()]
     out.stats["stalls"] = [[n, round(sec), where] for n, sec, where in w.stalls]
     if w.overrun:
         out.stats["overrun"] = w.overrun
     return out
+
+
+def _via_ids(board) -> set:
+    return {str(t.m_Uuid.AsString()) for t in board.GetTracks() if t.GetClass() == "PCB_VIA"}
+
+
+def _vias_in_small_pads(board, before: set, min_nm: int) -> List[str]:
+    """'REF.PAD' of each small SMD pad a via this job added overlaps (its own net's)."""
+    by_net: Dict[int, list] = {}
+    for pad in board.GetPads():
+        if pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD:
+            size = pad.GetSize()
+            if min(size.x, size.y) < min_nm:
+                by_net.setdefault(pad.GetNetCode(), []).append(pad)
+    hits = []
+    for v in board.GetTracks():
+        if v.GetClass() != "PCB_VIA" or str(v.m_Uuid.AsString()) in before:
+            continue
+        pos = v.GetPosition()
+        try:
+            r = v.GetWidth(pcbnew.F_Cu) // 2             # KiCad 9+: per-layer via size
+        except TypeError:
+            r = v.GetWidth() // 2
+        for pad in by_net.get(v.GetNetCode(), []):
+            if pad.HitTest(pos, r):
+                hits.append(f"{pad.GetParentFootprint().GetReference()}.{pad.GetNumber()}")
+    return sorted(set(hits))
 
 
 def _overrun(out, e, status, what: str) -> None:
