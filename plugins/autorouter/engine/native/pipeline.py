@@ -647,7 +647,7 @@ def finish_copper(board, live: list, options: NativeOptions, cancelled=None) -> 
     # T points split), the way KiCad's own router leaves it
     try:
         live[:] = alive(live)
-        welded = native_apply.weld_junctions(board, live)
+        welded = native_apply.weld_junctions(board, live, locked=options.locked_uuids)
         stats["welded"] = sum(welded.values())
         stats["weld_detail"] = welded
     except Exception as e:                     # cosmetic: never lose a routed board over it

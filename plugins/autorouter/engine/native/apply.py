@@ -118,7 +118,7 @@ def _on_centre_line(x1, y1, x2, y2, px, py, tol=WELD_TOL):
     return u
 
 
-def weld_junctions(board, items) -> dict:
+def weld_junctions(board, items, locked=()) -> dict:
     """After a run (and after trim_overlaps): make every junction of the run's
     copper a shared end point, the way KiCad's own router leaves it. The
     router ends a route on any grid cell of the copper it joins, so a route
@@ -130,14 +130,26 @@ def weld_junctions(board, items) -> dict:
       2. adds a stub from a free run track end lying on another track's
          copper to that track's centre line;
       3. splits every track of the run's nets where another end of the same
-         net and layer lies on its centre line (T-junctions);
+         net and layer lies on its centre line (T-junctions), except a
+         locked track (IsLocked, or its UUID in `locked`): it is never
+         split, trimmed or moved; the new copper just ends on its centre
+         line, which KiCad connects;
       4. merges collinear run segments joined end to end (same width, no
          via or pad there) and drops zero-length ones.
     Connectivity is unchanged. Returns counts of what was done."""
     uid = lambda item: str(item.m_Uuid.AsString())
     run = {uid(t) for t in items if t.GetClass() == "PCB_TRACK"}
     nets = {t.GetNetCode() for t in items if t.GetNetCode() > 0}
+    locked = set(locked or ())
     stats = Counter()
+
+    def is_locked(t):
+        try:
+            if t.IsLocked():
+                return True
+        except Exception:
+            pass
+        return uid(t) in locked
     if not run or not nets:
         return dict(stats)
     vias = defaultdict(list)                  # net -> [(x, y, radius)]
@@ -250,6 +262,10 @@ def weld_junctions(board, items) -> dict:
             points.add((t.GetStart().x, t.GetStart().y))
             points.add((t.GetEnd().x, t.GetEnd().y))
         for t in lst:
+            if is_locked(t):
+                # never split a locked track: the end on its centre line
+                # stays a T end, joined by the copper overlap
+                continue
             s, e = t.GetStart(), t.GetEnd()
             cuts = sorted((u, p) for p in points for u in [_on_centre_line(s.x, s.y, e.x, e.y, p[0], p[1])]
                           if u is not None)
@@ -308,6 +324,16 @@ def weld_junctions(board, items) -> dict:
         length2 = dx * dx + dy * dy
         k = max(0.0, min(1.0, ((x - s.x) * dx + (y - s.y) * dy) / length2)) if length2 else 0.0
         return math.hypot(s.x + k * dx - x, s.y + k * dy - y) <= host.GetWidth() / 2 - WELD_TOL
+
+    def on_locked(lst, x, y):
+        """An end on the centre line of a locked track: that track was not
+        split there, so the end is a join, not a free end."""
+        for h in lst:
+            if is_locked(h):
+                s, e = h.GetStart(), h.GetEnd()
+                if _on_centre_line(s.x, s.y, e.x, e.y, x, y) is not None:
+                    return True
+        return False
     trimmed = True
     while trimmed:
         trimmed = False
@@ -322,7 +348,7 @@ def weld_junctions(board, items) -> dict:
                 if uid(t) not in run:
                     continue
                 pts = [(t.GetStart().x, t.GetStart().y), (t.GetEnd().x, t.GetEnd().y)]
-                free = [p for p in pts if ends[(net, layer, p[0], p[1])] == 1]
+                free = [p for p in pts if ends[(net, layer, p[0], p[1])] == 1 and not on_locked(lst, p[0], p[1])]
                 if len(free) != 1:
                     continue
                 fx, fy = free[0]

@@ -142,6 +142,13 @@ def _uid(item) -> str:
     return str(item.m_Uuid.AsString())
 
 
+def _locked(item) -> bool:
+    try:
+        return bool(item.IsLocked())
+    except Exception:
+        return False
+
+
 def _seg_dist(a, b) -> float:
     """Distance between segments a and b, each (x1, y1, x2, y2)."""
     def pt_seg(px, py, x1, y1, x2, y2):
@@ -439,6 +446,8 @@ def _runs(board, code: int) -> List[_Run]:
             chain.insert(0, (u, not uf))
             seen.add(_uid(u))
             prv = beyond(u, uf)
+        if any(_locked(m) for m, _ in chain):
+            continue                       # a locked track is never rebuilt, pushed or split
         runs.append(_Run([m for m, _ in chain], oriented(*chain[0])[0], oriented(*chain[-1])[1]))
     return sorted(runs, key=lambda r: -r.GetLength())
 
@@ -582,6 +591,8 @@ def _push(board, room: _Room, code: int, need: float, clr: int, cap: float) -> T
             if len(others) != 1 or others[0].GetWidth() != w:
                 return None
             t = others[0]
+            if _locked(t):
+                return None                # a locked leg or chamfer cannot move
             nxt = far_end(t, cur)
             vx, vy = nxt[0] - cur[0], nxt[1] - cur[1]
             along, out = vx * ax + vy * ay, -vx * ay + vy * ax
