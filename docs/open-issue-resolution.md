@@ -23,6 +23,10 @@ Routing experiments use copies; private board inputs are not published.
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Pending implementation |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Pending reproduction |
 
+Additional issue discovered during the real-board audit: #27, scoped shove
+trading a requested connection for a broken existing net. Synthetic rollback
+regression passes; reporter-snapshot validation is in progress.
+
 ## Evidence
 
 - The first #19 candidate stores wide clearance claims as row intervals and
@@ -144,3 +148,13 @@ before/after pair produces no new violation with the corrected audit.
 
 Manual native-editor Undo remains unverified and is retained in the overall
 verification backlog; no automated test or goal-state change substitutes for it.
+
+### Scoped repair must preserve existing connectivity (#27)
+
+On the copied Cell8 snapshot, default escapes join SD5/SD6/SC6 but split
+MUX_SC3; dual escapes join SD5/SD6/SC7 but split MUX_SC0. Neither candidate
+is accepted as an improvement. A scoped rip-up now rolls back a one-for-one
+exchange when the displaced connection is outside the requested set.
+`test_scoped_shove_preserves_connections.py` reproduces the impossible
+single-layer crossing and preserves the original path after rollback.
+Existing scoped-shove and ownership regressions pass. Real-board rerun pending.

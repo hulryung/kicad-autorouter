@@ -29,7 +29,7 @@ import os
 from . import astar
 from . import watchdog
 from .grid import BLOCKED, BODY_LANE, WIDE_NM, Grid, jog
-from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem
+from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem, SCOPE_BOARD
 
 logger = logging.getLogger(__name__)
 
@@ -2965,6 +2965,7 @@ class Router:
         queue = sorted(self.p.connections,
                        key=lambda c: (0 if c.pair else 1 if c.priority == 0 else 2, c.rank,
                                       -c.estimate if c.pair else c.priority, c.estimate))
+        requested_nets = {c.net for c in queue}
         total = len(queue)
         failed: List[Connection] = []
         done = 0
@@ -3194,9 +3195,12 @@ class Router:
                     if not ok:
                         lost.append(other)
                 lost = [c for c in lost if self._find(c.net, c.a) != self._find(c.net, c.b)]
-                if (0 if won else 1) + len(lost) > 1 and all(len(self.p.nets[n].clusters) == k for n, k in sizes.items()):
+                outside_loss = opts.scope != SCOPE_BOARD and any(c.net not in requested_nets for c in lost)
+                if ((0 if won else 1) + len(lost) > 1 or outside_loss) and all(len(self.p.nets[n].clusters) == k for n, k in sizes.items()):
                     # more open than before: put the board back as it was (a
-                    # reshuffle that costs nothing stays, it may make room)
+                    # reshuffle that costs nothing stays, it may make room).
+                    # Scoped repair may not exchange its target for a broken
+                    # existing net outside the requested connection set.
                     self._undo_rip(before, marks, on_path, on_remove)
                     self.undone += 1
                     still.append(conn)
