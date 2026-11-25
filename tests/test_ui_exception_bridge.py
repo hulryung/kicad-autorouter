@@ -25,16 +25,16 @@ def main():
     messages = []
     dialog = SimpleNamespace(_append_log=messages.append)
 
-    def invoke(fn):
+    def invoke(fn, bridge=True):
         result = {}
         def worker():
             try:
-                result['value'] = AutorouterDialog._on_main(dialog, fn)
+                result['value'] = AutorouterDialog._on_main(dialog, fn) if bridge else fn()
             except Exception as exc:
                 result['error'] = exc
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
         while thread.is_alive() and time.monotonic() < deadline:
             app.Yield()
             thread.join(.005)
@@ -49,6 +49,35 @@ def main():
             raise error
         assert invoke(fail).get('error') is error, 'UI exception was swallowed'
     assert len(messages) == 2
+    # Stop on the first extraction stage after a real final-pour refill.
+    # The worker must report the interrupted pass without undoing that fill.
+    from test_fanout_stub_clearance import make_board
+    from autorouter.engine.native import extract, pipeline
+    from autorouter.engine.native.problem import NativeOptions
+    board, _ = make_board()
+    zone = next(iter(board.Zones()))
+    zone.UnFill()
+    assert zone.GetFilledPolysList(pcbnew.B_Cu).OutlineCount() == 0
+    refilled = []
+    def read(b, opts, status):
+        def operation():
+            filling = [False]
+            def stage(text):
+                if filling[0]:
+                    assert zone.GetFilledPolysList(pcbnew.B_Cu).OutlineCount() > 0
+                    refilled.append(zone.GetFilledPolysList(pcbnew.B_Cu).Format())
+                    raise Overrun('after completed refill')
+                filling[0] = text == 'Refilling the pours...'
+            return extract.extract(b, opts, status=stage)
+        return AutorouterDialog._on_main(dialog, operation)
+    outcome = invoke(lambda: pipeline.run_job(
+        board, NativeOptions(fanout_first=False, stitch_vias=False, tune_lengths=False),
+        extract_fn=read, apply_paths=False, escalate=False), bridge=False)
+    assert 'error' not in outcome, outcome
+    job = outcome['value']
+    assert job.wall_capped and job.timed_out
+    assert 'the pour pass' in job.stats.get('overrun_passes', []), job.stats
+    assert refilled and zone.GetFilledPolysList(pcbnew.B_Cu).Format() == refilled[-1]
     app.Destroy()
     print('test_ui_exception_bridge: ok')
 

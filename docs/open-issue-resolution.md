@@ -336,3 +336,9 @@ error reporting fails. Successful results, including `None`, remain unchanged.
 The regression exercises real wx dispatch, thread identity and both ordinary
 errors and watchdog exceptions. This fixes reporting; the long-sense routing
 case and manual native-editor Undo remain separate open verification work.
+
+The UI regression also runs a routing worker through actual main-thread
+extraction and zone filling, injecting an Overrun at the next extraction stage
+after the final pour refill. The job reports `the pour pass` in its overrun
+list and retains the exact filled polygon representation. This verifies the
+completed-refill boundary; it does not interrupt KiCad's C++ fill mid-call.
