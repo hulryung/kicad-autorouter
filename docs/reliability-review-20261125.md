@@ -40,7 +40,11 @@ incomplete and is not DRC-clean. The benchmark excludes pre-existing DRC finding
 its error columns are not total board DRC counts. Runtime varied (OBD2 0.5/0.7 s;
 CM5 99.8/116.2 s) while other local checks were running, so no speed improvement
 is claimed. `scripts/compare-benchmarks.py` rejects regressions separately for
-each board and previously connected net, including changes in DRC error types.
+each board and each net, including changes in DRC error types. Per-net counts
+come from DRC item UUIDs on the saved board, not the router failure list.
+Missing, partial or inconsistent per-net evidence is rejected. The retained
+benchmark boards and DRC reports were remeasured with this stricter check;
+both comparisons passed.
 
 ## Verification boundaries
 

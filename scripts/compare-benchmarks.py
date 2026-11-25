@@ -10,10 +10,16 @@ from pathlib import Path
 
 
 def compare(before, after):
-    required = ('unconnected_after', 'drc', 'drc_errors', 'rule_errors', 'length_mm', 'vias', 'route_seconds')
+    required = ('unconnected_after', 'drc', 'drc_errors', 'rule_errors', 'length_mm', 'vias', 'route_seconds', 'board',
+                'unconnected_by_net', 'unconnected_by_net_complete')
     for item in (before, after):
         if any(k not in item for k in required):
             raise ValueError('Incomplete benchmark metrics')
+        counts = item['unconnected_by_net']
+        if (item['unconnected_by_net_complete'] is not True or not isinstance(counts, dict)
+                or any(type(n) is not int or n < 0 for n in counts.values())
+                or sum(counts.values()) != item['unconnected_after']):
+            raise ValueError('Incomplete per-net DRC connectivity evidence')
     if before.get('board') != after.get('board'):
         raise ValueError('Benchmark boards differ')
     failures = []
@@ -23,8 +29,10 @@ def compare(before, after):
     for kind, count in after['drc'].items():
         if count > before['drc'].get(kind, 0):
             failures.append(f'DRC {kind}: {before["drc"].get(kind, 0)} -> {count}')
-    if set(after.get('open_nets', [])) - set(before.get('open_nets', [])):
-        failures.append('Previously connected nets became open')
+    for net, count in after['unconnected_by_net'].items():
+        previous = before['unconnected_by_net'].get(net, 0)
+        if count > previous:
+            failures.append(f'Net {net} opens: {previous} -> {count}')
     if after.get('overrun') or after.get('pass_errors'):
         failures.append('Routing pass failed or overran its deadline')
     fields = ('unconnected_after', 'drc_errors', 'rule_errors', 'length_mm', 'vias', 'route_seconds')
