@@ -129,7 +129,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     cap = wall_cap(options)
     hard = time.time() + cap + post_cap_grace(cap) if cap else 0.0
     w = watchdog.start(status, hard_deadline=hard)
-    vias_before = _via_ids(board) if apply_paths and not options.via_in_small_pads else None
+    vias_before = _via_inventory(board) if apply_paths and not options.via_in_small_pads else None
     try:
         out = _run_job(board, options, status, progress, on_path, on_remove, cancelled, escalate,
                        apply_paths, extract_fn, on_layers, placed, on_board)
@@ -155,11 +155,24 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     return out
 
 
-def _via_ids(board) -> set:
-    return {str(t.m_Uuid.AsString()) for t in board.GetTracks() if t.GetClass() == "PCB_VIA"}
+def _via_geometry(via):
+    pos = via.GetPosition()
+    layers = tuple(via.GetLayerSet().CuStack())
+    try:
+        widths = tuple(via.GetWidth(lid) for lid in layers)
+    except TypeError:
+        widths = (via.GetWidth(),) * len(layers)
+    return (via.GetNetCode(), pos.x, pos.y, via.GetDrillValue(), layers, widths)
 
 
-def _vias_in_small_pads(board, before: set, min_nm: int) -> List[str]:
+def _via_inventory(board):
+    # Rip-up rollback can reconstruct unchanged copper with a fresh UUID.
+    # Count geometry so a restored via is exempt, but an extra identical via
+    # or a moved/resized original still gets audited.
+    return Counter(_via_geometry(t) for t in board.GetTracks() if t.GetClass() == "PCB_VIA")
+
+
+def _vias_in_small_pads(board, before, min_nm: int) -> List[str]:
     """'REF.PAD' of each small SMD pad a via this job added overlaps (its own net's)."""
     by_net: Dict[int, list] = {}
     for pad in board.GetPads():
@@ -168,8 +181,13 @@ def _vias_in_small_pads(board, before: set, min_nm: int) -> List[str]:
             if min(size.x, size.y) < min_nm:
                 by_net.setdefault(pad.GetNetCode(), []).append(pad)
     hits = []
+    remaining = before.copy()
     for v in board.GetTracks():
-        if v.GetClass() != "PCB_VIA" or str(v.m_Uuid.AsString()) in before:
+        if v.GetClass() != "PCB_VIA":
+            continue
+        shape = _via_geometry(v)
+        if remaining[shape]:
+            remaining[shape] -= 1
             continue
         pos = v.GetPosition()
         try:

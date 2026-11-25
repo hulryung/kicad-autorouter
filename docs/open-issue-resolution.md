@@ -127,3 +127,20 @@ The existing fallback remains when no short tie fits.
 preserves locked copper, and rejects the tie when a foreign track walls it
 off. The blocked case uses a new plane via without crossing the wall.
 Plane/fanout/island regression tests pass locally.
+
+### Cell8 snapshot and restored-via audit
+
+A copied Cell8 `work7/start` snapshot reproduces incomplete MUX_SD5/SD6/SC6/SC7
+connections at U2. A scoped 0.15 mm shove pass joins all three pads of SD5,
+SD6 and SC6; SC7 remains open. This snapshot is not assumed to be identical
+to the original issue's final repair state. Comparing dual escapes is pending.
+
+The pass also reported a small-pad via violation at JP3.2. Before/after
+inspection found the via at the exact same position, diameter and drill,
+recreated with a new UUID. The audit now compares geometry multiplicities:
+restored copper is exempt, while duplicates and moved originals are checked.
+`test_via_audit_restore.py` verifies these distinctions; the saved Cell8
+before/after pair produces no new violation with the corrected audit.
+
+Manual native-editor Undo remains unverified and is retained in the overall
+verification backlog; no automated test or goal-state change substitutes for it.
