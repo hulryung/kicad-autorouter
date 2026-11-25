@@ -157,7 +157,10 @@ is accepted as an improvement. A scoped rip-up now rolls back a one-for-one
 exchange when the displaced connection is outside the requested set.
 `test_scoped_shove_preserves_connections.py` reproduces the impossible
 single-layer crossing and preserves the original path after rollback.
-Existing scoped-shove and ownership regressions pass. Real-board rerun pending.
+Existing scoped-shove and ownership regressions pass. On the same Cell8
+snapshot the protected rerun joins SC6 and SC7, with zero nets regressing
+in connected pad-component count. The remaining SD5/SD6 work stays open.
+Refilled custom-rule DRC comparison is pending.
 
 ### Local clearance overrides (#26, newly reported)
 
