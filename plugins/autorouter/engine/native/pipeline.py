@@ -126,6 +126,9 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     that stalls reported with where it is, and a hard stop at the wall cap
     plus the pour passes' grace. The slow steps land in stats["slow_stages"]
     ([name, seconds]) and stats["stalls"] ([name, seconds, where])."""
+    from .raster_cache import RasterCache
+    options = copy.copy(options)
+    options._raster_cache = RasterCache(options.raster_cache_mb * 1024 * 1024)
     cap = wall_cap(options)
     hard = time.time() + cap + post_cap_grace(cap) if cap else 0.0
     w = watchdog.start(status, hard_deadline=hard)
@@ -148,6 +151,9 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
                 reason = "used the enabled small-pad fallback" if options.via_in_pad_last_resort else "violate the small-SMD-pad restriction"
                 status(f"{len(hits)} via(s) {reason}: {', '.join(hits[:8])}"
                        + (" ..." if len(hits) > 8 else ""))
+    cache = options._raster_cache
+    out.stats["raster_cache"] = {"hits": cache.hits, "misses": cache.misses,
+                                 "bytes": cache.bytes, "limit_bytes": cache.max_bytes}
     out.stats["slow_stages"] = [list(t) for t in w.slow()]
     out.stats["stalls"] = [[n, round(sec), where] for n, sec, where in w.stalls]
     if w.overrun:
@@ -243,9 +249,6 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
     so a later pass may move the job's own plane vias as it does otherwise;
     on_board runs a function on the thread that owns the board and returns
     its result (the dialog's UI thread; called directly when None)."""
-    from .raster_cache import RasterCache
-    options = copy.copy(options)
-    options._raster_cache = RasterCache(options.raster_cache_mb * 1024 * 1024)
     extract = extract_fn or (lambda b, o, st: native_extract.extract(b, o, status=st))
     out = JobResult()
     added: list = []                       # board items this job created (apply_paths)

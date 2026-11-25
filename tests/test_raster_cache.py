@@ -64,8 +64,9 @@ def read(board,opts,status):
     problem=extract.extract(board,opts,status=status)
     seen.append((id(opts._raster_cache),problem.stats['raster_cache']['hits']))
     return problem
-pipeline.run_job(b,options,extract_fn=read,escalate=False)
+job=pipeline.run_job(b,options,extract_fn=read,escalate=False)
 assert len(seen)>1 and len({key for key,hits in seen})==1
 assert any(hits for key,hits in seen[1:])
+assert job.stats['raster_cache']['hits']==sum(hits for key,hits in seen)
 assert not hasattr(options,'_raster_cache'), 'job cache leaked into caller options'
 print('test_raster_cache: actual pipeline passes reuse one bounded cache')
