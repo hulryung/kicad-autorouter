@@ -56,6 +56,32 @@ def _poly_rings(poly) -> List[Tuple[List[Tuple[int, int]], List[List[Tuple[int, 
     return out
 
 
+def protected_pour_regions(board, layer_of):
+    """Zone territories, with higher-priority foreign zones and fill keepouts cut out.
+
+    Use outlines rather than current fills: a new track must not exploit a
+    clearance cut in an old fill to sever a power corridor. Polygon failures
+    propagate rather than silently disabling an explicitly requested guard.
+    """
+    zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
+    keepouts = rule_areas(board)
+    for zone in zones:
+        for lid in zone.GetLayerSet().CuStack():
+            if lid not in layer_of:
+                continue
+            area = pcbnew.SHAPE_POLY_SET(zone.Outline())
+            for other in zones:
+                if (other.IsOnLayer(lid) and other.GetNetCode() != zone.GetNetCode()
+                        and other.HigherPriority(zone)):
+                    area.BooleanSubtract(pcbnew.SHAPE_POLY_SET(other.Outline()))
+            for other in keepouts:
+                forbids_fill = (other.GetDoNotAllowZoneFills() if hasattr(other, "GetDoNotAllowZoneFills")
+                                else other.GetDoNotAllowCopperPour())
+                if other.IsOnLayer(lid) and forbids_fill:
+                    area.BooleanSubtract(pcbnew.SHAPE_POLY_SET(other.Outline()))
+            yield layer_of[lid], zone.GetNetCode(), area
+
+
 def _filled_goal_cells(grid, poly, keep, inset):
     """Rasterize the five-point landing margin once per connected fill.
 
@@ -1435,6 +1461,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             for pts, zholes in zrings:
                 for idx in grid.polygon_cells(0, pts, zholes, 0):
                     via_block[idx] = 1
+
+    if options.protect_pour_regions:
+        say("Reserving copper pour regions...")
+        for li, code, area in protected_pour_regions(board, layer_of):
+            watchdog.tick()
+            for pts, holes in _poly_rings(area):
+                claim(li, code, lambda r, li=li, pts=pts, holes=holes:
+                      grid.polygon_cells(li, pts, holes, r))
 
     # Pads: obstacles for other nets, targets for their own.
     say("Rasterizing pads...")

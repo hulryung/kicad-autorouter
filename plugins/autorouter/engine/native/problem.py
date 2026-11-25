@@ -127,6 +127,7 @@ class NativeOptions:
     stitch_pitch_mm: float = 4.0    # grid pitch of the candidate stitching spots (a via lands within 3/4 of it of a layer change)
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     plane_nets: bool = True         # nets whose pour covers their pads are planes: vias to the pour, no tracks
+    protect_pour_regions: bool = False  # reserve zone polygons for their own net, including mixed-net layers
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
     repair_islands_only: bool = False  # final refill: join isolated copper, no other routing
     pours_only: bool = False          # the pipeline's last pass: fanout/stitch, no signal routing

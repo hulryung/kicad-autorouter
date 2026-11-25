@@ -7,7 +7,7 @@ Routing experiments use copies; private board inputs are not published.
 
 | Issue | Acceptance requirements | State |
 | --- | --- | --- |
-| #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Pending reproduction |
+| #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Opt-in polygon protection implemented; native priority/hole/routing tests passed; CI pending |
 | #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Structured verdicts implemented; existing no-progress rip-up stop verified; CI pending |
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Pending reproduction |
@@ -87,3 +87,29 @@ also confirms the existing rip-up loop stops after a round with no progress:
 allowing 16 rounds performs the same number of attempts as allowing one for
 a fixed-wall case. Repeated separate jobs remain controlled by the caller;
 the structured verdict and failed set make that decision explicit.
+
+### Reporter-board claim comparison (#19)
+
+A private copy of the reporter's PIO `route_main` snapshot was tested with
+three selected nets, 0.15 mm pitch, 143 owner maps and 117 movable paths.
+All owner/routed/via-block hashes match before and after removing three paths.
+Peak process RSS fell from 2,248,032,256 to 1,952,415,744 bytes (13%).
+Read/claim/removal times were 84.22/14.69/1.90 s before and
+100.41/15.85/2.53 s after. This single sequential run does **not** demonstrate
+a speed improvement; it is also not the original 22-net, 0.1 mm report.
+The claim representation reduces retained memory, but dense owner maps and
+large-board runtime remain follow-up work. Inputs and raw measurements stay
+private under `.improve/issues-20261125/`.
+
+### Mixed-net pour protection (#1)
+
+`NativeOptions.protect_pour_regions=True` reserves each zone's polygon for
+its own net on that zone's layers. Higher-priority foreign zones and fill
+keepouts are subtracted, polygon holes are preserved, and clearance/track
+radius is included in the obstacles. This opt-in restriction also applies
+to path simplification through the same owner maps; it does not depend on
+one `plane_net` per layer or on stale filled copper.
+
+`test_protected_pours.py` checks the two overlapping nets, a hole exposing
+the underlying zone, the disabled mode, and actual emitted tracks with only
+In2 routable. The route detours around the foreign corridor.

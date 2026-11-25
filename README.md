@@ -858,3 +858,11 @@ package. GitHub Releases are published separately; attach the same tested ZIP.
 ## License
 
 [MIT](LICENSE). The source and installable package are publicly available.
+
+For mixed power layers, headless jobs can set
+`NativeOptions(protect_pour_regions=True)` to reserve copper-zone polygons
+for their own nets. This includes higher-priority islands and polygon holes,
+and applies even with `plane_nets=False`. Foreign tracks must detour around
+the reserved region or use another layer; a fully enclosed endpoint can
+therefore remain unrouted. The option defaults to off. Unlike the existing
+whole-layer plane cost, this is a hard restriction at the zone boundary.
