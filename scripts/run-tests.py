@@ -4,6 +4,7 @@
     python3 scripts/run-tests.py            # the offline tests pass with any Python 3.8+
     <KiCad's python3> scripts/run-tests.py  # also the pcbnew/wx ones (others skip themselves)
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,13 +14,34 @@ TESTS = Path(__file__).resolve().parent.parent / "tests"
 
 def main():
     words = sys.argv[1:]
+    tests = [test for test in sorted(TESTS.glob("test_*.py"))
+             if not words or any(w in test.stem for w in words)]
+    if not tests:
+        print("No tests matched:", " ".join(words), file=sys.stderr)
+        return 2
     failed = []
-    for test in sorted(TESTS.glob("test_*.py")):
-        if words and not any(w in test.stem for w in words):
-            continue
-        result = subprocess.run([sys.executable, str(test)])
-        if result.returncode != 0:
+    env = dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1", PYTHONFAULTHANDLER="1")
+    timeout = float(os.environ.get("KICAD_AUTOROUTER_TEST_TIMEOUT", "300"))
+    for test in tests:
+        print("RUN:", test.name, flush=True)
+        command = [sys.executable, "-u", str(test)]
+        trace_after = env.get("KICAD_AUTOROUTER_TEST_TRACEBACK_AFTER")
+        if trace_after:
+            bootstrap = ("import faulthandler,runpy,sys; from pathlib import Path; "
+                         "faulthandler.dump_traceback_later(float(sys.argv[1]),repeat=True); "
+                         "sys.argv=sys.argv[2:]; sys.path.insert(0,str(Path(sys.argv[0]).parent)); "
+                         "runpy.run_path(sys.argv[0],run_name='__main__')")
+            command = [sys.executable, "-u", "-c", bootstrap, trace_after, str(test)]
+        try:
+            result = subprocess.run(command, env=env, timeout=timeout)
+            if result.returncode != 0:
+                print(f"FAIL: {test.name} exited {result.returncode}", flush=True)
+                failed.append(test.name)
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT: {test.name} exceeded {timeout:g} seconds", flush=True)
             failed.append(test.name)
+        if failed and env.get("KICAD_AUTOROUTER_TEST_FAIL_FAST") == "1":
+            break
     if failed:
         print("FAILED:", ", ".join(failed))
         return 1

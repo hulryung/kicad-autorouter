@@ -1,4 +1,5 @@
 """What the user sets for a run; persisted between runs."""
+import math
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
@@ -36,7 +37,36 @@ class RouteOptions:
     @classmethod
     def from_dict(cls, data: dict) -> "RouteOptions":
         options = cls()
-        for key, value in (data or {}).items():
-            if hasattr(options, key):
+        if not isinstance(data, dict):
+            return options
+        for key, value in data.items():
+            if key not in cls.__dataclass_fields__:
+                continue
+            default = getattr(options, key)
+            if key in ('routable_layers', 'horizontal_layers'):
+                valid = value is None or (isinstance(value, list) and all(type(v) is bool for v in value))
+            elif key == 'ignore_net_classes':
+                valid = isinstance(value, list) and all(isinstance(v, str) for v in value)
+            elif type(default) is bool:
+                valid = type(value) is bool
+            elif type(default) in (int, float):
+                valid = type(value) in (int, float) and math.isfinite(value) and value >= 0
+                if type(default) is int:
+                    valid = valid and float(value).is_integer()
+                bounds = {'native_pitch_mm': (0.025, 2), 'native_via_cost': (0, 100000),
+                          'native_max_expansions_k': (10, 100000), 'native_time_limit_min': (0, 600),
+                          'native_stitch_pitch_mm': (1, 50)}
+                if valid and key in bounds:
+                    lo, hi = bounds[key]
+                    valid = lo <= value <= hi
+                if valid:
+                    value = type(default)(value)
+            else:
+                valid = isinstance(value, type(default))
+            if key == 'native_track_mode':
+                valid = value in ('auto', 'netclass', 'current', 'fixed')
+            if key == 'native_via_mode':
+                valid = value in ('netclass', 'current', 'fixed')
+            if valid:
                 setattr(options, key, value)
         return options

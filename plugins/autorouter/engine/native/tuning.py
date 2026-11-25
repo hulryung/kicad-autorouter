@@ -9,6 +9,7 @@ until each is within the group's tolerance of the target. Room is checked
 against the real copper (pads, tracks, vias, keepouts, the board edge) at the
 nets' clearance; the pours are refilled afterwards and do not count.
 """
+from ..compat import board_outline
 import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -190,7 +191,7 @@ class _Room:
             except Exception:
                 pass
         self.outline = pcbnew.SHAPE_POLY_SET()
-        if not board.GetBoardPolygonOutlines(self.outline, True) or self.outline.OutlineCount() == 0:
+        if not board_outline(board, self.outline, True) or self.outline.OutlineCount() == 0:
             self.outline = None
         # the outline's edges (outer and cut-outs), for the edge clearance
         self.edges: List[Tuple[int, int, int, int]] = []

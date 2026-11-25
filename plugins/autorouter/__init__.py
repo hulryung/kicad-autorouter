@@ -20,7 +20,7 @@ def _in_ipc_plugin_process() -> bool:
 
 # Register the SWIG action plugin with KiCad. Guarded so the engine modules
 # can be imported and unit-tested outside KiCad's Python (no pcbnew/wx).
-if not _in_ipc_plugin_process():
+if not _in_ipc_plugin_process() and os.environ.get("KICAD_AUTOROUTER_NO_REGISTER") != "1":
     try:
         from .plugin import AutorouterPlugin
     except ImportError:          # plain Python without pcbnew/wx: engine-only use

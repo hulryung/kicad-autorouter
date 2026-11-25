@@ -21,7 +21,7 @@ def main():
     from autorouter.engine.ai import codex
     from autorouter.engine.options import RouteOptions
     fixture = Path(__file__).parent / 'fixtures' / 'obd2-adapter.kicad_pcb'
-    app = wx.App(False)
+    app = wx.GetApp() or wx.App(False)
     with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'KICAD_AUTOROUTER_HOME': tmp}):
         for cancel in (False, True):
             board = pcbnew.LoadBoard(str(fixture))
@@ -58,6 +58,8 @@ def main():
                 assert dialog.applied and board.GetConnectivity().GetUnconnectedCount(True) == 0
                 assert '10 -> 80' in dialog.status.GetLabel(), dialog.status.GetLabel()
             dialog.Destroy()
+            if dialog.job:
+                dialog.job.close()  # Same cleanup as AutorouterPlugin.Run.
     app.Destroy()
     print('test_ai_dialog_optimize: best result applied; rejection, cancellation and active project preserved')
 

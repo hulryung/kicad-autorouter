@@ -13,6 +13,8 @@ members). In the PCB editor the plugin then asks KiCad to update all tuning
 patterns, so the final meanders are KiCad's own; in a saved board (headless
 runs) they stay the router's, owned by a pattern KiCad can retune.
 """
+from ..compat import resolve_item
+
 import os
 import tempfile
 import uuid
@@ -88,7 +90,8 @@ def attach(board, specs: List[dict]) -> int:
         return 0
     uids = [str(uuid.uuid4()) for _ in specs]
     dummies = [str(uuid.uuid4()) for _ in specs]
-    version = getattr(pcbnew, "SEXPR_BOARD_FILE_VERSION", 20260206)          # this KiCad's own file format
+    version = getattr(pcbnew, "SEXPR_BOARD_FILE_VERSION",
+                      20241229 if pcbnew.Version().startswith("9.") else 20260206)          # this KiCad's own file format
     text = (f"(kicad_pcb\n\t(version {version})\n\t(generator \"autorouter\")\n"
             + "".join(placeholder_sexpr(board, s, d) for s, d in zip(specs, dummies))
             + "".join(pattern_sexpr(board, s, u, d) for s, u, d in zip(specs, uids, dummies)) + ")\n")
@@ -107,7 +110,7 @@ def attach(board, specs: List[dict]) -> int:
             pass
     done = 0
     for spec, uid in zip(specs, uids):
-        item = holder.ResolveItem(pcbnew.KIID(uid))
+        item = resolve_item(holder, pcbnew.KIID(uid))
         if item is None or item.Type() != pcbnew.PCB_GENERATOR_T:
             continue
         group = pcbnew.Cast_to_PCB_GROUP(item)           # a tuning pattern is a group underneath
@@ -117,7 +120,7 @@ def attach(board, specs: List[dict]) -> int:
         item.thisown = 0
         board.Add(item)
         for m in spec["members"]:
-            track = board.ResolveItem(pcbnew.KIID(m))
+            track = resolve_item(board, pcbnew.KIID(m))
             if track is not None:
                 group.AddItem(track)
         done += 1

@@ -1,4 +1,6 @@
 """Find vias that join isolated filled copper to a connected layer of its net."""
+from ..compat import connected_items
+
 import pcbnew
 
 
@@ -25,7 +27,7 @@ def stitch_candidates(board, grid, nets, main):
         if not pads:
             continue
         anchors = {}
-        for item in [pads[0]] + list(conn.GetConnectedItems(pads[0])):
+        for item in [pads[0]] + list(connected_items(conn, pads[0])):
             kind = item.GetClass()
             if kind not in ("PAD", "PCB_VIA", "PCB_TRACK", "PCB_ARC"):
                 continue

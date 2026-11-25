@@ -33,6 +33,21 @@ class NoViaInSmallPadsTests(unittest.TestCase):
         p = extract.extract(self.board, NativeOptions(fanout_vias=False, stitch_vias=False, via_in_small_pads=True))
         self.assertEqual(p.via_block[self.centre(p, self.small)], 0)
 
+    def test_fine_pass_preserves_fabrication_constraint(self):
+        from autorouter.engine.native import extract, pipeline
+        for allowed, last_resort in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(via_in_small_pads=allowed, last_resort=last_resort):
+                options = NativeOptions(fanout_vias=False, stitch_vias=False,
+                                        via_in_small_pads=allowed, via_in_pad_min_mm=1.6,
+                                        via_in_pad_last_resort=last_resort)
+                fine = pipeline.fine_options(options, [self.small.GetNetname()], self.board)
+                self.assertEqual(fine.via_in_small_pads, allowed or last_resort)
+                self.assertEqual(fine.via_in_pad_min_mm, 1.6)
+                self.assertEqual(options.via_in_small_pads, allowed)
+                self.assertEqual(fine.pitch_mm, max(0.025, options.pitch_mm / 2))
+                problem = extract.extract(self.board, fine)
+                self.assertEqual(problem.via_block[self.centre(problem, self.small)], int(not (allowed or last_resort)))
+
     def test_exposed_pad_keeps_vias(self):
         if self.big is None:
             self.skipTest('fixture has no large SMD pad')

@@ -45,7 +45,8 @@ class KeepoutFootprintTests(unittest.TestCase):
         zone.SetIsRuleArea(True)
         zone.SetDoNotAllowVias(True)
         zone.SetDoNotAllowTracks(False)
-        zone.SetDoNotAllowZoneFills(True)
+        (zone.SetDoNotAllowZoneFills if hasattr(zone, "SetDoNotAllowZoneFills")
+         else zone.SetDoNotAllowCopperPour)(True)
         zone.SetLayer(pcbnew.F_Cu)
         half = 1_000_000
         outline = zone.Outline()

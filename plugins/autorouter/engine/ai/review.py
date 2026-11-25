@@ -98,7 +98,12 @@ def metrics(board) -> dict:
         d = t.GetEnd() - t.GetStart()
         a = round(math.degrees(math.atan2(d.y, d.x))) % 180
         angles["octilinear" if a in (0, 45, 90, 135) else "other"] += 1
-    return {"segments": len(tracks), "vias": len(vias), "length_mm": round(sum(t.GetLength() for t in tracks) / 1e6, 1),
+    from . import quality
+    try:
+        si_metrics = quality.measure(board)
+    except Exception as exc:
+        si_metrics = {"available": False, "error": str(exc), "checks": {}}
+    return {"si": si_metrics, "segments": len(tracks), "vias": len(vias), "length_mm": round(sum(t.GetLength() for t in tracks) / 1e6, 1),
             "unconnected": board.GetConnectivity().GetUnconnectedCount(True),
             "angles": dict(angles), "nets_by_detour": rows[:40]}
 

@@ -1,4 +1,6 @@
 """The board as the model sees it: a compact JSON description."""
+from ..compat import connected_items
+
 import json
 import math
 import os
@@ -45,12 +47,26 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
                     shutil.copy2(original, target)
             else:
                 target.unlink(missing_ok=True)
-        if not pcbnew.SaveBoard(str(copy), board):
+        from .board_copy import _snapshot_rules
+        _snapshot_rules(board, copy.with_suffix(".kicad_pro"))
+        if not pcbnew.SaveBoard(str(copy), board, True):
             raise RuntimeError("Could not save the DRC board copy")
-        result = subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--refill-zones",
-                        "-o", str(report), str(copy)], capture_output=True, text=True, timeout=300)
+        refill = ["--refill-zones"]
+        if pcbnew.Version().startswith("9."):
+            from ..isolated import python_executable
+            code = ("import sys; sys.path.insert(0,sys.argv[1]); "
+                    "from autorouter.engine.compat import refill_file; refill_file(sys.argv[2])")
+            worker = subprocess.run([python_executable(), "-c", code,
+                        str(Path(__file__).resolve().parents[3]), str(copy)],
+                        env=dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1"),
+                        capture_output=True, text=True, timeout=120)
+            if worker.returncode:
+                raise RuntimeError(f"DRC refill failed: {worker.stderr[-1000:]}")
+            refill = []
+        result = subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error"] + refill +
+                        ["-o", str(report), str(copy)], capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            raise RuntimeError(f"kicad-cli DRC failed ({result.returncode}): {result.stderr[-1000:]}")
+            raise RuntimeError(f"kicad-cli DRC failed ({result.returncode}): {(result.stderr or result.stdout)[-1000:]}")
         data = json.loads(report.read_text(encoding="utf-8"))
     except Exception as e:
         return {"available": False, "error": str(e)}
@@ -61,11 +77,16 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
                       "items": [it.get("description", "")[:120] for it in v.get("items", [])],
                       "pos_mm": (v.get("items") or [{}])[0].get("pos")})
     unconnected = Counter()
+    net_of = {str(item.m_Uuid.AsString()): item.GetNetname()
+              for item in list(board.GetPads()) + list(board.GetTracks()) + list(board.Zones())}
+    unmapped = 0
     opens = []
     for u in data.get("unconnected_items", []):
-        desc = u["items"][0]["description"] if u.get("items") else ""
-        if "[" in desc:
-            unconnected[desc.split("[")[1].split("]")[0]] += 1
+        names = {net_of[it['uuid']] for it in u.get('items', []) if it.get('uuid') in net_of}
+        if len(names) == 1:
+            unconnected[next(iter(names))] += 1
+        else:
+            unmapped += 1
         if len(opens) < limit:
             opens.append({"items": [it.get("description", "")[:100] for it in u.get("items", [])],
                           "pos_mm": [[it.get("pos", {}).get("x"), it.get("pos", {}).get("y")]
@@ -79,7 +100,8 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
     return {"available": True, "violations_by_type": dict(kinds), "violations": items,
             "violation_identities": identities,
             "unconnected_total": len(data.get("unconnected_items", [])),
-            "unconnected_by_net": dict(unconnected.most_common(40)),
+            "unconnected_by_net": dict(unconnected),
+            "unconnected_by_net_complete": unmapped == 0,
             "unconnected": opens}
 
 
@@ -117,7 +139,7 @@ def unconnected_edges(board, limit: int = 60) -> List[dict]:
 
         for i, pad in enumerate(pads):
             try:
-                linked = conn.GetConnectedItems(pad)
+                linked = connected_items(conn, pad)
             except Exception:
                 linked = []
             for other in linked:

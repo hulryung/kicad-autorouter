@@ -11,7 +11,7 @@ The API backends need their SDK in KiCad's own Python:
   <KiCad python3> -m pip install anthropic      (or openai)
 
 run() keeps the dialog alive while it waits: the CLIs run as processes and
-the API calls in a thread, with poll() called every 0.2 s and cancelled()
+the API calls in a separate process, with poll() called every 0.2 s and cancelled()
 checked as often.
 """
 import base64
@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -109,42 +109,56 @@ def run(backend, prompt: str, workdir: Path, schema: Optional[dict] = None, mode
                          on_output=on_output, cancelled=cancelled, poll=poll, images=images)
     if p.kind == CLAUDE_CLI:
         return _claude_cli(p, prompt, workdir, schema, model, timeout, on_output, cancelled, poll, images)
-    call = _anthropic_api if p.kind == ANTHROPIC_API else _openai_api
+    if p.kind not in (ANTHROPIC_API, OPENAI_API):
+        raise LLMError(f"Unknown provider: {p.kind}")
     ok, why = status(p)
     if not ok:
         raise LLMError(why)
     (workdir / "llm-prompt.md").write_text(prompt, encoding="utf-8")
     if on_output:
         on_output(f"asking {p.label}, model {model or DEFAULT_MODEL[p.kind]}...")
-    text = _in_thread(lambda: call(p, prompt, schema, model, images), timeout, cancelled, poll)
+    text = _api_process(p, prompt, workdir, schema, model, images, timeout, cancelled, poll)
     (workdir / "llm-reply.txt").write_text(text, encoding="utf-8")
     return extract_json(text)
 
 
-def _in_thread(fn, timeout, cancelled, poll):
-    box = {}
+def _api_process(p, prompt, workdir, schema, model, images, timeout, cancelled, poll):
+    from .. import isolated
+    workdir = workdir.resolve()
+    request = workdir / 'api-request.json'
+    reply = workdir / 'api-result.json'
+    reply.unlink(missing_ok=True)
+    request.write_text(json.dumps({'provider': asdict(p), 'prompt': prompt, 'schema': schema,
+                                  'model': model, 'images': [str(Path(i).resolve()) for i in images or []],
+                                  'timeout': min(60.0, timeout)}), encoding='utf-8')
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); "
+            "from autorouter.engine.ai.llm import _api_worker; "
+            "sys.exit(_api_worker(sys.argv[2], sys.argv[3]))")
+    try:
+        exit_code = isolated.run([isolated.python_executable(), '-c', code,
+                                  str(Path(__file__).resolve().parents[3]), str(request), str(reply)],
+                                 workdir, timeout, cancelled, poll)
+    except (RuntimeError, TimeoutError) as exc:
+        raise LLMError(str(exc)) from exc
+    if not reply.exists():
+        raise LLMError(f'API worker exited {exit_code}; see worker-stderr.log')
+    result = json.loads(reply.read_text(encoding='utf-8'))
+    if exit_code != 0 or 'error' in result:
+        raise LLMError(result.get('error', f'API worker exited {exit_code}'))
+    return result['text']
 
-    def work():
-        try:
-            box["value"] = fn()
-        except BaseException as e:          # handed to the caller's thread
-            box["error"] = e
 
-    t = threading.Thread(target=work, daemon=True)
-    t.start()
-    started = time.time()
-    while t.is_alive():
-        if cancelled and cancelled():
-            raise LLMError("Cancelled.")       # the thread ends on its own; its answer is dropped
-        if time.time() - started > timeout:
-            raise LLMError(f"The model did not answer within {timeout:.0f}s.")
-        if poll:
-            poll()
-        t.join(0.2)
-    if "error" in box:
-        e = box["error"]
-        raise e if isinstance(e, LLMError) else LLMError(f"{type(e).__name__}: {e}")
-    return box["value"]
+def _api_worker(request_path, reply_path):
+    data = json.loads(Path(request_path).read_text(encoding='utf-8'))
+    try:
+        p = Provider(**data['provider'])
+        call = _anthropic_api if p.kind == ANTHROPIC_API else _openai_api
+        text = call(p, data['prompt'], data['schema'], data['model'], data['images'], data['timeout'])
+        result, code = {'text': text}, 0
+    except Exception as exc:
+        result, code = {'error': f'{type(exc).__name__}: {exc}'}, 1
+    Path(reply_path).write_text(json.dumps(result), encoding='utf-8')
+    return code
 
 
 def _image_b64(path: Path) -> Tuple[str, str]:
@@ -173,8 +187,6 @@ def _claude_cli(p, prompt, workdir, schema, model, timeout, on_output, cancelled
     kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if sys.platform == "win32" else {}
     proc = subprocess.Popen(cmd, cwd=str(workdir), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", **kwargs)
-    if on_output:
-        on_output(f"asking Claude Code ({binary})...")
     out = {}
 
     def talk():
@@ -184,6 +196,8 @@ def _claude_cli(p, prompt, workdir, schema, model, timeout, on_output, cancelled
     t.start()
     started = time.time()
     try:
+        if on_output:
+            on_output(f"asking Claude Code ({binary})...")
         while t.is_alive():
             if cancelled and cancelled():
                 raise LLMError("Cancelled.")
@@ -199,12 +213,19 @@ def _claude_cli(p, prompt, workdir, schema, model, timeout, on_output, cancelled
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                proc.wait()
+        t.join(timeout=3)
+        (workdir / "claude-reply.json").write_text(out.get("stdout", ""), encoding="utf-8")
+        (workdir / "claude-stderr.log").write_text(out.get("stderr", ""), encoding="utf-8")
     raw = out.get("stdout", "")
-    (workdir / "claude-reply.json").write_text(raw, encoding="utf-8")
+    if proc.returncode != 0:
+        raise LLMError(f"Claude Code exited with code {proc.returncode}:\n{(out.get('stderr') or raw)[-800:]}")
     try:
         result = json.loads(raw)
     except ValueError:
         raise LLMError(f"Claude Code exited with code {proc.returncode}:\n{(out.get('stderr') or raw)[-800:]}")
+    if not isinstance(result, dict):
+        raise LLMError("Claude Code returned a non-object result.")
     if result.get("is_error"):
         raise LLMError(f"Claude Code: {str(result.get('result'))[:800]}")
     if isinstance(result.get("structured_output"), dict):
@@ -214,9 +235,9 @@ def _claude_cli(p, prompt, workdir, schema, model, timeout, on_output, cancelled
 
 # ---- Claude API ----------------------------------------------------------------
 
-def _anthropic_api(p, prompt, schema, model, images) -> str:
+def _anthropic_api(p, prompt, schema, model, images, timeout=60.0) -> str:
     import anthropic
-    client = anthropic.Anthropic()        # ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or an `ant auth login` profile
+    client = anthropic.Anthropic(timeout=timeout, max_retries=0)        # ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or an `ant auth login` profile
     content = []
     for image in images or []:
         image = Path(image)
@@ -264,9 +285,9 @@ def _stream(client, request):
 
 # ---- OpenAI API ----------------------------------------------------------------
 
-def _openai_api(p, prompt, schema, model, images) -> str:
+def _openai_api(p, prompt, schema, model, images, timeout=60.0) -> str:
     import openai
-    client = openai.OpenAI()              # OPENAI_API_KEY
+    client = openai.OpenAI(timeout=timeout, max_retries=0)              # OPENAI_API_KEY
     content = [{"type": "input_text", "text": prompt}]
     for image in images or []:
         image = Path(image)

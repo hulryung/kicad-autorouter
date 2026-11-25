@@ -1,4 +1,9 @@
 """Reading the board into a RoutingProblem through pcbnew (main thread only)."""
+from ..compat import zone_filler
+
+from ..compat import connected_items
+
+from ..compat import board_outline
 import fnmatch
 import math
 import os
@@ -898,7 +903,7 @@ def _main_pad_components(board, conn) -> Dict[int, Set[Tuple[int, int, int]]]:
             continue
         try:
             members = {_pad_component_key(item)
-                       for item in conn.GetConnectedItems(pad) if item.GetClass() == "PAD"}
+                       for item in connected_items(conn, pad) if item.GetClass() == "PAD"}
         except Exception:
             continue
         members.add(pos)
@@ -936,14 +941,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         try:
             zones = [z for z in board.Zones() if not z.GetIsRuleArea()]
             if zones:
-                pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+                zone_filler(board).Fill(board.Zones())
                 board.BuildConnectivity()
                 refilled = True
         except Exception:
             pass
 
     outline = pcbnew.SHAPE_POLY_SET()
-    if not board.GetBoardPolygonOutlines(outline, True) or outline.OutlineCount() == 0:
+    if not board_outline(board, outline, True) or outline.OutlineCount() == 0:
         # No usable Edge.Cuts: fall back to the bounding box of what is there.
         bb = board.GetBoardEdgesBoundingBox()
         if bb.GetWidth() <= 0 or bb.GetHeight() <= 0:
@@ -1730,14 +1735,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         if options.shove:
             return False
         try:
-            return any(item.GetClass() in ("PCB_TRACK", "PCB_VIA", "PCB_ARC") for item in board_conn.GetConnectedItems(pad))
+            return any(item.GetClass() in ("PCB_TRACK", "PCB_VIA", "PCB_ARC") for item in connected_items(board_conn, pad))
         except Exception:
             return False
 
     def _touched_by_job(pad) -> bool:
         """Is the pad joined to a track or via an earlier pass of this job dropped?"""
         try:
-            return any(str(item.m_Uuid.AsString()) in job_items for item in board_conn.GetConnectedItems(pad))
+            return any(str(item.m_Uuid.AsString()) in job_items for item in connected_items(board_conn, pad))
         except Exception:
             return False
 
@@ -2343,7 +2348,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         cut off has neither, and needs a via of its own; so does a pad the
         pour does not reach at all."""
         try:
-            items = list(conn.GetConnectedItems(pad))
+            items = list(connected_items(conn, pad))
         except Exception:
             return False
         if not any(item.GetClass() == "ZONE" for item in items) or _stranded(pad, items):
@@ -2401,7 +2406,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         the rest of the net; 2: a via stranded with the pad alone (an island
         of the pour), which does not count."""
         try:
-            items = list(conn.GetConnectedItems(pad))
+            items = list(connected_items(conn, pad))
         except Exception:
             return 0
         if not any(item.GetClass() == "PCB_VIA" for item in items):
@@ -2437,7 +2442,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if code not in representatives and pos in main_components.get(code, set()):
                 representatives[code] = pad
         for code, pad in representatives.items():
-            for item in conn.GetConnectedItems(pad):
+            for item in connected_items(conn, pad):
                 kind = item.GetClass()
                 if kind not in ("PAD", "PCB_VIA", "PCB_TRACK", "PCB_ARC"):
                     continue
@@ -2527,7 +2532,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 if other is z or not other.IsOnLayer(lid):
                     continue
                 if other.GetIsRuleArea():
-                    if not other.GetDoNotAllowZoneFills():
+                    if not (other.GetDoNotAllowZoneFills() if hasattr(other, "GetDoNotAllowZoneFills")
+                            else other.GetDoNotAllowCopperPour()):
                         continue
                     cut = other.Outline()
                 elif other.GetNetCode() == z.GetNetCode() or not other.HigherPriority(z):
@@ -2941,7 +2947,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if k in seen:
                 continue                               # one call returns the whole connected piece
             try:
-                linked = list(conn.GetConnectedItems(it))
+                linked = list(connected_items(conn, it))
             except Exception:
                 linked = []
             for other in linked:
@@ -3034,7 +3040,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             index_of = {id(pad): i for i, (pad, _, _, _, _) in enumerate(entries)}
             for i, (pad, _, _, _, _) in enumerate(entries):
                 try:
-                    linked = conn.GetConnectedItems(pad)
+                    linked = connected_items(conn, pad)
                 except Exception:
                     linked = []
                 for other in linked:

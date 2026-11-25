@@ -23,6 +23,21 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
+def report_open_nets(board, data):
+    """Map every DRC open edge to its net; expose incomplete UUID evidence."""
+    unconnected = Counter()
+    net_of = {str(item.m_Uuid.AsString()): item.GetNetname()
+              for item in list(board.GetPads()) + list(board.GetTracks()) + list(board.Zones())}
+    unmapped = 0
+    for u in data.get("unconnected_items", []):
+        names = {net_of[it['uuid']] for it in u.get('items', []) if it.get('uuid') in net_of}
+        if len(names) == 1:
+            unconnected[next(iter(names))] += 1
+        else:
+            unmapped += 1
+    return dict(unconnected), unmapped == 0
+
+
 def kicad_cli():
     for cand in (shutil.which("kicad-cli"), "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
                  r"C:\Program Files\KiCad\bin\kicad-cli.exe"):
@@ -351,7 +366,7 @@ class Renderer:
             if not zone.GetIsRuleArea():
                 zone.UnFill()
         copy = workdir / f"{name}-nozones.kicad_pcb"
-        pcbnew.SaveBoard(str(copy), board)
+        pcbnew.SaveBoard(str(copy), board, True)
         self.svg = workdir / f"{name}.svg"
         subprocess.run([kicad_cli(), "pcb", "export", "svg", "--layers", self.LAYERS, "--exclude-drawing-sheet",
                         "--page-size-mode", "2", "--mode-single", "-o", str(self.svg), str(copy)],
@@ -526,7 +541,9 @@ def main():
     # reports is there before any track, a footprint's own pads against its
     # holes for instance, and is not counted against the router
     stripped_path = out / "stripped.kicad_pcb"
-    pcbnew.SaveBoard(str(stripped_path), board)
+    from autorouter.engine.ai.board_copy import _snapshot_rules
+    _snapshot_rules(board, stripped_path.with_suffix(".kicad_pro"))
+    pcbnew.SaveBoard(str(stripped_path), board, True)
     if si_cfg is not None and si_cfg.fab:
         from autorouter.engine import fab
         fab.write_drc_rules(pcbnew.LoadBoard(str(stripped_path)), si_cfg.fab)
@@ -534,7 +551,8 @@ def main():
     seconds = time.time() - t0
     session.refill_zones(board)
     board.BuildConnectivity()
-    pcbnew.SaveBoard(str(routed_path), board)
+    _snapshot_rules(board, routed_path.with_suffix(".kicad_pro"))
+    pcbnew.SaveBoard(str(routed_path), board, True)
     if si_cfg is not None:
         from autorouter.engine import si
         from autorouter.engine.native import tuning
@@ -609,6 +627,7 @@ def main():
         for g in intent.get("length_groups", []):
             if not g["ok"] and g.get("where"):
                 issues.append({"kind": "length_mismatch", "x": g["where"][0], "y": g["where"][1], "what": g["name"]})
+    open_counts, open_complete = report_open_nets(board, report or {})
     metrics = {
         "board": ref_path.name,
         "intent": intent,
@@ -628,6 +647,8 @@ def main():
         "search_work": _search_work(),
         "stages": stages,
         "unconnected_after": unconnected,
+        "unconnected_by_net": open_counts,
+        "unconnected_by_net_complete": report is not None and open_complete,
         "drc": {f"{t}/{s}": n for (t, s), n in sorted(violations.items())},
         "drc_preexisting": skipped_preexisting,     # on the board before routing (footprints), not counted
         # physical errors (clearance, shorts...) apart from the design-intent rules (width, gap, skew, length)

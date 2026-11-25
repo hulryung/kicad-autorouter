@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Publish the current version to the PCM distribution repository.
 
-The code repository is private; KiCad's Plugin and Content Manager fetches
+KiCad's Plugin and Content Manager fetches
 metadata and zips without credentials, so a separate public repository
 holds only what the PCM needs: repository.json, packages.json, resources.zip
 (the icon) and the package zips. This script builds the package, writes the
@@ -12,6 +12,7 @@ metadata and pushes it there.
 Users then add this URL once in PCM > Manage > Add Repository:
     https://raw.githubusercontent.com/hulryung/kicad-autorouter-pcm/main/repository.json
 """
+import argparse
 import hashlib
 import json
 import os
@@ -32,19 +33,64 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def validate_checkout(directory, repository):
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(directory), *args], text=True).strip()
+    expected = {f'https://github.com/{repository}', f'https://github.com/{repository}.git',
+                f'git@github.com:{repository}.git', f'ssh://git@github.com/{repository}.git'}
+    for args in (('remote', 'get-url', 'origin'), ('remote', 'get-url', '--push', 'origin')):
+        if git(*args) not in expected:
+            raise RuntimeError('Distribution origin does not match requested GitHub repository')
+    if git('branch', '--show-current') != 'main':
+        raise RuntimeError('Distribution checkout must be on main')
+
+
+def prepare_catalogue(path, metadata, package, raw):
+    """Fail closed on corrupt catalogues and immutable-version conflicts."""
+    data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'packages': []}
+    if not isinstance(data, dict) or not isinstance(data.get('packages'), list):
+        raise ValueError('Invalid PCM catalogue: expected packages list')
+    rows = data['packages']
+    ids = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('identifier'), str) or not isinstance(row.get('versions'), list):
+            raise ValueError('Invalid PCM package entry')
+        versions = row['versions']
+        if any(not isinstance(v, dict) or not isinstance(v.get('version'), str) for v in versions):
+            raise ValueError('Invalid PCM version entry')
+        if len({v['version'] for v in versions}) != len(versions):
+            raise ValueError('Duplicate PCM versions')
+        ids.append(row['identifier'])
+    if len(set(ids)) != len(ids):
+        raise ValueError('Duplicate PCM identifiers')
+    ident = metadata['identifier']
+    version = metadata['versions'][0]['version']
+    old = next((row for row in rows if row['identifier'] == ident), None)
+    versions = old['versions'] if old else []
+    for previous in versions:
+        if previous['version'] == version and previous.get('download_sha256') != package['download_sha256']:
+            raise RuntimeError(f'Published package bytes differ for {version}; bump the version')
+    entry = dict(metadata)
+    entry.setdefault('maintainer', metadata['author'])
+    entry['versions'] = [{**metadata['versions'][0],
+                          'download_url': f"{raw}/packages/{Path(package['zip']).name}",
+                          **{k: package[k] for k in ('download_sha256', 'download_size', 'install_size')}}] + [
+                              v for v in versions if v['version'] != version]
+    data['packages'] = [entry if row['identifier'] == ident else row for row in rows]
+    if old is None:
+        data['packages'].append(entry)
+    return data
+
+
 def main(argv):
-    dist_repo = DEFAULT_DIST
-    dist_dir = REPO.parent / "kicad-autorouter-pcm"
-    push = True
-    args = argv[1:]
-    while args:
-        a = args.pop(0)
-        if a == "--repo":
-            dist_repo = args.pop(0)
-        elif a == "--dir":
-            dist_dir = Path(args.pop(0))
-        elif a == "--no-push":
-            push = False
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--repo', default=DEFAULT_DIST)
+    parser.add_argument('--dir', type=Path, default=REPO.parent / 'kicad-autorouter-pcm')
+    parser.add_argument('--no-push', action='store_true')
+    args = parser.parse_args(argv[1:])
+    dist_repo, dist_dir, push = args.repo, args.dir, not args.no_push
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', dist_repo):
+        raise ValueError('Expected a GitHub owner/repository')
     raw = f"https://raw.githubusercontent.com/{dist_repo}/main"
 
     # 1. build the package zip
@@ -64,39 +110,29 @@ def main(argv):
     dirty = subprocess.check_output(["git", "-C", str(dist_dir), "status", "--porcelain"], text=True)
     if dirty.strip():
         raise RuntimeError(f"Distribution checkout has uncommitted changes: {dist_dir}")
-    subprocess.run(["git", "-C", str(dist_dir), "pull", "-q", "--ff-only"], check=True)
-    packages_dir = dist_dir / "packages"
-    packages_dir.mkdir(exist_ok=True)
-    shutil.copy(zip_path, packages_dir / zip_path.name)
-
-    # 3. resources.zip: <identifier>/icon.png
+    validate_checkout(dist_dir, dist_repo)
+    subprocess.run(["git", "-C", str(dist_dir), "pull", "-q", "--ff-only", "origin", "main"], check=True)
+    # Validate all release/catalogue inputs before modifying distribution files.
     metadata = json.loads((REPO / "metadata.json").read_text(encoding="utf-8"))
     ident = metadata["identifier"]
-    resources = dist_dir / "resources.zip"
-    with zipfile.ZipFile(resources, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(REPO / "resources" / "icon.png", f"{ident}/icon.png")
-
-    # 4. packages.json: this version plus any older ones already listed
     packages_file = dist_dir / "packages.json"
-    old_versions = []
-    if packages_file.exists():
-        try:
-            for pkg in json.loads(packages_file.read_text(encoding="utf-8")).get("packages", []):
-                if pkg.get("identifier") == ident:
-                    old_versions = [v for v in pkg.get("versions", []) if v.get("version") != version]
-        except ValueError:
-            pass
-    entry = dict(metadata)
-    entry.setdefault("maintainer", metadata["author"])
-    entry["versions"] = [{
-        **metadata["versions"][0],
-        "version": version,
-        "download_url": f"{raw}/packages/{zip_path.name}",
-        "download_sha256": sha256(zip_path),
-        "download_size": zip_path.stat().st_size,
-        "install_size": install_size,
-    }] + old_versions
-    packages_file.write_text(json.dumps({"packages": [entry]}, indent=2) + "\n", encoding="utf-8")
+    catalogue = prepare_catalogue(packages_file, metadata, package, raw)
+    packages_dir = dist_dir / "packages"
+    destination = packages_dir / zip_path.name
+    if destination.exists() and sha256(destination) != sha256(zip_path):
+        raise RuntimeError(f"Published package bytes differ for {version}; bump the version")
+    resources = dist_dir / "resources.zip"
+    icons = {}
+    if resources.exists():
+        with zipfile.ZipFile(resources) as archive:
+            icons = {name: archive.read(name) for name in archive.namelist()}
+    icons[f"{ident}/icon.png"] = (REPO / "resources" / "icon.png").read_bytes()
+    packages_dir.mkdir(exist_ok=True)
+    shutil.copy(zip_path, destination)
+    with zipfile.ZipFile(resources, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in sorted(icons.items()):
+            archive.writestr(name, data)
+    packages_file.write_text(json.dumps(catalogue, indent=2) + "\n", encoding="utf-8")
 
     # 5. repository.json
     now = int(time.time())

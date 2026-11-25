@@ -173,7 +173,7 @@ def main(argv):
         src = board_file.with_suffix(sidecar)
         if src.exists():
             shutil.copy(src, target.with_suffix(sidecar))
-    pcbnew.SaveBoard(str(target), board)
+    pcbnew.SaveBoard(str(target), board, True)
     reloaded = pcbnew.LoadBoard(str(target))
     after = reloaded.GetConnectivity().GetUnconnectedCount(True)
     # reading the routed board again (now with tracks and vias as obstacles)

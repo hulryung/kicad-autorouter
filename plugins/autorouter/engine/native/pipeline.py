@@ -7,6 +7,8 @@ finer grid (half the pitch), at the neck width, with cheaper vias, in a run
 scoped to just those nets. That is what a designer does by hand for the last
 few stubborn connections, and what the AI assistant found by itself.
 """
+from ..compat import zone_filler
+
 import copy
 import time
 from collections import Counter
@@ -100,9 +102,8 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.scope_locks_pairs = options.scope_locks_pairs and options.scope != SCOPE_BOARD
     fine.fanout_vias = False
     fine.dual_escapes = True       # leave a stubborn pad by either end, whichever the search finds open
-    # a stubborn pad may take a via in a small pad of its net as a last
-    # resort (run_job names each one): an open net is worse than a via in pad,
-    # unless the board is built without via filling (via_in_pad_last_resort off)
+    # Keep fabrication restrictions unless the user explicitly opts into
+    # vias in small pads for every pass or for the finer retry only.
     fine.via_in_small_pads = options.via_in_small_pads or options.via_in_pad_last_resort
     fine.stitch_vias = False
     fine.rip_rounds = max(fine.rip_rounds, 12)
@@ -135,8 +136,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     finally:
         watchdog.stop(w)
     if vias_before is not None:
-        # the finer second pass may drill a small pad as a last resort (an
-        # open net is worse): name every one, for the designer to look at
+        # Defensive audit: every pass must respect the fabrication constraint.
         try:
             hits = _vias_in_small_pads(board, vias_before, int(options.via_in_pad_min_mm * 1_000_000))
         except Exception as e:
@@ -145,7 +145,8 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         if hits:
             out.stats["vias_in_small_pads"] = hits
             if status:
-                status(f"{len(hits)} via(s) drilled into small SMD pads as a last resort: {', '.join(hits[:8])}"
+                reason = "used the enabled small-pad fallback" if options.via_in_pad_last_resort else "violate the small-SMD-pad restriction"
+                status(f"{len(hits)} via(s) {reason}: {', '.join(hits[:8])}"
                        + (" ..." if len(hits) > 8 else ""))
     out.stats["slow_stages"] = [list(t) for t in w.slow()]
     out.stats["stalls"] = [[n, round(sec), where] for n, sec, where in w.stalls]
@@ -596,7 +597,7 @@ def _pad_label(pad) -> str:
 
 
 def _refill(board) -> None:
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
 
 
@@ -815,7 +816,7 @@ def _open_pour_joins(board, joins: dict, result) -> List[str]:
     "pour_joins": pad groups before the run, connections in all and in
     scope), those the refilled board has in more groups than the routed
     connections leave."""
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     conn = board.GetConnectivity()
     failed = Counter(c.net for c in result.failed)

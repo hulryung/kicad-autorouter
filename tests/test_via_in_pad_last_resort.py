@@ -21,12 +21,15 @@ from autorouter.engine.native.problem import NativeOptions
 def test_last_resort_switch():
     board = pcbnew.LoadBoard(str(Path(__file__).resolve().parent / "fixtures" / "obd2-adapter.kicad_pcb"))
     o = NativeOptions()
-    assert not o.via_in_small_pads and o.via_in_pad_last_resort
-    assert pipeline.fine_options(o, ["A"], board).via_in_small_pads          # default: last resort on
+    assert not o.via_in_small_pads and not o.via_in_pad_last_resort
+    assert not pipeline.fine_options(o, ["A"], board).via_in_small_pads
+    o.via_in_pad_last_resort = True
+    assert pipeline.fine_options(o, ["A"], board).via_in_small_pads
+    assert not o.via_in_small_pads  # retry opt-in must not relax the first pass
     o.via_in_pad_last_resort = False
-    assert not pipeline.fine_options(o, ["A"], board).via_in_small_pads      # off: never in the second pass
+    assert not pipeline.fine_options(o, ["A"], board).via_in_small_pads
     o.via_in_small_pads = True
-    assert pipeline.fine_options(o, ["A"], board).via_in_small_pads          # allowed everywhere: still allowed
+    assert pipeline.fine_options(o, ["A"], board).via_in_small_pads
     print("via-in-pad last resort switch: ok")
 
 

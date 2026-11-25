@@ -21,6 +21,7 @@ except ImportError:
     print("test_hole_to_hole: skipped (needs KiCad's Python)")
     sys.exit(0)
 
+from autorouter.engine.compat import zone_filler
 from autorouter.engine.native import pipeline
 from autorouter.engine.native.problem import NativeOptions
 
@@ -100,7 +101,7 @@ def make_board(via_at, stub: bool):
     for px, py in ((0.5, 0.5), (19.5, 0.5), (19.5, 14.5), (0.5, 14.5)):
         o.Append(int(px * MM), int(py * MM))
     board.Add(z)
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     return board, gnd.GetNetCode()
 
@@ -136,7 +137,7 @@ def main():
             board, gnd = make_board(spot, stub=False)
             job = pipeline.run_job(board, NativeOptions(pitch_mm=0.1, shove=shove, stitch_vias=False))
             worst += hole_gaps(board)
-            pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+            zone_filler(board).Fill(board.Zones())
             board.BuildConnectivity()
             vias = sum(1 for t in board.GetTracks() if t.GetClass() == "PCB_VIA")
             print(f"     {mode} via at ({spot[0]:.2f}, {spot[1]:.2f}): {vias} vias, "

@@ -31,6 +31,7 @@ except ImportError:
     print("test_shove_scope: skipped (needs KiCad's Python)")
     sys.exit(0)
 
+from autorouter.engine.compat import zone_filler
 from autorouter.engine.native import extract, pipeline
 from autorouter.engine.native.problem import NativeOptions, SCOPE_BOARD, SCOPE_SELECTION
 
@@ -124,7 +125,7 @@ def pour_board():
     for x, y in ((10, 0.5), (39.5, 0.5), (39.5, 19.5), (10, 19.5)):
         o.Append(int(x * MM), int(y * MM))
     board.Add(z)
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     return board, vcc.GetNetCode()
 
@@ -229,7 +230,7 @@ def main():
         added = new_tracks(board, vcc, before)
         check(f"{what}: no +3V3 track joins them again", not added,
               str([(t.GetStart().x / MM, t.GetStart().y / MM, t.GetEnd().x / MM, t.GetEnd().y / MM) for t in added]))
-        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+        zone_filler(board).Fill(board.Zones())
         board.BuildConnectivity()
         check(f"{what}: the board is fully connected", board.GetConnectivity().GetUnconnectedCount(True) == 0
               and not job.failed, f"failed {job.failed}")

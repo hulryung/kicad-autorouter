@@ -1,0 +1,80 @@
+name: Tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        python: ['3.9', '3.12']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Portable lifecycle, settings and publication tests
+        run: python scripts/run-tests.py runtime_reliability job_retention config_validation publish_guards package_build ai_api_process ai_claude_process ai_quality
+      - name: Build installable package
+        run: python scripts/build-package.py
+  kicad:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['9.0', '10.0']
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install KiCad and virtual display
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-${{ matrix.version }}-releases
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends kicad python3-wxgtk4.0 xvfb xauth
+      - name: Verify integration prerequisites
+        run: |
+          /usr/bin/python3 -c "import pcbnew, wx; print(pcbnew.Version()); assert pcbnew.Version().startswith('${{ matrix.version }}')"
+          kicad-cli version
+      - name: Run native and GUI integration tests
+        env:
+          KICAD_AUTOROUTER_GUI_TESTS: '1'
+          KICAD_AUTOROUTER_PYTHON: /usr/bin/python3
+          KICAD_AUTOROUTER_TEST_TIMEOUT: '120'
+          KICAD_AUTOROUTER_TEST_TRACEBACK_AFTER: '45'
+          KICAD_AUTOROUTER_TEST_FAIL_FAST: '1'
+        run: |
+          xvfb-run -a /usr/bin/python3 scripts/diagnose-kicad.py
+          xvfb-run -a /usr/bin/python3 scripts/run-tests.py
+  kicad-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install official KiCad 10.0.8
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'kicad.exe'
+          Invoke-WebRequest 'https://github.com/KiCad/kicad-source-mirror/releases/download/10.0.8/kicad-10.0.8-x86_64.exe' -OutFile $installer
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'KiCad Services Corporation') { throw 'Invalid KiCad installer signature' }
+          $install = Start-Process $installer -ArgumentList '/allusers', '/S', '/D=C:\KiCad' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "KiCad installation failed: $($install.ExitCode)" }
+          if (!(Test-Path 'C:\KiCad\bin\python.exe')) { throw 'KiCad Python not installed' }
+          'C:\KiCad\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Run Windows board and dialog flows
+        shell: pwsh
+        env:
+          KICAD_AUTOROUTER_GUI_TESTS: '1'
+          KICAD_AUTOROUTER_PYTHON: C:\KiCad\bin\python.exe
+          KICAD_AUTOROUTER_TEST_TIMEOUT: '60'
+        run: |
+          & 'C:\KiCad\bin\python.exe' -c "import pcbnew, wx; print(pcbnew.Version()); assert pcbnew.Version().startswith('10.0')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & 'C:\KiCad\bin\python.exe' scripts/run-tests.py native_ ai_board_copy ai_dialog_optimize ai_optimize ai_quality guide_project_isolation board_setup dialog_smoke si
+          exit $LASTEXITCODE

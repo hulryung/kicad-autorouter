@@ -21,8 +21,13 @@ Built-in guides live in plugin_resources/guides/; the user's own (learnt
 from a board, written by the model, edited) in the plugin's data folder.
 """
 import json
+import math
 import re
+import os
+import subprocess
+import tempfile
 from pathlib import Path
+from .persistence import atomic_text
 from typing import Dict, List, Optional
 
 from . import style as style_mod
@@ -62,6 +67,51 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "guide"
 
 
+def validate(g):
+    """Reject malformed guide values before they reach native routing options."""
+    if not isinstance(g, dict):
+        raise ValueError('Guide must be an object')
+    for key in ('id', 'name', 'summary', 'guide', 'preview'):
+        if key in g and not isinstance(g[key], str):
+            raise ValueError(f'Guide {key} must be text')
+    ident = g.get('id', '')
+    if ident and (not re.fullmatch(r'[A-Za-z0-9_.-]+', ident) or ident in ('.', '..')):
+        raise ValueError('Guide id must be a filename, not a path')
+    if 'order' in g and (type(g['order']) not in (int, float) or not math.isfinite(g['order'])):
+        raise ValueError('Guide order must be finite')
+    style, options = g.get('style', {}), g.get('options', {})
+    if not isinstance(style, dict) or not isinstance(options, dict):
+        raise ValueError('Guide style/options must be objects')
+    for key in ('layers', 'class_width_mm', 'class_via_mm'):
+        if not isinstance(style.get(key, {}), dict):
+            raise ValueError(f'Guide {key} must be an object')
+    def number(v, low=0, high=float('inf')):
+        return type(v) in (int, float) and math.isfinite(v) and low <= v <= high
+    if any(role not in ('plane', 'signal') for role in style.get('layers', {}).values()):
+        raise ValueError('Layer roles must be plane or signal')
+    if any(not number(w) or w == 0 for w in style.get('class_width_mm', {}).values()):
+        raise ValueError('Class widths must be positive and finite')
+    for sizes in style.get('class_via_mm', {}).values():
+        if not isinstance(sizes, list) or len(sizes) != 2 or not all(number(v) for v in sizes) or not 0 < sizes[1] < sizes[0]:
+            raise ValueError('Via sizes must be [diameter, drill] with 0 < drill < diameter')
+    bounds = {'via_cost': (0, 100000), 'pitch_mm': (0.025, 2), 'stitch_pitch_mm': (1, 50),
+              'max_expansions': (1, 100000000)}
+    for key, value in options.items():
+        if value is None or key not in OPTION_KEYS:
+            continue
+        if key in bounds and not number(value, *bounds[key]):
+            raise ValueError(f'Guide option {key} is out of range')
+        if key in ('via_cost', 'max_expansions') and not float(value).is_integer():
+            raise ValueError(f'Guide option {key} must be an integer')
+        if key in ('neck_down', 'diff_pairs', 'stitch_vias', 'fanout_vias', 'plane_nets', 'allow_vias') and type(value) is not bool:
+            raise ValueError(f'Guide option {key} must be boolean')
+        if key == 'route_order':
+            from .si import DEFAULT_ORDER
+            if not isinstance(value, list) or any(v not in DEFAULT_ORDER for v in value):
+                raise ValueError('Invalid routing order')
+    return g
+
+
 def load_all() -> List[dict]:
     """Built-in guides first (in their file order), then the user's."""
     out: List[dict] = []
@@ -70,7 +120,7 @@ def load_all() -> List[dict]:
             continue
         for f in sorted(folder.glob("*.json")):
             try:
-                g = json.loads(f.read_text(encoding="utf-8"))
+                g = validate(json.loads(f.read_text(encoding="utf-8")))
             except (OSError, ValueError):
                 continue
             g.setdefault("id", f.stem)
@@ -98,6 +148,7 @@ def preview_path(g: dict) -> Optional[Path]:
 
 def save(g: dict) -> Path:
     """Write a user guide (never over a built-in one)."""
+    validate(g)
     g = {k: v for k, v in g.items() if k not in ("builtin", "path")}
     g["id"] = g.get("id") or _slug(g.get("name", "guide"))
     if (BUILTIN / f"{g['id']}.json").exists():
@@ -105,7 +156,7 @@ def save(g: dict) -> Path:
     folder = user_dir()
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{g['id']}.json"
-    path.write_text(json.dumps(g, indent=1, ensure_ascii=False), encoding="utf-8")
+    atomic_text(path, json.dumps(g, indent=1, ensure_ascii=False))
     return path
 
 
@@ -124,6 +175,7 @@ def as_text(g: dict) -> str:
 
 def apply(board, g: dict, native_options) -> List[str]:
     """The guide's style and options on a run's NativeOptions."""
+    validate(g)
     lines = style_mod.apply_to_options(board, g.get("style") or {}, native_options)
     for k, v in (g.get("options") or {}).items():
         if k not in OPTION_KEYS or v is None:
@@ -139,8 +191,29 @@ def apply(board, g: dict, native_options) -> List[str]:
 
 
 def learn(path: str) -> dict:
-    """A guide from a finished board: the designer's layer use, widths and vias."""
+    """Read a reference project in another process, preserving the editor project."""
+    from .isolated import python_executable
+    binary = python_executable()
+    with tempfile.TemporaryDirectory(prefix='autorouter-guide-') as tmp:
+        output = Path(tmp) / 'guide.json'
+        code = ("import json,sys; from pathlib import Path; "
+                "sys.path.insert(0, sys.argv[1]); "
+                "from autorouter.engine.guides import _learn_in_process; "
+                "Path(sys.argv[3]).write_text(json.dumps(_learn_in_process(sys.argv[2])), encoding='utf-8')")
+        result = subprocess.run([binary, '-c', code, str(Path(__file__).resolve().parents[2]),
+                                 str(Path(path).resolve()), str(output)],
+                                capture_output=True, text=True, timeout=120,
+                                env=dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1"))
+        if result.returncode != 0 or not output.exists():
+            raise RuntimeError(f"Reference board could not be read: {result.stderr[-1500:]}")
+        return json.loads(output.read_text(encoding='utf-8'))
+
+
+def _learn_in_process(path: str) -> dict:
+    """Worker only: pcbnew.LoadBoard must never run in the editor process."""
     import pcbnew
+    from .compat import native_app
+    native_app()
     board = pcbnew.LoadBoard(path)
     st = style_mod.learn(board)
     planes = [n for n, r in st["layers"].items() if r == "plane"]
@@ -178,7 +251,7 @@ def describe(backend, request: str, board, workdir: Path, poll=None, cancelled=N
     if widths:
         st["class_width_mm"] = widths
     options = {}
-    if reply.get("via_cost"):
+    if reply.get("via_cost") is not None:
         options["via_cost"] = int(reply["via_cost"])
     if reply.get("route_order"):
         options["route_order"] = reply["route_order"]

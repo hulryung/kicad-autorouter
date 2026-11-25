@@ -697,6 +697,45 @@ The folder contains `settings.json`, logs and jobs. The most recent 10 job
 folders are retained. `KICAD_AUTOROUTER_HOME` overrides the location. Per-board
 signal-integrity intent stays beside the PCB, separate from global settings.
 
+## Reliability changes in the current checkout
+
+- Vias in small SMD pads are disabled by default, including fine-grid retries
+  (issue #23). Explicitly set `via_in_small_pads=True` for all passes, or
+  `via_in_pad_last_resort=True` for the finer retry only. Both choices retain
+  `via_in_pad_min_mm`; use them only with an appropriate assembly process.
+- AI edit commands respect locked copper and footprints, including `force`.
+- Candidate acceptance checks each net's unconnected count, length/skew groups,
+  controlled widths and estimated pair coupling. Existing connected nets must
+  not regress. Newly connected nets establish a comparison baseline; the
+  reported SI errors can still require manual correction. Coupling is sampled
+  geometrically and is not an electrical simulation.
+- Learning a routing guide opens the reference project in a separate KiCad
+  Python process. The reference's rules are used without replacing the editor
+  project. `KICAD_AUTOROUTER_PYTHON` can specify that interpreter.
+- Candidate and DRC snapshots include live routing rules and unsaved net-class
+  assignments. Temporary board saves preserve the source project's name and
+  registration in the editor.
+- API requests run in a child process that is terminated on cancellation or
+  timeout. SDK retries are disabled; transport timeout is at most 60 seconds.
+  Cancelling locally does not undo work already accepted by a remote service.
+- Active job folders hold an OS lease and survive retention cleanup. A process
+  crash releases the lease. Unmarked folders from older installations are
+  retained for manual cleanup; the usual ten-folder limit can therefore be
+  exceeded by active or legacy jobs.
+- SI, fabrication-rule and guide files use atomic replacement. Malformed
+  settings/guide values are checked before routing.
+- PCM publication rejects corrupt catalogues, a mismatched remote/branch, and
+  different ZIP bytes for an already-published version. Other packages and
+  their icons are preserved. Bump the version before publishing changed code.
+
+The [CI workflow](.github/workflows/tests.yml) defines portable tests on Linux,
+macOS and Windows, plus KiCad 9/10 native and GUI tests on Ubuntu and KiCad 10
+board/dialog tests on Windows. These are
+configured checks, not a claim that every platform has already passed. Ubuntu
+installation follows [KiCad's PPA instructions](https://www.kicad.org/download/details/ubuntu/).
+See the [reliability review](docs/reliability-review-20261125.md) for changes,
+matched board comparisons and remaining verification limits.
+
 ## Development
 
 ```bash

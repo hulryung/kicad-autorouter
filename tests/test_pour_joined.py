@@ -22,6 +22,7 @@ except ImportError:
     print("test_pour_joined: skipped (needs KiCad's Python)")
     sys.exit(0)
 
+from autorouter.engine.compat import zone_filler
 from autorouter.engine.native import pipeline
 from autorouter.engine.native.problem import NativeOptions
 
@@ -75,7 +76,7 @@ def make_board(filled: bool, cut: bool = False):
         o.Append(int(x * MM), int(y * MM))
     board.Add(z)
     if filled:
-        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+        zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     return board, vcc.GetNetCode()
 
@@ -92,14 +93,14 @@ def add_pads(board, spots):
         p.SetPosition(pt(x, y))
         p.SetNet(board.FindNet("VCC"))
         fp.Add(p)
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
 
 
 def over_pour(board, code):
     """Length (nm) of the net's tracks lying inside its own F.Cu fill."""
     import math
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     poly = [z for z in board.Zones() if z.GetNetCode() == code][0].GetFilledPolysList(pcbnew.F_Cu)
     inside = 0.0
     for t in board.GetTracks():
@@ -146,7 +147,7 @@ def main():
     board, vcc = make_board(True, cut=True)
     add_pads(board, [(20, 6)])
     job = pipeline.run_job(board, NativeOptions(pitch_mm=0.1), apply_paths=True)
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     check("a join the refill took apart is routed again", board.GetConnectivity().GetUnconnectedCount(True) == 0
           and not job.failed, f"failed {job.failed} stats {job.stats.get('pour_joins_redone')}")

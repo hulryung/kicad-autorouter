@@ -38,13 +38,13 @@ WORK_RATE = float(os.environ.get("KICAD_AUTOROUTER_WORK_RATE") or 0)
 
 
 def clock() -> float:
-    """Seconds for the time limits: the wall clock, or, with
+    """Seconds for the time limits: a monotonic clock, or, with
     KICAD_AUTOROUTER_WORK_RATE set (expansions per second), the search work
     done so far at that rate. Benchmarks use it: the same input then gives the
     same result on a busy, sleeping or slower machine."""
     if WORK_RATE > 0:
         return (WORK[0] + (LAST["expansions"] if WORK[1] else 0)) / WORK_RATE
-    return _time.time()
+    return _time.perf_counter()
 
 # (dx, dy, is_diagonal)
 MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),

@@ -2,6 +2,8 @@
 
 Do not call pcbnew.LoadBoard from the editor: it can replace the active project.
 """
+from ..compat import resolve_item, copy_design_settings
+
 import shutil
 import json
 from pathlib import Path
@@ -19,13 +21,22 @@ def snapshot(board, destination):
         if path and path.exists():
             shutil.copy2(path, destination.with_suffix(suffix))
     _snapshot_rules(board, destination.with_suffix('.kicad_pro'))
-    if not pcbnew.SaveBoard(str(destination), board):
+    # KiCad 9 SaveBoard otherwise renames/saves the editor project as well.
+    if not pcbnew.SaveBoard(str(destination), board, True):
         raise RuntimeError('Could not snapshot the open board')
     return destination
 
 
 def _snapshot_rules(board, path):
     """Persist live routing constraints into the COPY, including unsaved edits."""
+    import pcbnew
+    project = board.GetProject()
+    if project is not None:
+        # This copies live assignments/patterns too, which are opaque in SWIG.
+        # SaveProjectCopy preserves the registered source name; SaveBoard's
+        # default SaveProjectAs path does not on KiCad 9.
+        manager = getattr(board, '_autorouter_settings_manager', None) or pcbnew.GetSettingsManager()
+        manager.SaveProjectCopy(str(path), project)
     data = json.loads(path.read_text()) if path.exists() else {}
     data.setdefault('meta', {'version': 1, 'filename': path.name})
     settings = board.GetDesignSettings()
@@ -64,8 +75,9 @@ def load_copy(path, template):
         raise RuntimeError('Could not load candidate board')
     board.SetFileName(str(path))
     # Reference only: this board neither owns nor replaces the editor's project.
-    board.SetProject(template.GetProject(), True)
-    board.SetDesignSettings(template.GetDesignSettings())
+    if hasattr(board, "SetDesignSettings"):
+        board.SetProject(template.GetProject(), True)
+    copy_design_settings(board, template)
     return board
 
 
@@ -74,10 +86,12 @@ def uid(item):
 
 
 def track_signature(item):
-    result = [item.GetClass(), item.GetNetname(), item.GetWidth(), item.GetLayer(),
+    width = item.GetWidth(item.TopLayer()) if item.GetClass() == "PCB_VIA" else item.GetWidth()
+    result = [item.GetClass(), item.GetNetname(), width, item.GetLayer(),
               item.GetStart().x, item.GetStart().y, item.GetEnd().x, item.GetEnd().y, item.IsLocked()]
     if item.GetClass() == 'PCB_VIA':
-        result += [item.GetDrillValue(), item.TopLayer(), item.BottomLayer()]
+        result += [item.GetDrillValue(), item.TopLayer(), item.BottomLayer(),
+                   tuple((layer, item.GetWidth(layer)) for layer in item.GetLayerSet().CuStack())]
     elif item.GetClass() == 'PCB_ARC':
         result += [item.GetMid().x, item.GetMid().y]
     return tuple(result)
@@ -130,7 +144,7 @@ def apply_copper(board, path):
     for group_members in members.values():
         for member in group_members:
             if member not in target:
-                item = board.ResolveItem(pcbnew.KIID(member))
+                item = resolve_item(board, pcbnew.KIID(member))
                 if item is None:
                     raise ValueError(f'Group references missing item {member}')
                 target[member] = item

@@ -1,5 +1,7 @@
 """Plugin settings, persisted as JSON in the plugin's data directory."""
 import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -27,6 +29,11 @@ class Settings:
             data = json.loads(cls.path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls()
+        if not isinstance(data, dict):
+            return cls()
+        for key in ("codex_path", "ai_model", "ai_provider", "claude_path", "guide_id"):
+            if key in data and not isinstance(data[key], str):
+                del data[key]
         return cls(codex_path=data.get("codex_path", ""), ai_model=data.get("ai_model", ""),
                    ai_provider=data.get("ai_provider", "codex-cli"), claude_path=data.get("claude_path", ""),
                    guide_id=data.get("guide_id", "router-default"),
@@ -38,4 +45,13 @@ class Settings:
         payload = {"codex_path": self.codex_path, "ai_model": self.ai_model, "ai_provider": self.ai_provider,
                    "claude_path": self.claude_path, "guide_id": self.guide_id,
                    "options": self.options.to_dict()}
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                             prefix=".settings-", delete=False) as stream:
+                temp = Path(stream.name)
+                stream.write(json.dumps(payload, indent=2))
+            os.replace(temp, path)
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
