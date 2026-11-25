@@ -7,13 +7,13 @@ Routing experiments use copies; private board inputs are not published.
 
 | Issue | Acceptance requirements | State |
 | --- | --- | --- |
-| #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Opt-in polygon protection implemented; native priority/hole/routing tests passed; CI pending |
-| #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Structured verdicts implemented; existing no-progress rip-up stop verified; CI pending |
+| #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Merged in PR #25; native tests and all nine CI jobs passed |
+| #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Merged in PR #25; verdicts and no-progress stopping verified |
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
-| #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Reproduced unnecessary plane via; short fixed-via ties implemented; native regressions passed; CI pending |
-| #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Automatic 1 mm matching implemented; native skew/scope/lock tests passed; CI pending |
+| #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
+| #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Pending reproduction |
-| #7 | Extend locked partial copper from free ends without duplicating the existing route | Reproduced missing inner-layer endpoint in shove mode; fixed and native regression passed; cross-platform verification pending |
+| #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
@@ -179,3 +179,29 @@ status. The private PIO snapshot produces the expected 0.2 mm vs 0.6 mm
 warnings for the 14 SO-4 relay footprints, four pads each. KiCad 9's
 [documented optional local-clearance API](https://docs.kicad.org/doxygen-python-9.0/classpcbnew_1_1PAD.html)
 is used to distinguish an unset override from an explicit zero.
+
+
+### Fixed copper remnants (#28)
+
+Movable pieces now retain the layer and exact position of fixed track/via
+endpoints they originally touched. After a rip-up attempt, those contacts
+must still touch the net's remaining routed copper; otherwise the entire
+attempt is restored. The requirement survives subsequent rip-up rounds.
+Failure details retain `candidate_rejected` so callers can distinguish this
+rollback from a search that found no path.
+
+The portable fixed-bridge regression reproduces the original failure: two
+pad groups stay connected after rerouting while a fixed intermediate bridge
+is abandoned. The native extraction test verifies both bridge contacts;
+existing shove and locked-route tests still pass.
+
+On the same private Cell8 snapshot, the guard preserves all net pad
+components and the exact 18 baseline refilled DRC reports (matching type,
+description and positions, excluding UUIDs). Without the guard there were
+seven new dangling tracks. The guarded run adds no new connections in this
+120-second configuration: it is a regression-prevention fix, not evidence
+that the remaining difficult row routes are solved. Those issues remain open.
+
+PR #25 is merged into main at d5dd4fb; issues #1, #2, #4, #5, #7, #26 and #27
+are closed. The root checkout is main; continuing experiments use an isolated
+worktree. Manual editor Undo remains unverified.

@@ -3208,7 +3208,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     cells += grid.disc_cells(li, x, y, rp.via_diameter // 2)
             pad_exits = [_pad_exits(code, pads[i].GetPosition()) for i in sorted(piece["pads"])]
             existing.append(ExistingPath(rp, list(zip(touched, touched[1:])), touched[0] if touched else -1,
-                                         cells, piece["items"], [e for e in pad_exits if e]))
+                                         cells, piece["items"], [e for e in pad_exits if e],
+                                         set(piece.get("fixed_contacts", ()))))
         if len(net.clusters) < 2:
             continue
 
@@ -3644,7 +3645,8 @@ def _movable_pieces(pads, items, fixed, layer_of: Dict[int, int]) -> List[dict]:
     pad_buckets = _buckets(pad_boxes)
     for t, item in enumerate(items):
         piece = pieces.setdefault(find(t), {"segments": [], "vias": [], "pads": set(), "items": [],
-                                            "width": 0, "via_diameter": 0, "via_drill": 0})
+                                            "width": 0, "via_diameter": 0, "via_drill": 0,
+                                            "fixed_contacts": set()})
         if item.GetClass() == "PCB_VIA":
             pos = item.GetPosition()
             piece["vias"].append((pos.x, pos.y))
@@ -3664,6 +3666,18 @@ def _movable_pieces(pads, items, fixed, layer_of: Dict[int, int]) -> List[dict]:
             piece["width"] = max(piece["width"], w)
         piece["items"].append(item)
         box = item_boxes[t]
+        for k in _near(anchor_buckets, box):
+            anchor = anchors[k].get("item")
+            if anchor is None:
+                continue
+            points = [anchor.GetPosition()] if anchor.GetClass() == "PCB_VIA" else [anchor.GetStart(), anchor.GetEnd()]
+            for lid in anchor.GetLayerSet().CuStack():
+                if lid not in layer_of or not item.IsOnLayer(lid):
+                    continue
+                shape = item.GetEffectiveShape(lid)
+                for point in points:
+                    if shape.Collide(point, 0):
+                        piece["fixed_contacts"].add((layer_of[lid], point.x, point.y))
         for i in _near(pad_buckets, box):
             if _boxes_meet(box, pad_boxes[i]) and _touches_pad(pads[i], item):
                 piece["pads"].add(i)

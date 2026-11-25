@@ -151,6 +151,7 @@ class _Path:
         self.joins: List[Tuple[int, int]] = [(conn.a, conn.b)]  # cluster pairs this path connects
         self.existing = False                                   # copper that was on the board already
         self.pad_exits: List[List[int]] = []                    # existing piece: exit cells per pad it touches
+        self.fixed_contacts: Set[Tuple[int, int, int]] = set()
         self.paired = paired                                   # half of a coupled pair: never ripped up
 
 
@@ -512,6 +513,7 @@ class Router:
         self.paths: Dict[int, _Path] = {}
         self.next_pid = 1
         self.search_outcomes = {}
+        self.rejected_candidates = {}
         self.rips: Dict[Tuple[int, int, int], int] = {}        # (net, a, b) -> times ripped
         # cell -> extra cost, grown on the cells where a rip-up took one net's
         # route through another's: the next searches of both nets steer clear,
@@ -530,6 +532,7 @@ class Router:
         self.revived: List[_Path] = []               # ...and board pieces a rolled-back rip-up put back
         self._rip_planes = False          # the second tier of a rip-up search: plane vias may go too
         self.restore_possible = False     # ...there are such vias on the board
+        self.fixed_contacts: Dict[int, Set[Tuple[int, int, int]]] = {}
         # new paths get ids above every board piece's, even one that is not
         # entered below: the pipeline removes board items by path id
         self.next_pid = max([self.next_pid] + [ex.path.pid + 1 for ex in problem.existing])
@@ -543,6 +546,8 @@ class Router:
             path = _Path(ex.path.pid, Connection(ex.path.net, c, c, 0, rank=net.rank), ex.path, list(ex.cells))
             path.joins = list(ex.joins)
             path.pad_exits = [list(e) for e in ex.pad_exits]
+            path.fixed_contacts = set(ex.fixed_contacts)
+            self.fixed_contacts.setdefault(ex.path.net, set()).update(ex.fixed_contacts)
             path.existing = True
             self.paths[path.pid] = path
             self._claim(path)
@@ -1235,6 +1240,21 @@ class Router:
             self._rebuild_union(code)
         self._unclaim(removed)
         return conns
+
+    def _lost_fixed_contacts(self, before: Dict[int, _Path]) -> bool:
+        """A reroute must still touch the fixed endpoints its removed pieces met."""
+        affected = {path.conn.net for pid, path in before.items() if pid not in self.paths}
+        required = {code: self.fixed_contacts[code] for code in affected if self.fixed_contacts.get(code)}
+        for code, points in required.items():
+            paths = [p.path for p in self.paths.values() if p.conn.net == code]
+            for layer, x, y in points:
+                if any(any(s[0] == layer and _segment_distance((x, y, x, y), s[1:5]) <=
+                           (s[5] if len(s) > 5 else p.width) / 2 for s in p.segments)
+                       or any(math.hypot(x - vx, y - vy) <= p.via_diameter / 2 for vx, vy in p.vias)
+                       for p in paths):
+                    continue
+                return True
+        return False
 
     def _undo_rip(self, before: Dict[int, _Path], marks: Tuple[int, int, int], on_path, on_remove) -> None:
         """Back to the paths of `before`: a rip-up attempt that cost more
@@ -2666,7 +2686,8 @@ class Router:
             "found": "candidate_not_retained",
         }
         return {"net": net.name, "width_mm": round((conn.width or net.rules.width) / 1e6, 3),
-                "ends": ends, "verdict": verdicts.get(outcome, outcome), "search": dict(search)}
+                "ends": ends, "verdict": verdicts.get(outcome, outcome), "search": dict(search),
+                "candidate_rejected": self.rejected_candidates.get((conn.net, min(conn.a, conn.b), max(conn.a, conn.b)))}
 
     def _cells_of_exit(self, rp: RoutedPath) -> List[int]:
         """The exit cell a fanout path started from (its first segment ends there)."""
@@ -3196,13 +3217,17 @@ class Router:
                         lost.append(other)
                 lost = [c for c in lost if self._find(c.net, c.a) != self._find(c.net, c.b)]
                 outside_loss = opts.scope != SCOPE_BOARD and any(c.net not in requested_nets for c in lost)
-                if ((0 if won else 1) + len(lost) > 1 or outside_loss) and all(len(self.p.nets[n].clusters) == k for n, k in sizes.items()):
+                fixed_loss = self._lost_fixed_contacts(before)
+                if ((0 if won else 1) + len(lost) > 1 or outside_loss or fixed_loss) and all(len(self.p.nets[n].clusters) == k for n, k in sizes.items()):
                     # more open than before: put the board back as it was (a
                     # reshuffle that costs nothing stays, it may make room).
                     # Scoped repair may not exchange its target for a broken
                     # existing net outside the requested connection set.
                     self._undo_rip(before, marks, on_path, on_remove)
                     self.undone += 1
+                    self.rejected_candidates[(conn.net, min(conn.a, conn.b), max(conn.a, conn.b))] = (
+                        "fixed_copper_contacts_would_be_lost" if fixed_loss else
+                        "unrequested_connection_would_break" if outside_loss else "more_connections_would_be_open")
                     still.append(conn)
                     continue
                 result.ripped += len(ripped)
