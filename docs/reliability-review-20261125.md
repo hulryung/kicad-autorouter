@@ -9,6 +9,7 @@ tests and documentation against baseline `ab45284` (0.5.13).
 | Priority | Finding | Implemented change | Regression coverage |
 | --- | --- | --- | --- |
 | High | AI actions could modify locked copper or footprints | Reject affected actions before mutation, including remove-existing routing | `test_ai_locked.py` |
+| High | Fine-grid retries enabled vias in small SMD pads despite the user's fabrication setting (#23) | Preserve the explicit option and pad-size threshold through escalation; keep the default disabled | `test_no_via_in_small_pads.py` checks real KiCad via masks for both settings |
 | High | A failed Claude CLI exit could still supply valid-looking actions | Reject failed exits; reap children on cancellation, timeout and callback failure; retain logs | `test_ai_claude_process.py` |
 | High | Loading a reference board could replace the editor's active project | Learn guides in a separate KiCad process with the reference's own net classes | `test_guide_project_isolation.py` |
 | High | Temporary board saves could rename the active project on KiCad 9; saved rules omitted live net-class assignments | Save temporary boards without project side effects and explicitly copy live project rules, including unsaved assignments | `test_ai_board_copy.py`, `test_ai_optimize.py` |

@@ -697,6 +697,10 @@ signal-integrity intent stays beside the PCB, separate from global settings.
 
 ## Reliability changes in the current checkout
 
+- Fine-grid retries preserve `via_in_small_pads` and `via_in_pad_min_mm`.
+  Unlike the 0.5.13 fallback described above, retries no longer override a
+  user's no-via-in-small-pads setting. Allowing these vias requires explicit
+  opt-in for the whole job (issue #23).
 - AI edit commands respect locked copper and footprints, including `force`.
 - Candidate acceptance checks each net's unconnected count, length/skew groups,
   controlled widths and estimated pair coupling. Existing connected nets must
