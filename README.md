@@ -371,6 +371,19 @@ within 5 mm of the scope's nets and footprints (`shove_margin_mm`, 0 for the
 whole board), and coupled pairs and length-tuned nets outside the scope keep
 their tracks.
 
+For distributed power rails, the advanced option
+`power_trunks_first: true` routes power nets with at least four disconnected
+pad/copper clusters before single-ended signal connections. Coupled pairs
+still go first. This uses the existing tree connections and is opt-in because
+giving a rail the early corridors can make later signal escapes harder.
+
+Plane-pad fanout checks the net's own zone territory, including higher-priority
+foreign pours. When the normal 3 mm search has no legal plane goals or cannot reach them,
+it tries outer-ring goals up to `plane_fanout_reach_mm` (6 mm by default),
+sampled at about 0.3 mm to bound the extra memory. This is a bounded fallback, not a
+guarantee that a blocked plane pad can be connected. Scoped raster windows
+include this reach when fanout is enabled.
+
 Early plane-pad fanout vias and their stubs are reserved through later signal
 passes by default (`preserve_plane_fanout=True`). The reservation lasts for the
 job and does not change KiCad item lock flags. Set it to `false` to allow
