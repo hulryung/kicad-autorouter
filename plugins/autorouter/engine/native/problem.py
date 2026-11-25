@@ -180,6 +180,10 @@ class NativeOptions:
     # the pipeline for every pass.
     wall_limit_s: Optional[float] = None
     wall_deadline: float = 0.0
+    # The pass's time limit counted from before its board read (astar.clock() units, set by the
+    # pipeline): a whole-board read at 0.1 mm takes minutes, and counted from the search start a
+    # "15-minute" pass ran 18. The search still gets min(time_limit_s, 60 s) after a long read.
+    pass_deadline: float = 0.0
     retry_failed: bool = True
     rip_up: bool = True                # rip up and reroute paths that block a failed connection
     rip_rounds: int = 8                # how many rip-up rounds over the failed connections

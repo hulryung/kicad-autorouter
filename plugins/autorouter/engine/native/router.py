@@ -2898,6 +2898,10 @@ class Router:
                 progress(done, total, len(self.paths), len(failed), f"{stage}{name}")
 
         deadline = clock_started + opts.time_limit_s if opts.time_limit_s and opts.time_limit_s > 0 else None
+        pass_deadline = getattr(opts, "pass_deadline", 0.0) or 0.0
+        if deadline is not None and pass_deadline:
+            # the board read counts too, but the search keeps a minute (or its whole limit, if shorter)
+            deadline = min(deadline, max(pass_deadline, clock_started + min(opts.time_limit_s, 60.0)))
 
         wall_deadline = getattr(opts, "wall_deadline", 0.0) or 0.0
 

@@ -190,6 +190,27 @@ def _overrun(out, e, status, what: str) -> None:
         status(f"Hard stop: {what} cut off past the wall-clock cap and its grace ({e}).")
 
 
+PROGRESS_LINE_S = 60.0
+
+
+def _progress_lines(progress, status, every: float = PROGRESS_LINE_S):
+    """The router's progress, passed on, plus a status line every minute of
+    a pass: a caller without a progress bar (a script) otherwise sees
+    nothing between "Building the connection list" and the next pass."""
+    if not status:
+        return progress
+    last = [time.time()]
+
+    def tell(done, total, routed, failed, name):
+        if progress:
+            progress(done, total, routed, failed, name)
+        now = time.time()
+        if now - last[0] >= every:
+            last[0] = now
+            status(f"Routing: {done}/{total} connections tried, {routed} routed, {failed} open ({name})")
+    return tell
+
+
 def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove, cancelled, escalate,
              apply_paths, extract_fn, on_layers, placed, on_board) -> JobResult:
     """The whole job, in the order a designer works:
@@ -231,6 +252,9 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         return max(0.0, limit - (native_astar.clock() - job_started)) if limit else 0.0
 
     def one_pass(opts: NativeOptions):
+        if opts.time_limit_s and opts.time_limit_s > 0 and not opts.pass_deadline:
+            opts = copy.copy(opts)
+            opts.pass_deadline = native_astar.clock() + opts.time_limit_s     # the board read counts
         problem = extract(board, opts, status)
         if problem is None:
             return None, None
@@ -255,8 +279,8 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
             if on_remove:
                 on_remove(pid)
 
-        result = native_router.run(problem, progress=progress, on_path=on_path, on_remove=remove,
-                                   cancelled=cancelled)
+        result = native_router.run(problem, progress=_progress_lines(progress, status), on_path=on_path,
+                                   on_remove=remove, cancelled=cancelled)
         if apply_paths:
             paired = getattr(result, "paired_pids", set())
             for rp in result.paths:
