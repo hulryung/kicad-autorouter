@@ -1,4 +1,5 @@
 """Reading the board into a RoutingProblem through pcbnew (main thread only)."""
+from ..compat import board_outline
 import fnmatch
 import math
 import os
@@ -943,7 +944,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             pass
 
     outline = pcbnew.SHAPE_POLY_SET()
-    if not board.GetBoardPolygonOutlines(outline, True) or outline.OutlineCount() == 0:
+    if not board_outline(board, outline, True) or outline.OutlineCount() == 0:
         # No usable Edge.Cuts: fall back to the bounding box of what is there.
         bb = board.GetBoardEdgesBoundingBox()
         if bb.GetWidth() <= 0 or bb.GetHeight() <= 0:

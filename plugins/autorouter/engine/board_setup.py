@@ -14,6 +14,7 @@ reach the project file (.kicad_pro) when the board is saved.
 The pure helpers (pattern matching, the size lists, the net groups) work
 without KiCad and are tested offline; check() and apply() need pcbnew.
 """
+from .compat import board_outline
 import fnmatch
 import json
 import re
@@ -221,7 +222,7 @@ def _has_outline(board) -> bool:
     import pcbnew
     try:
         poly = pcbnew.SHAPE_POLY_SET()
-        return bool(board.GetBoardPolygonOutlines(poly, False)) and poly.OutlineCount() > 0
+        return bool(board_outline(board, poly, False)) and poly.OutlineCount() > 0
     except Exception:
         return any(d.GetLayer() == pcbnew.Edge_Cuts for d in board.GetDrawings())
 
