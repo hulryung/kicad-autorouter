@@ -20,7 +20,7 @@ import logging
 import math
 import time
 from array import array
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from itertools import chain
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -99,8 +99,10 @@ class _ClaimCells:
         self.spans = []
         self.loose = array("Q")
         self.count = 0
+        self._span_index = None
 
     def add(self, piece):
+        self._span_index = None
         spans = getattr(piece, "spans", None)
         if spans is None:
             self.loose.extend(piece)
@@ -116,10 +118,34 @@ class _ClaimCells:
 
     def intersection(self, touched, ordered):
         common = touched.intersection(self.loose)
-        for a, b in self.spans:
-            start = bisect_left(ordered, a)
-            end = bisect_left(ordered, b, start)
-            common.update(ordered[start:end])
+        if not ordered or not self.spans:
+            return common
+        if self._span_index is None:
+            # Raw spans retain row boundaries for bounds/claim slices. A separate
+            # disjoint interval index avoids revisiting every segment's rows on
+            # each rip-up, especially when only a few cells were removed.
+            starts, ends = array("Q"), array("Q")
+            for a, b in sorted(self.spans):
+                if starts and a <= ends[-1]:
+                    if b > ends[-1]:
+                        ends[-1] = b
+                else:
+                    starts.append(a)
+                    ends.append(b)
+            self._span_index = starts, ends
+        starts, ends = self._span_index
+        first = bisect_right(ends, ordered[0])
+        last = bisect_right(starts, ordered[-1])
+        if len(ordered) < last - first:
+            for cell in ordered:
+                i = bisect_right(starts, cell, first, last) - 1
+                if i >= first and cell < ends[i]:
+                    common.add(cell)
+        else:
+            for i in range(first, last):
+                a = bisect_left(ordered, starts[i])
+                b = bisect_left(ordered, ends[i], a)
+                common.update(ordered[a:b])
         return common
 
     def bounds(self, grid):
