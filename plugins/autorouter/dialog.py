@@ -923,13 +923,16 @@ class AutorouterDialog(wx.Dialog):
             try:
                 box["value"] = fn()
             except Exception as e:
-                logger.exception("Main-thread call failed")
                 box["error"] = e
+                logger.exception("Main-thread call failed")
                 self._append_log(f"[plugin] error: {e!r}")
-            done.set()
+            finally:
+                done.set()
 
         wx.CallAfter(call)
         done.wait()
+        if "error" in box:
+            raise box["error"]
         return box.get("value")
 
     def _remove_native_path(self, pid):

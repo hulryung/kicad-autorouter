@@ -325,3 +325,14 @@ each removal (a cold index each time). Median removal time fell from 1.1913 s
 to 0.2584 s (78% lower). All ten resulting ownership/first-claimer/via-block
 hashes match. The full local native/GUI suite passed. This is a measured
 three-net scoped case, not a timing claim for the original full 22-net job.
+
+### UI error propagation (#37)
+
+A native wx worker/main-thread regression reproduced `_on_main` swallowing a
+board-read exception and returning `None`. The bridge now re-raises the original
+exception on the waiting routing worker, so watchdog hard stops reach the
+pipeline's overrun handler. A `finally` block releases the worker even when
+error reporting fails. Successful results, including `None`, remain unchanged.
+The regression exercises real wx dispatch, thread identity and both ordinary
+errors and watchdog exceptions. This fixes reporting; the long-sense routing
+case and manual native-editor Undo remain separate open verification work.
