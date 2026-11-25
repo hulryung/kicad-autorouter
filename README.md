@@ -720,9 +720,12 @@ signal-integrity intent stays beside the PCB, separate from global settings.
   their icons are preserved. Bump the version before publishing changed code.
 
 The [CI workflow](.github/workflows/tests.yml) defines portable tests on Linux,
-macOS and Windows, plus KiCad 9/10 native and GUI tests on Ubuntu. These are
+macOS and Windows, plus KiCad 9/10 native and GUI tests on Ubuntu and KiCad 10
+board/dialog tests on Windows. These are
 configured checks, not a claim that every platform has already passed. Ubuntu
 installation follows [KiCad's PPA instructions](https://www.kicad.org/download/details/ubuntu/).
+See the [reliability review](docs/reliability-review-20261125.md) for changes,
+matched board comparisons and remaining verification limits.
 
 ## Development
 
