@@ -8,7 +8,7 @@ Routing experiments use copies; private board inputs are not published.
 | Issue | Acceptance requirements | State |
 | --- | --- | --- |
 | #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Pending reproduction |
-| #2 | Distinguish blocked exits, exhausted search and time budget in failure details; stop unchanged escalation when appropriate | Pending reproduction |
+| #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Structured verdicts implemented; existing no-progress rip-up stop verified; CI pending |
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Pending reproduction |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Automatic 1 mm matching implemented; native skew/scope/lock tests passed; CI pending |
@@ -71,3 +71,19 @@ unmet target is reported rather than treated as successful.
 `test_auto_pair_skew.py` reduces a 20/26 mm pair to 26/26 mm and verifies the
 scope, disabled-option, explicit-group, disconnected-copper and locked-track
 cases. Native end-to-end and SI tests pass locally.
+
+### Search failure evidence (#2)
+
+Each failed connection now records a `verdict` and the number of search
+attempts/expansions. Outcomes distinguish expansion limits, enclosed goals,
+exhausted search at the current rules, connection/job/wall time limits,
+cancellation, missing exit cells and candidates not retained. A connection
+never attempted due to a job limit is identified separately. These verdicts
+do not claim that no route could exist with different rules or placement.
+
+`test_search_verdicts.py` verifies capped/exhausted searches, per-connection
+timeouts, untried timeouts/cancellation and reset of prior search state. It
+also confirms the existing rip-up loop stops after a round with no progress:
+allowing 16 rounds performs the same number of attempts as allowing one for
+a fixed-wall case. Repeated separate jobs remain controlled by the caller;
+the structured verdict and failed set make that decision explicit.
