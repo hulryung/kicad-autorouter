@@ -250,6 +250,7 @@ class RoutingProblem:
     fanout_array: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
     fanout_array_cells: Dict[int, Set[int]] = field(default_factory=dict)   # ...and that pad's copper cells
     tied_pad_cells: Dict[int, Set[int]] = field(default_factory=dict)       # net -> copper of big pads a via already ties
+    plane_tie_cells: Dict[int, Set[int]] = field(default_factory=dict)      # existing via centres on a main filled plane
     # exit cells of fine-pitch plane pins whose part has an exposed pad of the
     # same net: they join that pad with a short track instead of a via
     fanout_tie_only: Set[int] = field(default_factory=set)

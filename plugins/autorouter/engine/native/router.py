@@ -2680,7 +2680,7 @@ class Router:
                     out.append(grid.index(layer, cx, cy))
         return out
 
-    def _tie_to_net(self, code: int, cell: int, cancelled) -> Optional[RoutedPath]:
+    def _tie_to_net(self, code: int, cell: int, cancelled, short_only=False) -> Optional[RoutedPath]:
         """Route from a pad exit to the nearest copper of the same net within
         a few millimetres: what a designer does when a GND pad has no room
         for its own via."""
@@ -2688,7 +2688,7 @@ class Router:
         net = p.nets[code]
         owners = p.owners[net.rules.key]
         layer, cx, cy = grid.unpack(cell)
-        reach = int(6_000_000 / grid.pitch)                    # 6 mm
+        reach = int((3_000_000 if short_only else 6_000_000) / grid.pitch)
         x0, x1 = max(0, cx - reach), min(grid.w - 1, cx + reach)
         y0, y1 = max(0, cy - reach), min(grid.h - 1, cy + reach)
         # Real copper of the net within reach (not its clearance zone). Copper
@@ -2709,6 +2709,11 @@ class Router:
         # a big pad with vias in it (an exposed pad's array) is tied to the
         # plane all over: a GND pin or capacitor beside it may end anywhere on it
         wired |= getattr(self, "tied_pads", {}).get(code, set())
+        wired |= p.plane_tie_cells.get(code, set())
+        if short_only:
+            # Before replacing a plane via, require a target known to reach
+            # the plane. An arbitrary signal path can still be an island.
+            wired = p.plane_tie_cells.get(code, set()) | getattr(self, "tied_pads", {}).get(code, set())
         own_cluster: Set[int] = set()
         others: Set[int] = set()
         for cl in net.clusters:
@@ -2729,7 +2734,8 @@ class Router:
 
         cells = None
         self._tie_wired = False
-        for stage, goals in enumerate((in_reach(wired), in_reach(others))):
+        candidates = (in_reach(wired),) if short_only else (in_reach(wired), in_reach(others))
+        for stage, goals in enumerate(candidates):
             if not goals:
                 continue
             self._tie_wired = stage == 0
@@ -2749,6 +2755,8 @@ class Router:
         segments = _with_pad_entries(grid, net, cells, segments, int(self.opts.neck_length_mm * 1_000_000))
         if self.opts.cut_acute:
             segments = _cut_acute(grid, segments, lambda idx: idx in own_cells or owners[idx] in (0, code))
+        if short_only and sum(math.hypot(s[3] - s[1], s[4] - s[2]) for s in segments) > 3_000_000:
+            return None
         rp = RoutedPath(code, net.rules.width, segments, [], net.rules.via_diameter, net.rules.via_drill,
                         pid=self.next_pid)
         self.next_pid += 1
@@ -3220,6 +3228,7 @@ class Router:
         # 4. fanout vias for pour nets, in whatever room is left (the time
         # limit does not cut the pour stages: they are bounded and quick)
         fanout_paths: List[RoutedPath] = []
+        tied_paths: List[RoutedPath] = []
         fanned: Set[int] = set()                       # primary exit cells of pads that got a via
         # the pads a rip-up took the via from come after the fanout list
         wanted = list(self.p.fanout) + [rc for rc in self.restore if rc not in self.p.fanout]
@@ -3243,6 +3252,17 @@ class Router:
                 if cell in self.p.fanout_tie_only:
                     continue                    # tied to its part's exposed pad below, no via
                 strict = cell in self.p.fanout_strict
+                if not strict and cell not in self.p.fanout_array:
+                    for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
+                        rp = self._tie_to_net(code, exit_cell, user_cancel, short_only=True)
+                        if rp is not None:
+                            tied_paths.append(rp)
+                            fanned.add(cell)
+                            if on_path:
+                                on_path(rp)
+                            break
+                    if cell in fanned:
+                        continue
                 spots = getattr(self.p, "fanout_array", {}).get(cell)
                 if spots and not strict:
                     placed = [rp for rp in (self._stitch_via(code, cx, cy) for cx, cy in spots) if rp is not None]
@@ -3362,7 +3382,6 @@ class Router:
 
         # 6. pour-net pads that got no via: a short track to the nearest
         # copper of their net (a via, another pad, a stub) instead
-        tied_paths: List[RoutedPath] = []
         if not pour_halt():
             for code, cell in wanted:
                 if cell in fanned:

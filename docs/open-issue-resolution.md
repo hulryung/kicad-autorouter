@@ -10,7 +10,7 @@ Routing experiments use copies; private board inputs are not published.
 | #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Opt-in polygon protection implemented; native priority/hole/routing tests passed; CI pending |
 | #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Structured verdicts implemented; existing no-progress rip-up stop verified; CI pending |
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
-| #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Pending reproduction |
+| #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Reproduced unnecessary plane via; short fixed-via ties implemented; native regressions passed; CI pending |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Automatic 1 mm matching implemented; native skew/scope/lock tests passed; CI pending |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Pending reproduction |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Reproduced missing inner-layer endpoint in shove mode; fixed and native regression passed; cross-platform verification pending |
@@ -113,3 +113,17 @@ one `plane_net` per layer or on stale filled copper.
 `test_protected_pours.py` checks the two overlapping nets, a hole exposing
 the underlying zone, the disabled mode, and actual emitted tracks with only
 In2 routable. The route detours around the foreign corridor.
+
+### Short ties to existing copper (#4)
+
+A 2 mm pad-to-fixed-track gap already closes without new vias. The plane-net
+case instead added a longer fanout and a new via despite an existing plane
+via 2 mm away. Fanout now first tries a clearance-checked tie of at most
+3 mm to fixed vias confirmed on the main filled plane (or already tied
+large pads). Movable vias and unfilled/foreign pour outlines are not targets.
+The existing fallback remains when no short tie fits.
+
+`test_short_copper_ties.py` verifies the 2 mm track and plane-via ties,
+preserves locked copper, and rejects the tie when a foreign track walls it
+off. The blocked case uses a new plane via without crossing the wall.
+Plane/fanout/island regression tests pass locally.

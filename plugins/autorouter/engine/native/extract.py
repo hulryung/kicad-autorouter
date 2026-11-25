@@ -1583,6 +1583,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Existing tracks and vias.
     say("Rasterizing existing tracks...")
     existing_vias: Dict[int, List[Tuple[int, int]]] = {}     # net code -> via centres, for idempotent pours
+    fixed_vias: Dict[int, List] = {}
     movable: Dict[int, List] = {}      # shove mode: net code -> unlocked tracks and vias the router may move
     fixed_tracks: Dict[int, List] = {} # ...and the locked ones of those nets (they still join pads)
     for n_item, item in enumerate(board.GetTracks()):
@@ -1614,6 +1615,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             movable.setdefault(code, []).append(item)
             is_movable = True
         if cls == "PCB_VIA":
+            if not is_movable:
+                fixed_vias.setdefault(code, []).append(item)
             vl = [layer_of[l] for l in item.GetLayerSet().CuStack() if l in layer_of]
             hole = item.GetDrillValue() // 2
             for li in vl:
@@ -3308,6 +3311,22 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         problem.fanout = []
         problem.stitch = {}
         problem.island_stitch = island_stitch or []
+    # Existing through vias already landing in a main pour can take a short
+    # pad tie before another fanout via consumes more room. Only actual fills
+    # count; an outline over a foreign island is not an electrical target.
+    for code in {c for c, _ in fanout}:
+        zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() == code]
+        fills = [(lid, _main_fill(z, lid)) for z in zones for lid in z.GetLayerSet().CuStack() if lid in layer_of]
+        for via in fixed_vias.get(code, ()):
+            x, y = via.GetPosition().x, via.GetPosition().y
+            if not any(via.IsOnLayer(lid) and fill is not None and
+                       any(fill[0].Contains(pcbnew.VECTOR2I(x, y), i) for i in fill[1])
+                       for lid, fill in fills):
+                continue
+            cx, cy = grid.cell_x(x), grid.cell_y(y)
+            if grid.inside(cx, cy):
+                problem.plane_tie_cells.setdefault(code, set()).update(
+                    grid.index(layer_of[lid], cx, cy) for lid in via.GetLayerSet().CuStack() if lid in layer_of)
     problem.escape_sides = problem_escape_sides
     if far_kept:
         say(f"Shove: {far_kept} unlocked tracks and vias more than {options.shove_margin_mm:g} mm from the scope stay put")
