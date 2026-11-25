@@ -13,7 +13,7 @@ Routing experiments use copies; private board inputs are not published.
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Pending reproduction |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Pending reproduction |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Pending reproduction |
-| #7 | Extend locked partial copper from free ends without duplicating the existing route | Pending reproduction |
+| #7 | Extend locked partial copper from free ends without duplicating the existing route | Reproduced missing inner-layer endpoint in shove mode; fixed and native regression passed; cross-platform verification pending |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
@@ -47,3 +47,13 @@ rip-up. These are synthetic measurements, not the reporter's 44.8 GB board.
 
 The full local KiCad 10.0.8 native/GUI suite passed during this change; the
 final bounding-box optimization also passed the focused exact-map tests.
+
+### Locked partial route experiment (#7)
+
+A locked F.Cu stub and via feed an In2.Cu lane ending 10 mm short of the
+next pad. Before the fix, shove extraction omitted that endpoint from its
+connection clusters. Normal mode exposed it. After the fix both modes close
+the connection with 9.9 mm of new track and retain every original locked
+item unchanged. `test_locked_route_ends.py`, existing partial-route tests and
+scoped-shove tests pass. Shove grouping uses fixed-only connectivity rather
+than connectivity through copper that may subsequently move.

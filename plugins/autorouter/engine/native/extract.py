@@ -3000,6 +3000,35 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             # a piece of route with no pad: a cluster of its own, to be joined
             net.clusters.append(Cluster(cells=cells, anchors=ends))
 
+    def _attach_fixed(net, fixed, find, cluster_index):
+        # In shove mode native connectivity includes movable tracks, so use
+        # only the components _fixed_links built from immovable copper.
+        groups = {}
+        for anchor in fixed.get("anchors", []):
+            item = anchor.get("item")
+            if item is not None:
+                groups.setdefault(anchor["group"], []).append(item)
+        pad_owned = {cell: ci for ci, cl in enumerate(net.clusters)
+                     for cell in cl.cells | cl.copper}
+        for group, items in groups.items():
+            reached = {cluster_index[find(i)] for i in fixed["pads"].get(group, [])}
+            if not reached:
+                continue  # no fixed connection to a pad cluster to extend
+            cells, ends = set(), []
+            for item in items:
+                cells.update(_wired_cells(item))
+                points = [item.GetPosition()] if item.GetClass() == "PCB_VIA" else [item.GetStart(), item.GetEnd()]
+                for point in points:
+                    xy = (grid.cell_x(point.x), grid.cell_y(point.y))
+                    if xy not in ends:
+                        ends.append(xy)
+            cells = {c for c in cells if c not in pad_owned or pad_owned[c] in reached}
+            if not cells:
+                continue
+            for ci in reached:
+                net.clusters[ci].cells.update(cells)
+                net.clusters[ci].anchors += [xy for xy in ends if xy not in net.clusters[ci].anchors]
+
     # plane-net pads to route as strays whatever the pour's outline says (the
     # pipeline's pass for pads the job's copper cut off their pour)
     forced_strays: Set[Tuple[int, int, int]] = set()
@@ -3076,6 +3105,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             _attach_wired(net, code, entries, find, cluster_index)
             if not net.partner and options.pour_goals:
                 _attach_pour(net, code, entries, find, cluster_index)
+        if options.shove and not options.pours_only and code not in user_skipped:
+            _attach_fixed(net, fixed, find, cluster_index)
         for piece in pieces:
             touched = sorted({cluster_index[find(i)] for i in piece["pads"]})
             rp = RoutedPath(code, piece["width"], piece["segments"], piece["vias"],
