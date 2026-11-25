@@ -1462,9 +1462,11 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 for idx in grid.polygon_cells(0, pts, zholes, 0):
                     via_block[idx] = 1
 
+    reserved_pours = []
     if options.protect_pour_regions:
         say("Reserving copper pour regions...")
-        for li, code, area in protected_pour_regions(board, layer_of):
+        reserved_pours = list(protected_pour_regions(board, layer_of))
+        for li, code, area in reserved_pours:
             watchdog.tick()
             for pts, holes in _poly_rings(area):
                 claim(li, code, lambda r, li=li, pts=pts, holes=holes:
@@ -1499,6 +1501,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             for by in range(box[1] // BUCKET, box[3] // BUCKET + 1):
                 out.extend(copper.get((layer, bx, by), ()))
         return out
+    # Escape necks use exact shapes rather than only the owner maps. Include
+    # the reserved territories here too, so a narrow pad stub cannot carve
+    # a route through a foreign pour's wall.
+    for li, code, area in reserved_pours:
+        if area.OutlineCount():
+            add_copper(li, area, code, clearance_of(code), _box(area))
     small_pad_r: List[Optional[int]] = [None]     # via radius + 50 µm round a small SMD pad (once)
     for pad in board.GetPads():
         watchdog.tick()                                  # the hard stop reaches into a long step
