@@ -431,6 +431,10 @@ obstacles, keepouts and board-edge clearance are included in extraction.
 Automatic width selection considers existing copper and power-net pad sizes;
 net-class, editor-selected and fixed sizes are also available.
 
+Fine-pitch necks use their actual narrow width when choosing and checking
+the pad exit; the trunk keeps its configured width. This also applies to
+multi-pin supply nets around an IC.
+
 The router creates pad escape lanes, protects fine-pitch via sites and uses
 short direct links where they fit. Multi-layer A* routes the remaining
 connections, with rip-up and reroute when paths conflict. A retry pass uses a
