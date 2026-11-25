@@ -2812,7 +2812,12 @@ class Router:
         else:
             arrive = (gx - px, gy - py)
 
+        plane_xy = ({g % grid.plane for g in p.fanout_goals[cell]}
+                    if cell in p.fanout_goals else None)
+
         def fits(vx: int, vy: int, hairpin_ok: bool) -> bool:
+            if plane_xy is not None and vy * grid.w + vx not in plane_xy:
+                return False
             if not grid.inside(vx, vy) or p.via_block[vy * grid.w + vx]:
                 return False
             if p.via_guard is not None and p.via_guard[vy * grid.w + vx] not in (0, code):
@@ -2984,8 +2989,10 @@ class Router:
         # the open-field connections of every group: its escape cell is the
         # one place it can leave, and a long bus or power run of an earlier
         # group would otherwise take it on the way past.
+        power_trunks = {n.code for n in self.p.nets.values()
+                        if opts.power_trunks_first and n.group == "power" and n.route and len(n.clusters) >= 4}
         queue = sorted(self.p.connections,
-                       key=lambda c: (0 if c.pair else 1 if c.priority == 0 else 2, c.rank,
+                       key=lambda c: (0 if c.pair else 1 if c.net in power_trunks else 2 if c.priority == 0 else 3, c.rank,
                                       -c.estimate if c.pair else c.priority, c.estimate))
         requested_nets = {c.net for c in queue}
         total = len(queue)

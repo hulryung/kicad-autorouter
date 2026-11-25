@@ -51,7 +51,7 @@ def scoped_grid_bounds(board, options):
     boxes.extend(_bbox(t) for t in board.GetTracks() if t.GetNetCode() in codes)
     if not boxes:
         return None
-    margin = int(round(options.shove_margin_mm * 1e6))
+    margin = int(round(max(options.shove_margin_mm, options.plane_fanout_reach_mm if options.fanout_vias else 0) * 1e6))
     return (min(b[0] for b in boxes) - margin, min(b[1] for b in boxes) - margin,
             max(b[2] for b in boxes) + margin, max(b[3] for b in boxes) + margin)
 
@@ -2783,6 +2783,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         return Cluster(cells=cells, anchors=anchors)
 
     filled_goal_cells = {}
+    plane_goal_areas = {}
+    fanout_reach = max(3_000_000, int(options.plane_fanout_reach_mm * 1_000_000))
 
     def _plane_goals(code: int, pos, pl, filled: bool = False, reach_nm: int = 3_000_000) -> Set[int]:
         """Cells on the net's pour within reach_nm of the pad:
@@ -2802,6 +2804,18 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 zl = [(li, lid) for li, lid in zl if fills[li] and fills[li][1]]
                 if not zl:
                     continue  # an entirely isolated zone has no main-plane goals
+            if not filled:
+                for li, lid in zl:
+                    key = (id(z), lid)
+                    if key not in plane_goal_areas:
+                        area = _pour_area(z, lid)
+                        if area is not None and area is not False:
+                            area = pcbnew.SHAPE_POLY_SET(area)
+                            area.Inflate(-inset, pcbnew.CORNER_STRATEGY_ALLOW_ACUTE_CORNERS, 5_000)
+                        plane_goal_areas[key] = area
+                zl = [(li, lid) for li, lid in zl
+                      if plane_goal_areas[(id(z), lid)] is not None
+                      and plane_goal_areas[(id(z), lid)] is not False]
             box = z.GetBoundingBox()
             x0, x1 = max(0, cx0 - r, grid.cell_x(box.GetX()) - 1), min(grid.w - 1, cx0 + r, grid.cell_x(box.GetRight()) + 1)
             y0, y1 = max(0, cy0 - r, grid.cell_y(box.GetY()) - 1), min(grid.h - 1, cy0 + r, grid.cell_y(box.GetBottom()) + 1)
@@ -2812,7 +2826,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                     x, y = grid.nm_x(cx), grid.nm_y(cy)
                     if not _zone_covers(z, x, y, -600_000):
                         continue
-                    for li, _ in zl:
+                    for li, lid in zl:
+                        if not filled and not plane_goal_areas[(id(z), lid)].Contains(pcbnew.VECTOR2I(x, y)):
+                            continue
                         if filled:
                             key = (id(z), li)
                             if key not in filled_goal_cells:
@@ -2871,7 +2887,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 if not any(_zone_covers(z, pos.x, pos.y, 1_500_000) for z in plane_zones.get(code, ())
                            if {layer_of[l] for l in z.GetLayerSet().CuStack() if l in layer_of} - set(pl)):
                     continue
-            elif not _pour_reaches(plane_zones.get(code, ()), pos.x, pos.y, 1_500_000, skip_layers=set(pl)):
+            elif not _pour_reaches(plane_zones.get(code, ()), pos.x, pos.y, fanout_reach, skip_layers=set(pl)):
                 # the pour's own fill does not come under this pad (its
                 # outline may: another net's pour over it takes the spot,
                 # and a via there is an island); a plane net routes it as
@@ -2908,8 +2924,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 if len(exits) > 1:
                     fanout_alt[exits[0]] = exits[1:]
                 goals = _plane_goals(code, pos, pl)
-                if goals:
-                    fanout_goals[exits[0]] = goals
+                if not goals and fanout_reach > 3_000_000:
+                    goals = _plane_goals(code, pos, pl, reach_nm=fanout_reach)
+                for exit_cell in exits:
+                    fanout_goals[exit_cell] = goals
 
     # Via stitching candidates: for unrouted pour nets whose zones span two or
     # more layers (ground), a grid of points inside the zone outlines on at

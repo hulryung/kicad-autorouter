@@ -21,7 +21,7 @@ Routing experiments use copies; private board inputs are not published.
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims implemented; synthetic differential/performance tests passed; reporter-board validation pending |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Main dc2bb2a implements budget/progress changes; cache and complete acceptance still pending |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Scoped windows implemented; native suite and private PIO memory comparison passed; CI pending |
-| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Pending reproduction |
+| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
 
 Additional issue discovered during the real-board audit: #27, scoped shove
 trading a requested connection for a broken existing net. Synthetic rollback
@@ -239,3 +239,18 @@ universal speedup. At 0.075 mm the same single-net local job used 715,040
 cells and peaked at 1,196,834,816 bytes (1.20 GB); read/claim preparation was
 16.14/12.32 s. Timing varies with concurrent machine load; the memory result
 is the main evidence. No full-board 0.075 mm allocation was needed.
+
+### Distributed power and remote plane goals (#24)
+
+`power_trunks_first=True` gives routed power nets with four or more disconnected
+clusters priority over single-ended signals, retaining coupled-pair priority.
+A five-pad native fixture verifies the emitted route order and complete rail
+and signal connectivity with the option both enabled and disabled.
+
+A second fixture places a plane pad over a higher-priority foreign zone whose
+edge is 4 mm away. Previously the pad was omitted from fanout. Ordinary fanout
+now widens from 3 mm to `plane_fanout_reach_mm` (default 6 mm) only when there
+are no local plane goals. Goals subtract foreign priority regions and keepouts;
+both pad exits must satisfy the same plane-landing restriction. The fixture
+finishes with zero unconnected items after refill and no new via in the foreign
+zone. This does not yet establish the result on every reporter-board rail.
