@@ -31,8 +31,10 @@ service or AI account is required.
 - No vias drilled into small SMD pads (0603 caps, SOT-23 pins: under 1.5 mm
   on the short side, `via_in_pad_min_mm`); exposed and thermal pads keep
   theirs. The finer second pass may still drill one as a last resort for a
-  net that is otherwise open, and the job names each such pad.
-  `via_in_small_pads` allows them everywhere, for fabs that fill vias.
+  net that is otherwise open, and the job names each such pad
+  (`via_in_pad_last_resort = False` turns that off, for boards built
+  without via filling). `via_in_small_pads` allows them everywhere, for
+  fabs that fill vias.
 - Keepouts drawn inside footprints (a battery's "no via under the cell", a
   card socket's) are honoured by routing, via placement and length tuning.
 - Plane-net pads a job cut off their pour are reported as failed, and routed

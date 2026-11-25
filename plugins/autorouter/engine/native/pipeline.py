@@ -101,8 +101,9 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.fanout_vias = False
     fine.dual_escapes = True       # leave a stubborn pad by either end, whichever the search finds open
     # a stubborn pad may take a via in a small pad of its net as a last
-    # resort (run_job names each one): an open net is worse than a via in pad
-    fine.via_in_small_pads = True
+    # resort (run_job names each one): an open net is worse than a via in pad,
+    # unless the board is built without via filling (via_in_pad_last_resort off)
+    fine.via_in_small_pads = options.via_in_small_pads or options.via_in_pad_last_resort
     fine.stitch_vias = False
     fine.rip_rounds = max(fine.rip_rounds, 12)
     fine.rip_limit = max(fine.rip_limit, 8)
