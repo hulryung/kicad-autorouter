@@ -77,10 +77,12 @@ def uid(item):
 
 
 def track_signature(item):
-    result = [item.GetClass(), item.GetNetname(), item.GetWidth(), item.GetLayer(),
+    width = item.GetWidth(item.TopLayer()) if item.GetClass() == "PCB_VIA" else item.GetWidth()
+    result = [item.GetClass(), item.GetNetname(), width, item.GetLayer(),
               item.GetStart().x, item.GetStart().y, item.GetEnd().x, item.GetEnd().y, item.IsLocked()]
     if item.GetClass() == 'PCB_VIA':
-        result += [item.GetDrillValue(), item.TopLayer(), item.BottomLayer()]
+        result += [item.GetDrillValue(), item.TopLayer(), item.BottomLayer(),
+                   tuple((layer, item.GetWidth(layer)) for layer in item.GetLayerSet().CuStack())]
     elif item.GetClass() == 'PCB_ARC':
         result += [item.GetMid().x, item.GetMid().y]
     return tuple(result)

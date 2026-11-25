@@ -35,8 +35,10 @@ def main():
     assert not ids(pads[1:]) & ids(_legacy_connected_items(board.GetConnectivity(), pads[0]))
     source = pcbnew.LoadBoard(str(Path(__file__).parent / 'fixtures/obd2-adapter.kicad_pcb'))
     project = int(source.GetProject())
+    active_project = int(pcbnew.GetSettingsManager().Prj())
     boards = [pour_board(True)[0], island_board()]
     assert int(source.GetProject()) == project, 'refill replaced the source project'
+    assert int(pcbnew.GetSettingsManager().Prj()) == active_project, 'refill changed the active project'
     for board in boards:
         if isinstance(board, tuple):
             board = board[0]

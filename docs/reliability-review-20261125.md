@@ -18,7 +18,9 @@ tests and documentation against baseline `ab45284` (0.5.13).
 | Medium | Invalid settings and interrupted sidecar writes could break subsequent runs | Validate values and replace settings/SI/fab/guide files atomically | `test_runtime_reliability.py`, `test_config_validation.py` |
 | Medium | Same-second jobs collided; mistyped test filters passed without tests | Allocate unique directories; reject empty test selections | `test_runtime_reliability.py` |
 | Medium | Cross-platform behavior had no automated coverage | Portable OS/Python matrix, Linux KiCad 9/10 GUI/native tests and Windows KiCad integration | `.github/workflows/tests.yml` |
-| Medium | KiCad 9 connectivity API failures were silently treated as empty connections | Adapt connected-item and outline APIs; use compatible fixture nets and tuning-file versions | Existing native routing, SI and board-copy tests on both KiCad versions |
+| Medium | KiCad 9 API differences broke connectivity, copying, DRC and zone filling | Adapt connected-item, outline, item lookup, settings and DRC APIs; initialize private refill projects and DRC engines | Native routing, SI, board-copy and filled-island tests on both KiCad versions |
+| Medium | Via edit rollback flattened different layer diameters | Preserve and compare each copper layer diameter | `test_ai_locked.py` |
+| Medium | Search deadlines used an adjustable wall clock with platform-dependent precision | Use a monotonic high-resolution clock while retaining deterministic benchmark work budgets | `test_native_grid.py` |
 
 ## Matched board comparison
 
@@ -43,8 +45,9 @@ each board and previously connected net, including changes in DRC error types.
 
 - The full macOS native and opt-in GUI suite passed after the compatibility
   adapters. The installed KiCad version reports 10.0.8.
-- All six portable OS/Python combinations passed in GitHub Actions. Native
-  KiCad compatibility fixes remain under CI verification on the review branch.
+- All six portable OS/Python combinations passed in GitHub Actions. Linux
+  KiCad 10 and Windows KiCad 10 board/dialog flows passed. KiCad 9 compatibility
+  fixes remain under CI verification on the review branch.
 - API tests use fake SDK transports in real child processes. No paid AI request
   or remote-service cancellation guarantee is implied.
 - Differential-pair coupling is a geometric estimate sampled at 0.1 mm; it is

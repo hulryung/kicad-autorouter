@@ -429,13 +429,19 @@ class BoardActions:
 
     def _set_via(self, act: dict) -> int:
         vias = [t for t in self._items_near(act) if t.GetClass() == "PCB_VIA"]
-        olds = [(v, v.GetWidth(), v.GetDrillValue()) for v in vias]
+        olds = [(v, [(layer, v.GetWidth(layer)) for layer in v.GetLayerSet().CuStack()],
+                 v.GetDrillValue()) for v in vias]
         for v in vias:
             if act.get("diameter_mm"):
                 v.SetWidth(int(round(float(act["diameter_mm"]) * 1e6)))
             if act.get("drill_mm"):
                 v.SetDrill(int(round(float(act["drill_mm"]) * 1e6)))
-        self._undo.append(lambda: [(v.SetWidth(w), v.SetDrill(d)) for v, w, d in olds])
+        def restore():
+            for via, widths, drill in olds:
+                for layer, width in widths:
+                    via.SetWidth(layer, width)
+                via.SetDrill(drill)
+        self._undo.append(restore)
         return len(vias)
 
     def _inspect(self, act: dict) -> List[dict]:
@@ -446,7 +452,7 @@ class BoardActions:
             if t.GetClass() == "PCB_VIA":
                 p = t.GetPosition()
                 out.append({"kind": "via", "net": t.GetNetname(), "at_mm": [p.x / 1e6, p.y / 1e6],
-                            "diameter_mm": t.GetWidth() / 1e6, "drill_mm": t.GetDrillValue() / 1e6})
+                            "diameter_mm": t.GetWidth(t.TopLayer()) / 1e6, "drill_mm": t.GetDrillValue() / 1e6})
             else:
                 a, b = t.GetStart(), t.GetEnd()
                 out.append({"kind": "track", "net": t.GetNetname(), "layer": self.board.GetLayerName(t.GetLayer()),

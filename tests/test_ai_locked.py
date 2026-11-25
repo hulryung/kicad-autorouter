@@ -24,6 +24,10 @@ def main():
         item.SetLocked(True)
     fp = next(iter(board.GetFootprints()))
     fp.SetLocked(True)
+    via = next(item for item in board.GetTracks() if item.GetClass() == 'PCB_VIA')
+    via.Padstack().SetMode(pcbnew.PADSTACK.MODE_CUSTOM)
+    via.SetWidth(pcbnew.F_Cu, 700000)
+    via.SetWidth(pcbnew.B_Cu, 900000)
     original = protected_state(board)
     near = dict(x_mm=151, y_mm=100, radius_mm=2)
     edits = [dict(type='remove_tracks', nets=['/CANH']),
@@ -44,6 +48,13 @@ def main():
     assert editor.apply([dict(type='inspect_near', **near)])[0].ok
     for item in board.GetTracks():
         item.SetLocked(False)
+    signature = track_signature(via)
+    calls = iter([{'violations': 0}, {'violations': 1}])
+    editor.verify_fn = lambda: next(calls)
+    result = editor.apply([dict(type='set_via_near', diameter_mm=1.2, drill_mm=0.5, **near)])[0]
+    assert not result.ok and result.data['verify']['rolled_back']
+    assert track_signature(via) == signature, 'rollback lost per-layer via diameters'
+    editor.verify_fn = None
     assert editor.apply([dict(type='remove_tracks', nets=['/CANH'])])[0].ok
     assert not list(board.GetTracks())
     print('test_ai_locked: direct edits and remove-and-route respect locks; inspect and unlocked edits work')
