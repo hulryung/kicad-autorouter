@@ -19,7 +19,7 @@ Routing experiments use copies; private board inputs are not published.
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims implemented; synthetic differential/performance tests passed; reporter-board validation pending |
-| #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Main dc2bb2a implements budget/progress changes; cache and complete acceptance still pending |
+| #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Budget/progress checks pass; bounded raw-geometry reuse implemented and validated; CI pending |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
 
@@ -279,3 +279,30 @@ fanout and actual signal routing, checks the extracted movable set and the
 original fanout UUID/geometry, and verifies final connectivity. Both reservation
 and legacy modes pass. This prevents a reserved site from being taken; it does
 not create an outlet for a pad that could not fan out in the early pass.
+
+### Safe raster reuse across passes (#21)
+
+Pipeline passes share one bounded raw-geometry cache (128 MB maximum by default,
+`raster_cache_mb=0` disables it). It retains compact immutable cells for board
+outlines and pad/arc shapes. Keys include the grid, layer, complete geometry and
+raster radius. Ownership, connectivity, custom-rule selection and isolation-ring
+cuts are never cached. Empty results and cheap straight-track/box rasters are
+not retained, avoiding eviction by work that is already cheap. KiCad formats
+some rotated polygons only as `shape 4`; those incomplete representations are
+explicitly excluded from caching.
+
+Warm and uncached extraction agree after moving/rotating/resizing pads, changing
+round-rectangle radii, assigning another net, changing clearance, adding/moving/
+removing tracks, changing pitch, and adding a board-outline hole. A real pipeline
+fixture verifies that separate passes share the cache without modifying the
+caller's options. Existing progress, read-inclusive deadline and watchdog tests
+pass. The full native/GUI suite passed, followed by the final cache/deadline
+regressions after the bounded-admission adjustment.
+
+On the private three-net PIO snapshot, a warm read reused 3,785 raw rasters while
+retaining 12,619,904 estimated bytes. All owner/via-block hashes matched cold and
+disabled-cache reads. Cold/warm/disabled elapsed times were 12.98/12.85/13.86 s in
+one sequential comparison; this does not establish a general whole-job speedup.
+A broad first cache candidate thrashed at its limit and was rejected. Raw-raster
+reuse reduces repeated geometry work, while map writes and rule/connectivity
+work still run on each pass.

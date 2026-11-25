@@ -243,6 +243,9 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
     so a later pass may move the job's own plane vias as it does otherwise;
     on_board runs a function on the thread that owns the board and returns
     its result (the dialog's UI thread; called directly when None)."""
+    from .raster_cache import RasterCache
+    options = copy.copy(options)
+    options._raster_cache = RasterCache(options.raster_cache_mb * 1024 * 1024)
     extract = extract_fn or (lambda b, o, st: native_extract.extract(b, o, status=st))
     out = JobResult()
     added: list = []                       # board items this job created (apply_paths)

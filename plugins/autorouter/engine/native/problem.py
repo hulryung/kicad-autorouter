@@ -105,6 +105,7 @@ POWER_PATTERNS = ["+*", "V*", "*VCC*", "*VDD*", "*VBUS*", "*VIN*", "*VOUT*", "*3
 
 @dataclass
 class NativeOptions:
+    raster_cache_mb: float = 128.0    # shared raw geometry raster cache per job; 0 disables
     pitch_mm: float = 0.1
     # What to route: the whole board, only connections touching the given
     # footprints / nets (the editor selection), or footprints from the given
