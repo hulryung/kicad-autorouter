@@ -17,6 +17,8 @@ import pcbnew
 
 import logging
 
+from .raster_cache import RasterCache, shape_key
+
 from . import constraints
 from . import dru
 from . import watchdog
@@ -1465,8 +1467,15 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             return out
         return keep
 
+    cache = getattr(options, "_raster_cache", None)
+    cache_limit = max(0, int(options.raster_cache_mb * 1024 * 1024))
+    if cache is None or cache.max_bytes != cache_limit:
+        cache = options._raster_cache = RasterCache(cache_limit)
+    cache_start = cache.hits, cache.misses
+    raster_grid = grid.ox, grid.oy, grid.pitch, grid.w, grid.h, grid.layers
+
     def claim(layer: int, code: int, cells_for, own_clr: Optional[int] = None, item=None, floor_clr: int = 0,
-              box=None, exact: bool = False) -> None:
+              box=None, exact: bool = False, geometry=None) -> None:
         """cells_for(r) -> cells; one radius per owner map. item: the obstacle
         as the custom rules see it (then the rules' clearance replaces the net
         classes', floor_clr kept as a minimum: a hole's clearance). box: the
@@ -1476,6 +1485,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         places the ring's per-direction cut."""
         if own_clr is None:
             own_clr = clearance_of(code)
+        def raw(radius, wide_box=False):
+            build = (lambda: grid.rounded_box_cells(layer, box, radius)) if wide_box else (lambda: cells_for(radius))
+            key = ("box", box) if wide_box else geometry
+            return cache.get((raster_grid, layer, key, radius), build) if key is not None and cache.max_bytes and not wide_box and key[0] != "segment" else build()
         done: Dict[Tuple[int, bool], List[int]] = {}       # maps of the same radius share the cells
         for (width, clearance), own in owners.items():
             plain = max(clearance, own_clr)
@@ -1487,14 +1500,14 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             ck = (r, wide, clearance if cut else None)
             cells = done.get(ck)
             if cells is None:
-                cells = grid.rounded_box_cells(layer, box, r) if wide and not exact else cells_for(r)
+                cells = raw(r, wide and not exact)
                 if cut:
                     cells = cut(cells)
                 done[ck] = cells
             if isolation:
                 if cut:                            # the corridors keep the plain clearance
                     r_plain = max(plain, floor_clr) + width // 2 + safety
-                    grid.mark(own, cells_for(r_plain), code if code > 0 and code in nets else BLOCKED)
+                    grid.mark(own, raw(r_plain), code if code > 0 and code in nets else BLOCKED)
                 grid.block(own, cells)             # no net of this map may come that close
             else:
                 grid.mark(own, cells, code if code > 0 and code in nets else BLOCKED)
@@ -1510,8 +1523,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         for (width, clearance), own in owners.items():
             cells = edge_cells.get(width)
             if cells is None:
-                cells = edge_cells[width] = grid.outside_polygon_cells(layer.index, main_outline, holes,
-                                                                       edge_clr + width // 2)
+                outline_key = (raster_grid, layer.index, "outline", tuple(main_outline),
+                               tuple(tuple(hole) for hole in holes), edge_clr + width // 2)
+                cells = edge_cells[width] = cache.get(outline_key, lambda: grid.outside_polygon_cells(
+                    layer.index, main_outline, holes, edge_clr + width // 2))
             grid.mark(own, cells, BLOCKED)
     first_map = owners[keys[0]]
     for idx in range(grid.plane):
@@ -1647,7 +1662,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             add_copper(li, shape, code if code in nets else 0, clr, box, p_item)
             claim(li, code, lambda r, shape=shape, box=box, li=li, convex=convex:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
-                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r), convex), clr, p_item, box=box)
+                                   lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r), convex), clr, p_item, box=box, geometry=shape_key(shape))
             if hole_radius:
                 # the hole itself, under the hole-clearance rule, on every layer
                 # (inner layers may carry no annular ring at all)
@@ -1775,12 +1790,13 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 a, b, hw = item.GetStart(), item.GetEnd(), item.GetWidth() // 2
                 claim(li, code, lambda r, li=li, a=a, b=b, hw=hw:
                       grid.segment_cells(li, a.x, a.y, b.x, b.y, hw + r),
-                      item_clearance(item, item.GetLayer(), code), t_item, box=box, exact=True)
+                      item_clearance(item, item.GetLayer(), code), t_item, box=box, exact=True,
+                      geometry=("segment", a.x, a.y, b.x, b.y, hw))
             else:
                 claim(li, code, lambda r, shape=shape, box=box, li=li:
                       grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                        lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)),
-                      item_clearance(item, item.GetLayer(), code), t_item, box=box)
+                      item_clearance(item, item.GetLayer(), code), t_item, box=box, geometry=shape_key(shape))
 
     # Copper graphics and text (board and footprint level): netless obstacles.
     say("Rasterizing copper graphics...")
@@ -3499,6 +3515,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                      "pour_joins": {nets[c].name: {"groups": g, "all": per_net_all[c], "scoped": per_net[c],
                                                    "route": nets[c].route}
                                     for c, g in pour_joined.items() if per_net[c]}}
+    problem.stats["raster_cache"] = {"hits": cache.hits-cache_start[0], "misses": cache.misses-cache_start[1],
+                                     "bytes": cache.bytes, "limit_bytes": cache.max_bytes}
     return problem
 
 

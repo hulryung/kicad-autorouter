@@ -228,6 +228,8 @@ class NativeOptions:
     pair_via_swap: bool = True         # pins in opposite order at the two ends: one line crosses under the other through two vias
     protect_groups: bool = True        # rip-up may not move a pair/memory/high-speed route for a later group
 
+    raster_cache_mb: float = 128.0    # shared raw geometry raster cache per job; 0 disables
+
 
 @dataclass
 class RoutingProblem:

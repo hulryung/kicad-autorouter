@@ -9,19 +9,19 @@ Routing experiments use copies; private board inputs are not published.
 | --- | --- | --- |
 | #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Merged in PR #25; native tests and all nine CI jobs passed |
 | #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Merged in PR #25; verdicts and no-progress stopping verified |
-| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Actual neck-width exits join the copied W5500 supply; no new DRC or connectivity regressions; full native/GUI suite passed |
+| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Merged in PR #33; copied W5500 supply fully joined with unchanged DRC and other-net connectivity |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Net/group via masks and layer keepouts implemented and tested; Kelvin/template work remains |
-| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
+| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Older sense snapshot and completed-refill hard stop tested; original nine-connection case still pending |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
-| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims and indexed intersections implemented; reporter-board hashes match; five-run timing and full native/GUI validation passed |
-| #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Main dc2bb2a implements budget/progress changes; cache and complete acceptance still pending |
+| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Merged in PR #34; reporter-board hashes match and five-run rip-up timing improved |
+| #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Budget/progress checks pass; bounded raw-geometry reuse implemented and validated; CI pending |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
-| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
+| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | PR #31 merged; synthetic cases pass, private PIO rail still incomplete |
 
 Additional issue discovered during the real-board audit: #27, scoped shove
 trading a requested connection for a broken existing net. Synthetic rollback
@@ -301,6 +301,39 @@ fanout and actual signal routing, checks the extracted movable set and the
 original fanout UUID/geometry, and verifies final connectivity. Both reservation
 and legacy modes pass. This prevents a reserved site from being taken; it does
 not create an outlet for a pad that could not fan out in the early pass.
+
+### Safe raster reuse across passes (#21)
+
+Pipeline passes share one bounded raw-geometry cache (128 MB maximum by default,
+`raster_cache_mb=0` disables it). It retains compact immutable cells for board
+outlines and pad/arc shapes. Keys include the grid, layer, complete geometry and
+raster radius. Ownership, connectivity, custom-rule selection and isolation-ring
+cuts are never cached. Empty results and cheap straight-track/box rasters are
+not retained, avoiding eviction by work that is already cheap. KiCad formats
+some rotated polygons only as `shape 4`; those incomplete representations are
+explicitly excluded from caching.
+
+Warm and uncached extraction agree after moving/rotating/resizing pads, changing
+round-rectangle radii, assigning another net, changing clearance, adding/moving/
+removing tracks, changing pitch, and adding a board-outline hole. A real pipeline
+fixture verifies that separate passes share the cache without modifying the
+caller's options. Existing progress, read-inclusive deadline and watchdog tests
+pass. The full native/GUI suite passed, followed by the final cache/deadline
+regressions after the bounded-admission adjustment.
+
+On the private three-net PIO snapshot, a warm read reused 3,785 raw rasters while
+retaining 12,619,904 estimated bytes. All owner/via-block hashes matched cold and
+disabled-cache reads. Cold/warm/disabled elapsed times were 12.98/12.85/13.86 s in
+one sequential comparison; this does not establish a general whole-job speedup.
+A broad first cache candidate thrashed at its limit and was rejected. Raw-raster
+reuse reduces repeated geometry work, while map writes and rule/connectivity
+work still run on each pass.
+
+A full-board-grid extraction of the same private PIO scope reused all 18,488
+cacheable shapes on the second read, retaining about 67.1 MB. Cold, warm and
+disabled reads took 49.58, 46.39 and 49.26 seconds respectively; all owner and
+via-map hashes matched. This single comparison shows reuse and correctness,
+not a general routing speed guarantee.
 
 ### Per-job routing restrictions (#8, partial)
 
