@@ -29,6 +29,14 @@ def snapshot(board, destination):
 
 def _snapshot_rules(board, path):
     """Persist live routing constraints into the COPY, including unsaved edits."""
+    import pcbnew
+    project = board.GetProject()
+    if project is not None:
+        # This copies live assignments/patterns too, which are opaque in SWIG.
+        # SaveProjectCopy preserves the registered source name; SaveBoard's
+        # default SaveProjectAs path does not on KiCad 9.
+        manager = getattr(board, '_autorouter_settings_manager', None) or pcbnew.GetSettingsManager()
+        manager.SaveProjectCopy(str(path), project)
     data = json.loads(path.read_text()) if path.exists() else {}
     data.setdefault('meta', {'version': 1, 'filename': path.name})
     settings = board.GetDesignSettings()

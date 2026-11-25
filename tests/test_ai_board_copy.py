@@ -1,4 +1,5 @@
 """Editor copies preserve the project, locked copper and group membership."""
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -92,6 +93,14 @@ def main():
         strict_drc = context.drc_summary(strict_copy, root / 'strict-drc')
         assert strict_drc['available'], strict_drc
         assert strict_drc['violations_by_type'].get('track_width', 0) > 0, strict_drc
+        ns = board.GetDesignSettings().m_NetSettings
+        power = pcbnew.NETCLASS('UnsavedPower')
+        power.SetTrackWidth(730000)
+        ns.SetNetclass('UnsavedPower', power)
+        ns.SetNetclassPatternAssignment('/CANH', 'UnsavedPower')
+        live = board_copy.snapshot(board, root / 'live-rules.kicad_pcb')
+        saved = json.loads(live.with_suffix('.kicad_pro').read_text())['net_settings']
+        assert {'netclass': 'UnsavedPower', 'pattern': '/CANH'} in saved['netclass_patterns']
     assert project_slots() == projects
     print('test_ai_board_copy: isolated routing, copper transfer, groups, tuning patterns and placement guard ok')
 
