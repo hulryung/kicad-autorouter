@@ -143,9 +143,25 @@ def zone_filler(board):
                 raise RuntimeError('Could not initialize an isolated refill project')
             board.SetProject(project, True)
             board._autorouter_settings_manager = manager
+        settings = board.GetDesignSettings()
+        scalar_rules = tuple((name, getattr(settings, name)) for name in dir(settings)
+                             if name.startswith('m_') and isinstance(getattr(settings, name), (bool, int, float, str)))
+        net_rules = []
+        for code, net in board.GetNetsByNetcode().items():
+            if code > 0:
+                nc = settings.m_NetSettings.GetEffectiveNetClass(net.GetNetname())
+                net_rules.append((net.GetNetname(), nc.GetName(), nc.GetClearance(), nc.GetTrackWidth(),
+                                  nc.GetViaDiameter(), nc.GetViaDrill(), nc.GetDiffPairWidth(),
+                                  nc.GetDiffPairGap(), nc.GetDiffPairViaGap()))
+        rules_path = Path(board.GetFileName()).with_suffix('.kicad_dru') if board.GetFileName() else None
+        custom_rules = rules_path.read_bytes() if rules_path and rules_path.exists() else b''
+        key = (scalar_rules, tuple(sorted(net_rules)), custom_rules)
+        if getattr(board, '_autorouter_drc_rules', None) == key:
+            return pcbnew.ZONE_FILLER(board)
         with tempfile.TemporaryDirectory(prefix='autorouter-drc-init-') as work:
             # The scripting helper constructs and initializes the board's DRC
             # engine. Calling ZONE_FILLER on a raw BOARD otherwise segfaults.
             if not pcbnew.WriteDRCReport(board, str(Path(work) / 'init.rpt'), pcbnew.EDA_UNITS_MM, False):
                 raise RuntimeError('Could not initialize DRC for zone filling')
+        board._autorouter_drc_rules = key
     return pcbnew.ZONE_FILLER(board)
