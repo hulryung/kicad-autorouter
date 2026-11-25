@@ -94,6 +94,7 @@ class ExistingPath:
     cells: List[int]                 # centreline cells, where a route may end on it
     items: list                      # the pcbnew items, for removal on rip-up
     pad_exits: List[List[int]] = field(default_factory=list)   # per pad it touches: the pad's exit cells
+    fixed_contacts: Set[Tuple[int, int, int]] = field(default_factory=set)  # layer, x/y nm: endpoints of fixed copper it meets
 
 
 SCOPE_BOARD, SCOPE_SELECTION, SCOPE_SHEETS = "board", "selection", "sheets"
