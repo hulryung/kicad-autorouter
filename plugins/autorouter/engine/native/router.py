@@ -20,6 +20,8 @@ import logging
 import math
 import time
 from array import array
+from bisect import bisect_left
+from itertools import chain
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import os
@@ -91,11 +93,59 @@ class RouteResult:
         self.direct_links = 0                            # connections joined pad to pad before the search
 
 
+class _ClaimCells:
+    """Retain wide clearance footprints as row intervals, not boxed integers."""
+    def __init__(self):
+        self.spans = []
+        self.loose = array("Q")
+        self.count = 0
+
+    def add(self, piece):
+        spans = getattr(piece, "spans", None)
+        if spans is None:
+            self.loose.extend(piece)
+        else:
+            self.spans.extend(spans)
+        self.count += len(piece)
+
+    def __len__(self):
+        return self.count
+
+    def __iter__(self):
+        return chain.from_iterable(chain((range(a, b) for a, b in self.spans), (self.loose,)))
+
+    def intersection(self, touched, ordered):
+        common = touched.intersection(self.loose)
+        for a, b in self.spans:
+            start = bisect_left(ordered, a)
+            end = bisect_left(ordered, b, start)
+            common.update(ordered[start:end])
+        return common
+
+    def bounds(self, grid):
+        # Every span occupies one row on one layer. Endpoints suffice.
+        points = (i for a, b in self.spans for i in (a, b - 1))
+        x0 = y0 = 1 << 62
+        x1 = y1 = -1
+        for cell in points:
+            y, x = divmod(cell % grid.plane, grid.w)
+            if x < x0: x0 = x
+            if y < y0: y0 = y
+            if x > x1: x1 = x
+            if y > y1: y1 = y
+        if self.loose:
+            rows = [c % grid.plane for c in self.loose]
+            xs = [r % grid.w for r in rows]
+            x0, x1 = min(x0, min(xs)), max(x1, max(xs))
+            y0, y1 = min(y0, min(rows) // grid.w), max(y1, max(rows) // grid.w)
+        return (x0, y0, x1, y1) if self.count else (1, 1, 0, 0)
+
+
 class _Path:
     """A routed connection and everything needed to undo it."""
     def __init__(self, pid: int, conn: Connection, path: RoutedPath, cells: List[int], paired: bool = False):
         self.pid, self.conn, self.path, self.cells = pid, conn, path, cells
-        self.claims: Dict[Tuple[int, int], List[int]] = {}      # owner-map key -> claimed cells
+        self.claims: Dict[Tuple[int, int], _ClaimCells] = {}      # owner-map key -> claimed cells
         self.boxes: Dict[Tuple[int, int], Tuple[int, int, int, int]] = {}   # key -> cell box of those claims
         self.via_cells: List[int] = []
         self.joins: List[Tuple[int, int]] = [(conn.a, conn.b)]  # cluster pairs this path connects
@@ -538,9 +588,9 @@ class Router:
         """Make a path's copper an obstacle (and remember what it claimed)."""
         grid, p, net = self.grid, self.p, self.p.nets[path.conn.net]
         rp = path.path
-        shared: Dict[int, List[int]] = {}       # maps with the same clearance + half width share the cells
-        boxes: Dict[int, Tuple[int, int, int, int]] = {}
-        parts: Dict[int, Tuple[list, list]] = {}  # grow -> (row spans, the other cells)
+        shared: Dict[tuple, _ClaimCells] = {}       # maps with the same clearance + half width share the cells
+        boxes: Dict[tuple, Tuple[int, int, int, int]] = {}
+        parts: Dict[tuple, Tuple[list, array]] = {}  # grow -> (row spans, the other cells)
         code, pid = net.code, path.pid
         for key, owners in p.owners.items():
             width, clearance = key
@@ -552,15 +602,11 @@ class Router:
                 grow = ("ring", key)                    # cut back per piece: not shared
             cells = shared.get(grow)
             if cells is None:
-                cells, spans, loose = [], [], []
+                cells = _ClaimCells()
                 for kind, piece in self._pieces(key, net, rp, ringed):
-                    cells += piece
-                    if getattr(piece, "spans", None) is not None:
-                        spans += piece.spans            # a wide (isolation) claim: written by rows
-                    else:
-                        loose += piece
+                    cells.add(piece)
                 shared[grow] = cells
-                parts[grow] = (spans, loose)
+                parts[grow] = (cells.spans, cells.loose)
                 boxes[grow] = self._cell_box(cells)
             path.claims[key] = cells
             path.boxes[key] = boxes[grow]
@@ -601,10 +647,12 @@ class Router:
         for idx in path.via_cells:
             p.via_block[idx] = 1
 
-    def _cell_box(self, cells: List[int]) -> Tuple[int, int, int, int]:
+    def _cell_box(self, cells) -> Tuple[int, int, int, int]:
         """(x0, y0, x1, y1) of cells on any layer: _unclaim skips paths whose
         box misses the cells being freed (an isolation rule's wide claims
         made checking every surviving path's cells the cost of a rip-up)."""
+        if isinstance(cells, _ClaimCells):
+            return cells.bounds(self.grid)
         if not cells:
             return (1, 1, 0, 0)
         plane, w = self.grid.plane, self.grid.w
@@ -664,6 +712,7 @@ class Router:
                     tx0, ty0, tx1, ty1 = min(tx0, bx0), min(ty0, by0), max(tx1, bx1), max(ty1, by1)
             if not touched:
                 continue
+            ordered = sorted(touched)
             fixed, routed = self.fixed[key], self.routed[key]
             for idx in touched:
                 owners[idx] = fixed[idx]
@@ -675,7 +724,7 @@ class Router:
                 box = path.boxes.get(key)
                 if box is not None and (box[2] < tx0 or box[0] > tx1 or box[3] < ty0 or box[1] > ty1):
                     continue
-                common = touched.intersection(cells)
+                common = cells.intersection(touched, ordered)
                 if not common:
                     continue
                 code, pid = p.nets[path.conn.net].code, path.pid
