@@ -10,6 +10,7 @@ import os
 from array import array
 import time
 from collections import Counter
+from dataclasses import replace
 from typing import Dict, List, Optional, Set, Tuple
 
 import pcbnew
@@ -1994,6 +1995,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         # a 0.5 mm +3V3 stub on a 0.35 mm MSOP pin at 0.5 mm pitch came within
         # 0.075 mm of pin 2. The stub gets the widest width that clears.
         stub_w = centre_fit(pad, pos, pl, code, stub_w)
+        # A narrow neck needs a narrow exit, too: sizing its offset and
+        # obstacle check for the trunk can place the exit inside nearby copper.
+        if escapes and stub_w < net.rules.width:
+            escapes = pad_escape(pad, fp, replace(net.rules, width=stub_w), pitch, target, outward=two_pin)
         pad_key = (fp.GetReference() if fp else "", pad.GetNumber())
         remembered = options.escape_sides.get(pad_key)
         # A pin of a dense two-row connector: the pins alternate between
@@ -2184,9 +2189,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 continue
             gx, gy = grid.nm_x(ecx), grid.nm_y(ecy)
             # the grid search must be able to start on the exit cell
-            if any(own[grid.index(li, ecx, ecy)] not in (0, code) for li in pl):
+            escape_owners = owners.get((stub_w, net.rules.clearance), own)
+            if any(escape_owners[grid.index(li, ecx, ecy)] not in (0, code) for li in pl):
                 if _DEBUG:
-                    holder = [own[grid.index(li, ecx, ecy)] for li in pl]
+                    holder = [escape_owners[grid.index(li, ecx, ecy)] for li in pl]
                     print(f"[escape] {net.name} {fp.GetReference() if fp else '?'}.{pad.GetNumber()} exit cell "
                           f"({gx / 1e6:.2f},{gy / 1e6:.2f}) taken by {[nets[h].name if h in nets else h for h in holder]}", flush=True)
                 continue

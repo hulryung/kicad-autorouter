@@ -9,7 +9,7 @@ Routing experiments use copies; private board inputs are not published.
 | --- | --- | --- |
 | #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Merged in PR #25; native tests and all nine CI jobs passed |
 | #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Merged in PR #25; verdicts and no-progress stopping verified |
-| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
+| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Actual neck-width exits join the copied W5500 supply; no new DRC or connectivity regressions; full native/GUI suite passed |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
@@ -18,7 +18,7 @@ Routing experiments use copies; private board inputs are not published.
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
-| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims implemented; synthetic differential/performance tests passed; reporter-board validation pending |
+| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims and indexed intersections implemented; reporter-board hashes match; five-run timing and full native/GUI validation passed |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Main dc2bb2a implements budget/progress changes; cache and complete acceptance still pending |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
@@ -240,6 +240,28 @@ cells and peaked at 1,196,834,816 bytes (1.20 GB); read/claim preparation was
 16.14/12.32 s. Timing varies with concurrent machine load; the memory result
 is the main evidence. No full-board 0.075 mm allocation was needed.
 
+### Multi-pin supply escape geometry (#3)
+
+The neck width was already narrower than the supply trunk, but its escape
+position and first owner-map check still used the trunk width. On a crowded
+pin that could put both candidate exits into neighboring copper, even though
+a shorter narrow exit was legal. Exit offsets and checks now use the actual
+neck width; exact stub clearance checks and wide trunk routing remain active.
+
+On a copied Base-board W5500 supply, `/USB_ETH/+3V3A_ETH` had four pad components.
+The old default joined them into two; enabling both pad exits or a prototype
+via-first pass still left two. Setting the entire net to 0.25 mm joined all
+four, which identified the width-dependent failure. The corrected neck exits
+join all four with the original net width. Every other net retains its pad
+connectivity, and refilled DRC has exactly the same 14 violations (10 silk over
+copper, 4 silk overlaps), with no new or removed violation reports. Unconnected
+items fall from seven to four, all three gains on the selected supply.
+
+`test_supply_pin_necks.py` exercises a synthetic 48-pin, 0.5 mm-pitch IC with six
+supply pins separated by ground pins, verifying complete supply connectivity,
+narrow emitted necks, wide trunks and adjacent-pad clearance. The decisive
+before/after crowded-board regression is retained privately.
+
 ### Distributed power and remote plane goals (#24)
 
 `power_trunks_first=True` gives routed power nets with four or more disconnected
@@ -296,3 +318,27 @@ reject invalid layer names. Fanout and stitching use the same restrictions.
 A portable coupled-pair case confirms that a member-specific mask also applies
 to paired and single-ended fallback vias. Kelvin pad-only joins and channel
 replication are still pending, so #8 is not closed by this change.
+
+### Rip-up interval index (#19)
+
+On the current scoped PIO model (143 owner maps, 117 movable paths), profiling
+three removals showed 9.31 million binary searches inside claim intersections.
+The compact claims saved memory but still scanned every raw segment row for
+each surviving path/map pair. A lazy disjoint interval index now limits each
+intersection to the touched range and searches the smaller side. Raw row spans
+remain intact for ownership slices and geometric bounds; adding cells invalidates
+the index.
+
+The profiled removal fell from 1.512 s to 0.314 s, including index construction.
+Owner-map, first-claimer and via-block hashes match before and after removal.
+Peak RSS was 1.230 GB and 1.224 GB in these runs. These profile timings are not
+an uninstrumented whole-job speed claim. `test_claim_intersections.py` compares
+100 randomized overlapping claims against explicit sets, including sparse,
+dense and empty intersections and mutation after indexing; exact rip-up versus
+full-rebuild tests also pass.
+
+Five alternating uninstrumented runs rebuilt the same 117-path router before
+each removal (a cold index each time). Median removal time fell from 1.1913 s
+to 0.2584 s (78% lower). All ten resulting ownership/first-claimer/via-block
+hashes match. The full local native/GUI suite passed. This is a measured
+three-net scoped case, not a timing claim for the original full 22-net job.
