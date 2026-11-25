@@ -397,6 +397,28 @@ maps, clearances, connectivity and isolation-ring cuts are rebuilt from the
 current board. Geometry without a complete KiCad shape representation is
 recomputed. Cache hits and retained bytes are included in job statistics.
 
+Headless callers can also set per-job keepouts without creating temporary
+KiCad zones. Coordinates and margins are in nanometres:
+
+```json
+{
+  "via_keepouts": [{"nets": ["/CH*/SENSE*"], "layers": ["In2.Cu"],
+    "rect_nm": [10000000, 20000000, 30000000, 40000000], "margin_nm": 1000000}],
+  "layer_keepouts": [{"layers": ["F.Cu"],
+    "rect_nm": [10000000, 20000000, 30000000, 40000000]}]
+}
+```
+
+`via_keepouts` selects net-name patterns or routing `groups` (such as
+`signal`, `power` or `pairs`); omitting both selects all nets. A through via
+crosses every copper layer, so a restriction on any named layer excludes its
+barrel there, including the requested margin. Ordinary routes, differential
+pairs, fanout and stitching all obey it. Existing copper is retained.
+`layer_keepouts` blocks new copper on only the named layers for all nets.
+Omitting `layers` selects every copper layer. Unknown layer/group names and
+invalid rectangles are rejected. These advanced controls currently use the
+headless options interface.
+
 ## Use with LCSC Manager
 
 [LCSC Manager](https://github.com/hulryung/kicad-lcsc-manager) imports component

@@ -150,6 +150,8 @@ class NativeOptions:
     # scope's pads (0: anywhere on the board)
     shove_margin_mm: float = 5.0
     scoped_grid: bool = True        # scoped jobs use a pad/copper window plus shove_margin_mm; False uses the whole board
+    via_keepouts: List[dict] = field(default_factory=list)  # rect_nm, layers, nets/groups, margin_nm
+    layer_keepouts: List[dict] = field(default_factory=list)  # rect_nm and layers; blocks copper on those layers
     keepouts: List[Tuple[int, int, int, int]] = field(default_factory=list)   # nm rects blocked for this run
     # UUIDs of plane-net pads routed as strays of their net even where its
     # pour's outline covers them: the pipeline's pass for pads the job's
@@ -245,6 +247,7 @@ class RoutingProblem:
     # (key clearance, ring radius, box nm, net code) -> None or a filter taking an isolation ring's
     # cells and dropping the corridors to the map's pads that already sit closer; None = no custom rules
     ring_free: Optional[object] = None
+    net_via_blocks: Dict[int, bytearray] = field(default_factory=dict)
     fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
     fanout_alt: Dict[int, List[int]] = field(default_factory=dict)   # exit cell -> the pad's other exits to try
     fanout_far_goals: Dict[int, Set[int]] = field(default_factory=dict)  # coarse outer-ring fallback after local search fails

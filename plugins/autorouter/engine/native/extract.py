@@ -18,6 +18,8 @@ import pcbnew
 import logging
 
 from .raster_cache import RasterCache, shape_key
+
+from . import constraints
 from . import dru
 from . import watchdog
 from .grid import BLOCKED, BODY_LANE, Grid, jog
@@ -1544,6 +1546,35 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 grid.mark(own, cells, BLOCKED)
             for idx in grid.cells_where(layer.index, bounds, lambda x, y: True):
                 via_block[idx % grid.plane] = 1
+
+    # Layer-specific copper restrictions share the normal owner maps.
+    for spec, bounds, margin, selected in constraints.rectangles(options.layer_keepouts, layers):
+        if spec.get("nets") or spec.get("groups"):
+            raise ValueError("layer_keepouts apply to all nets; use via_keepouts for net/group selection")
+        for li in selected:
+            for (width, _), own in owners.items():
+                r = width // 2 + safety + margin
+                cells = grid.cells_where(li, (bounds[0]-r,bounds[1]-r,bounds[2]+r,bounds[3]+r), lambda x,y: True)
+                grid.mark(own, cells, BLOCKED)
+    # Through vias cross every copper layer. A restriction on any named layer
+    # applies to their full barrel, even if that layer is not routable.
+    net_via_blocks = {}
+    specs = list(constraints.rectangles(options.via_keepouts, layers))
+    mask_cache = {}
+    for code, net in nets.items():
+        matched = tuple(i for i, (spec, _, _, selected) in enumerate(specs) if selected and constraints.applies(spec, net))
+        if not matched:
+            continue
+        key = matched, net.rules.via_diameter
+        if key not in mask_cache:
+            mask = bytearray(grid.plane)
+            for i in matched:
+                _, bounds, margin, _ = specs[i]
+                r = net.rules.via_diameter // 2 + safety + margin
+                for cell in grid.cells_where(0, (bounds[0]-r,bounds[1]-r,bounds[2]+r,bounds[3]+r), lambda x,y: True):
+                    mask[cell] = 1
+            mask_cache[key] = mask
+        net_via_blocks[code] = mask_cache[key]
 
     # Rule areas (keepouts), the footprints' included.
     for zone in rule_areas(board):
@@ -3423,7 +3454,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                              hole_to_hole=hole_to_hole, max_via_drill=max_via_drill, safety=safety,
                              pair_clearance=track_pair if rules is not None else None,
                              ring_free=ring_free if rules is not None else None,
-                             fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_far_goals=fanout_far_goals, fanout_strict=fanout_strict, fanout_array=fanout_array, fanout_array_cells=fanout_array_cells,
+                             net_via_blocks=net_via_blocks, fanout=fanout, fanout_alt=fanout_alt, fanout_goals=fanout_goals, fanout_far_goals=fanout_far_goals, fanout_strict=fanout_strict, fanout_array=fanout_array, fanout_array_cells=fanout_array_cells,
                              tied_pad_cells=tied_pad_cells, fanout_tie_only=fanout_tie_only,
                              stitch=stitch, existing=existing, via_guard=via_guard,
                              lane_guard=lane_guard, site_guard=site_guard, board_vias=existing_vias)

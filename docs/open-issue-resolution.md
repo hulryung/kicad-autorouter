@@ -9,19 +9,19 @@ Routing experiments use copies; private board inputs are not published.
 | --- | --- | --- |
 | #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Merged in PR #25; native tests and all nine CI jobs passed |
 | #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Merged in PR #25; verdicts and no-progress stopping verified |
-| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Actual neck-width exits join the copied W5500 supply; no new DRC or connectivity regressions; full native/GUI suite passed |
+| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Merged in PR #33; copied W5500 supply fully joined with unchanged DRC and other-net connectivity |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
-| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
-| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
+| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Net/group via masks and layer keepouts implemented and tested; Kelvin/template work remains |
+| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Older sense snapshot and completed-refill hard stop tested; original nine-connection case still pending |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
-| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims and indexed intersections implemented; reporter-board hashes match; five-run timing and full native/GUI validation passed |
+| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Merged in PR #34; reporter-board hashes match and five-run rip-up timing improved |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Budget/progress checks pass; bounded raw-geometry reuse implemented and validated; CI pending |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
-| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
+| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | PR #31 merged; synthetic cases pass, private PIO rail still incomplete |
 
 Additional issue discovered during the real-board audit: #27, scoped shove
 trading a requested connection for a broken existing net. Synthetic rollback
@@ -329,6 +329,29 @@ A broad first cache candidate thrashed at its limit and was rejected. Raw-raster
 reuse reduces repeated geometry work, while map writes and rule/connectivity
 work still run on each pass.
 
+A full-board-grid extraction of the same private PIO scope reused all 18,488
+cacheable shapes on the second read, retaining about 67.1 MB. Cold, warm and
+disabled reads took 49.58, 46.39 and 49.26 seconds respectively; all owner and
+via-map hashes matched. This single comparison shows reuse and correctness,
+not a general routing speed guarantee.
+
+### Per-job routing restrictions (#8, partial)
+
+`via_keepouts` supports net patterns or routing groups, named copper layers,
+rectangles and additional clearance margins in nm. Through-via barrels are
+excluded if they cross a restricted layer. Masks share storage for nets with
+the same constraint and diameter and are combined with the live drill-obstacle
+map without copying it, so rip-up and newly placed vias remain visible.
+`layer_keepouts` blocks new copper only on selected layers. No temporary board
+objects are created, and existing copper is retained.
+
+Native tests route an unrestricted net across a layer barrier while a restricted
+net correctly remains open, verify group selection and layer isolation, and
+reject invalid layer names. Fanout and stitching use the same restrictions.
+A portable coupled-pair case confirms that a member-specific mask also applies
+to paired and single-ended fallback vias. Kelvin pad-only joins and channel
+replication are still pending, so #8 is not closed by this change.
+
 ### Rip-up interval index (#19)
 
 On the current scoped PIO model (143 owner maps, 117 movable paths), profiling
@@ -353,8 +376,19 @@ to 0.2584 s (78% lower). All ten resulting ownership/first-claimer/via-block
 hashes match. The full local native/GUI suite passed. This is a measured
 three-net scoped case, not a timing claim for the original full 22-net job.
 
-A full-board-grid extraction of the same private PIO scope reused all 18,488
-cacheable shapes on the second read, retaining about 67.1 MB. Cold, warm and
-disabled reads took 49.58, 46.39 and 49.26 seconds respectively; all owner and
-via-map hashes matched. This single comparison shows reuse and correctness,
-not a general routing speed guarantee.
+### UI error propagation (#37)
+
+A native wx worker/main-thread regression reproduced `_on_main` swallowing a
+board-read exception and returning `None`. The bridge now re-raises the original
+exception on the waiting routing worker, so watchdog hard stops reach the
+pipeline's overrun handler. A `finally` block releases the worker even when
+error reporting fails. Successful results, including `None`, remain unchanged.
+The regression exercises real wx dispatch, thread identity and both ordinary
+errors and watchdog exceptions. This fixes reporting; the long-sense routing
+case and manual native-editor Undo remain separate open verification work.
+
+The UI regression also runs a routing worker through actual main-thread
+extraction and zone filling, injecting an Overrun at the next extraction stage
+after the final pour refill. The job reports `the pour pass` in its overrun
+list and retains the exact filled polygon representation. This verifies the
+completed-refill boundary; it does not interrupt KiCad's C++ fill mid-call.
