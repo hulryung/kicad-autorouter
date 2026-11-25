@@ -14,7 +14,7 @@ Routing experiments use copies; private board inputs are not published.
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
-| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
+| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Net/group via masks and layer keepouts implemented and tested; Kelvin/template work remains |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
@@ -310,6 +310,23 @@ original fanout UUID/geometry, and verifies final connectivity. Both reservation
 and legacy modes pass. This prevents a reserved site from being taken; it does
 not create an outlet for a pad that could not fan out in the early pass.
 
+### Per-job routing restrictions (#8, partial)
+
+`via_keepouts` supports net patterns or routing groups, named copper layers,
+rectangles and additional clearance margins in nm. Through-via barrels are
+excluded if they cross a restricted layer. Masks share storage for nets with
+the same constraint and diameter and are combined with the live drill-obstacle
+map without copying it, so rip-up and newly placed vias remain visible.
+`layer_keepouts` blocks new copper only on selected layers. No temporary board
+objects are created, and existing copper is retained.
+
+Native tests route an unrestricted net across a layer barrier while a restricted
+net correctly remains open, verify group selection and layer isolation, and
+reject invalid layer names. Fanout and stitching use the same restrictions.
+A portable coupled-pair case confirms that a member-specific mask also applies
+to paired and single-ended fallback vias. Kelvin pad-only joins and channel
+replication are still pending, so #8 is not closed by this change.
+
 ### Rip-up interval index (#19)
 
 On the current scoped PIO model (143 owner maps, 117 movable paths), profiling
@@ -333,3 +350,20 @@ each removal (a cold index each time). Median removal time fell from 1.1913 s
 to 0.2584 s (78% lower). All ten resulting ownership/first-claimer/via-block
 hashes match. The full local native/GUI suite passed. This is a measured
 three-net scoped case, not a timing claim for the original full 22-net job.
+
+### UI error propagation (#37)
+
+A native wx worker/main-thread regression reproduced `_on_main` swallowing a
+board-read exception and returning `None`. The bridge now re-raises the original
+exception on the waiting routing worker, so watchdog hard stops reach the
+pipeline's overrun handler. A `finally` block releases the worker even when
+error reporting fails. Successful results, including `None`, remain unchanged.
+The regression exercises real wx dispatch, thread identity and both ordinary
+errors and watchdog exceptions. This fixes reporting; the long-sense routing
+case and manual native-editor Undo remain separate open verification work.
+
+The UI regression also runs a routing worker through actual main-thread
+extraction and zone filling, injecting an Overrun at the next extraction stage
+after the final pour refill. The job reports `the pour pass` in its overrun
+list and retains the exact filled polygon representation. This verifies the
+completed-refill boundary; it does not interrupt KiCad's C++ fill mid-call.
