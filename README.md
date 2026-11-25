@@ -378,8 +378,9 @@ still go first. This uses the existing tree connections and is opt-in because
 giving a rail the early corridors can make later signal escapes harder.
 
 Plane-pad fanout checks the net's own zone territory, including higher-priority
-foreign pours. When the normal 3 mm search has no legal plane goals, it expands
-to `plane_fanout_reach_mm` (6 mm by default). This is a bounded fallback, not a
+foreign pours. When the normal 3 mm search has no legal plane goals or cannot reach them,
+it tries outer-ring goals up to `plane_fanout_reach_mm` (6 mm by default),
+sampled at about 0.3 mm to bound the extra memory. This is a bounded fallback, not a
 guarantee that a blocked plane pad can be connected. Scoped raster windows
 include this reach when fanout is enabled.
 

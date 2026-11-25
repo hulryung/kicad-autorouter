@@ -249,8 +249,15 @@ and signal connectivity with the option both enabled and disabled.
 
 A second fixture places a plane pad over a higher-priority foreign zone whose
 edge is 4 mm away. Previously the pad was omitted from fanout. Ordinary fanout
-now widens from 3 mm to `plane_fanout_reach_mm` (default 6 mm) only when there
-are no local plane goals. Goals subtract foreign priority regions and keepouts;
+now tries outer-ring goals up to `plane_fanout_reach_mm` (default 6 mm) when
+local goals are absent or unreachable. Outer candidates use approximately
+0.3 mm spacing to bound storage rather than quadrupling every fine-grid set. Goals subtract foreign priority regions and keepouts;
 both pad exits must satisfy the same plane-landing restriction. The fixture
 finishes with zero unconnected items after refill and no new via in the foreign
 zone. This does not yet establish the result on every reporter-board rail.
+
+The outer-ring regression also retains valid local goals while blocking every
+nearby via site; local-only search fails and the outer fallback completes the
+connection after refill. An initial private PIO +3V3 comparison, before this
+second fallback, gave 15 to 14 pad components for both baseline and candidate;
+that experiment did not demonstrate an improvement on the reporter snapshot.

@@ -2904,15 +2904,18 @@ class Router:
         any track needed between the via and the connected fill.
         """
         p, grid = self.p, self.grid
+        far = p.fanout_far_goals.get(cell) if goals is None else None
+        def fallback():
+            return self._fanout_search(code, cell, cancelled, starts=starts, goals=far) if far else None
         goals = goals or p.fanout_goals.get(cell)
         if not goals:
-            return None
+            return fallback()
         net = p.nets[code]
         owners = p.owners[net.rules.key]
         layer, cx, cy = grid.unpack(cell)
         goals = {g for g in goals if owners[g] in (0, code)}
         if not goals:
-            return None
+            return fallback()
         xy = [grid.unpack(g)[1:] for g in goals]
         bounds = (min(x for x, y in xy), min(y for x, y in xy),
                   max(x for x, y in xy), max(y for x, y in xy))
@@ -2925,7 +2928,7 @@ class Router:
                             goal_bounds=bounds if cell in p.fanout_strict else None,
                             via_goals_only=cell not in p.fanout_strict)
         if not cells or len(cells) < 2:
-            return None
+            return fallback()
         segments, vias = _simplify(grid, cells)
         if not vias:
             return None                             # it never left the pad's layer

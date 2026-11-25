@@ -244,6 +244,7 @@ class RoutingProblem:
     ring_free: Optional[object] = None
     fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
     fanout_alt: Dict[int, List[int]] = field(default_factory=dict)   # exit cell -> the pad's other exits to try
+    fanout_far_goals: Dict[int, Set[int]] = field(default_factory=dict)  # coarse outer-ring fallback after local search fails
     fanout_goals: Dict[int, Set[int]] = field(default_factory=dict)  # exit cell -> cells on the net's pour, within reach
     # exit cells of pads whose via is stranded in a pour island: the new via
     # must land on the goals (the filled plane), not next to the pad
