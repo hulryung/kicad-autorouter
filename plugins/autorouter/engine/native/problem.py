@@ -123,12 +123,14 @@ class NativeOptions:
     dual_escapes: bool = False      # SMD pads get an exit on both ends (the search picks one); the open-net pass
     neck_length_mm: float = 1.5     # how far from a fine-pitch pin the track stays at the neck width
     fanout_vias: bool = True        # pads of nets with a copper zone get a via to that plane
+    plane_fanout_reach_mm: float = 6.0  # expand only when the local 3 mm ring has no own-plane goals
     diff_pairs: bool = True         # route +/- pairs coupled, at the net class pair width and gap
     stitch_vias: bool = True        # via stitching across pour nets that span several layers, beside signal layer changes only
     stitch_pitch_mm: float = 4.0    # grid pitch of the candidate stitching spots (a via lands within 3/4 of it of a layer change)
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     plane_nets: bool = True         # nets whose pour covers their pads are planes: vias to the pour, no tracks
     protect_pour_regions: bool = False  # reserve zone polygons for their own net, including mixed-net layers
+    power_trunks_first: bool = False  # routed power nets with 4+ clusters precede single-ended signals
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
     preserve_plane_fanout: bool = True  # keep early fanout vias/stubs fixed through later signal passes
     repair_islands_only: bool = False  # final refill: join isolated copper, no other routing
@@ -243,6 +245,7 @@ class RoutingProblem:
     ring_free: Optional[object] = None
     fanout: List[Tuple[int, int]] = field(default_factory=list)   # (net, exit cell) wanting a via to a plane
     fanout_alt: Dict[int, List[int]] = field(default_factory=dict)   # exit cell -> the pad's other exits to try
+    fanout_far_goals: Dict[int, Set[int]] = field(default_factory=dict)  # coarse outer-ring fallback after local search fails
     fanout_goals: Dict[int, Set[int]] = field(default_factory=dict)  # exit cell -> cells on the net's pour, within reach
     # exit cells of pads whose via is stranded in a pour island: the new via
     # must land on the goals (the filled plane), not next to the pad

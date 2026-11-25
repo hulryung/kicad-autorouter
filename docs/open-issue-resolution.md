@@ -12,7 +12,7 @@ Routing experiments use copies; private board inputs are not published.
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
-| #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Early-fanout reservation and locked-item regression pass; full native/GUI suite passed; CI pending |
+| #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
@@ -20,8 +20,8 @@ Routing experiments use copies; private board inputs are not published.
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims and indexed intersections implemented; reporter-board hashes match; five-run timing and full native/GUI validation passed |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Main dc2bb2a implements budget/progress changes; cache and complete acceptance still pending |
-| #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Scoped windows implemented; native suite and private PIO memory comparison passed; CI pending |
-| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Pending reproduction |
+| #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
+| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
 
 Additional issue discovered during the real-board audit: #27, scoped shove
 trading a requested connection for a broken existing net. Synthetic rollback
@@ -239,6 +239,28 @@ universal speedup. At 0.075 mm the same single-net local job used 715,040
 cells and peaked at 1,196,834,816 bytes (1.20 GB); read/claim preparation was
 16.14/12.32 s. Timing varies with concurrent machine load; the memory result
 is the main evidence. No full-board 0.075 mm allocation was needed.
+
+### Distributed power and remote plane goals (#24)
+
+`power_trunks_first=True` gives routed power nets with four or more disconnected
+clusters priority over single-ended signals, retaining coupled-pair priority.
+A five-pad native fixture verifies the emitted route order and complete rail
+and signal connectivity with the option both enabled and disabled.
+
+A second fixture places a plane pad over a higher-priority foreign zone whose
+edge is 4 mm away. Previously the pad was omitted from fanout. Ordinary fanout
+now tries outer-ring goals up to `plane_fanout_reach_mm` (default 6 mm) when
+local goals are absent or unreachable. Outer candidates use approximately
+0.3 mm spacing to bound storage rather than quadrupling every fine-grid set. Goals subtract foreign priority regions and keepouts;
+both pad exits must satisfy the same plane-landing restriction. The fixture
+finishes with zero unconnected items after refill and no new via in the foreign
+zone. This does not yet establish the result on every reporter-board rail.
+
+The outer-ring regression also retains valid local goals while blocking every
+nearby via site; local-only search fails and the outer fallback completes the
+connection after refill. Private PIO +3V3 comparisons before and after this
+second fallback gave 15 to 14 pad components for both baseline and candidate;
+that experiment did not demonstrate an improvement on the reporter snapshot.
 
 ### Retaining plane-pad outlets (#6)
 

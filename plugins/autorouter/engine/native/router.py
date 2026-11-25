@@ -2838,7 +2838,12 @@ class Router:
         else:
             arrive = (gx - px, gy - py)
 
+        plane_xy = ({g % grid.plane for g in p.fanout_goals[cell]}
+                    if cell in p.fanout_goals else None)
+
         def fits(vx: int, vy: int, hairpin_ok: bool) -> bool:
+            if plane_xy is not None and vy * grid.w + vx not in plane_xy:
+                return False
             if not grid.inside(vx, vy) or p.via_block[vy * grid.w + vx]:
                 return False
             if p.via_guard is not None and p.via_guard[vy * grid.w + vx] not in (0, code):
@@ -2925,15 +2930,18 @@ class Router:
         any track needed between the via and the connected fill.
         """
         p, grid = self.p, self.grid
+        far = p.fanout_far_goals.get(cell) if goals is None else None
+        def fallback():
+            return self._fanout_search(code, cell, cancelled, starts=starts, goals=far) if far else None
         goals = goals or p.fanout_goals.get(cell)
         if not goals:
-            return None
+            return fallback()
         net = p.nets[code]
         owners = p.owners[net.rules.key]
         layer, cx, cy = grid.unpack(cell)
         goals = {g for g in goals if owners[g] in (0, code)}
         if not goals:
-            return None
+            return fallback()
         xy = [grid.unpack(g)[1:] for g in goals]
         bounds = (min(x for x, y in xy), min(y for x, y in xy),
                   max(x for x, y in xy), max(y for x, y in xy))
@@ -2946,7 +2954,7 @@ class Router:
                             goal_bounds=bounds if cell in p.fanout_strict else None,
                             via_goals_only=cell not in p.fanout_strict)
         if not cells or len(cells) < 2:
-            return None
+            return fallback()
         segments, vias = _simplify(grid, cells)
         if not vias:
             return None                             # it never left the pad's layer
@@ -3010,8 +3018,10 @@ class Router:
         # the open-field connections of every group: its escape cell is the
         # one place it can leave, and a long bus or power run of an earlier
         # group would otherwise take it on the way past.
+        power_trunks = {n.code for n in self.p.nets.values()
+                        if opts.power_trunks_first and n.group == "power" and n.route and len(n.clusters) >= 4}
         queue = sorted(self.p.connections,
-                       key=lambda c: (0 if c.pair else 1 if c.priority == 0 else 2, c.rank,
+                       key=lambda c: (0 if c.pair else 1 if c.net in power_trunks else 2 if c.priority == 0 else 3, c.rank,
                                       -c.estimate if c.pair else c.priority, c.estimate))
         requested_nets = {c.net for c in queue}
         total = len(queue)
