@@ -30,6 +30,32 @@ WIDE_RULE_NM = 1_000_000     # a custom-rule clearance this wide is rasterized f
 
 
 
+def scoped_grid_bounds(board, options):
+    """Scope geometry plus a routing margin, in board coordinates."""
+    if not options.scoped_grid or options.scope == SCOPE_BOARD or options.shove_margin_mm <= 0:
+        return None
+    refs, names = set(options.scope_refs), set(options.scope_nets)
+    if options.scope == SCOPE_SHEETS:
+        refs = {f.GetReference() for f in board.GetFootprints() if sheet_of(f) in options.scope_sheets}
+        names = set()
+    codes = {c for c, n in board.GetNetsByNetcode().items() if c > 0 and n.GetNetname() in names}
+    for fp in board.GetFootprints():
+        if fp.GetReference() in refs:
+            codes.update(p.GetNetCode() for p in fp.Pads() if p.GetNetCode() > 0)
+    boxes = []
+    for fp in board.GetFootprints():
+        pads = list(fp.Pads())
+        if fp.GetReference() in refs or any(p.GetNetCode() in codes for p in pads):
+            # Keep the whole pin ring, including inward escape space.
+            boxes.extend(_bbox(p) for p in pads)
+    boxes.extend(_bbox(t) for t in board.GetTracks() if t.GetNetCode() in codes)
+    if not boxes:
+        return None
+    margin = int(round(options.shove_margin_mm * 1e6))
+    return (min(b[0] for b in boxes) - margin, min(b[1] for b in boxes) - margin,
+            max(b[2] for b in boxes) + margin, max(b[3] for b in boxes) + margin)
+
+
 def rule_areas(board):
     """Every rule area (keepout) on the board: the board's own and the ones a
     footprint carries (a battery's "no copper under the cell", a card socket's
@@ -1031,7 +1057,22 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     ox, oy = bb.GetX() - MARGIN_NM, bb.GetY() - MARGIN_NM
     w = int(math.ceil((bb.GetWidth() + 2 * MARGIN_NM) / pitch)) + 1
     h = int(math.ceil((bb.GetHeight() + 2 * MARGIN_NM) / pitch)) + 1
+    full_grid_cells = w * h * len(layers)
+    bounds = scoped_grid_bounds(board, options)
+    windowed = False
+    if bounds is not None:
+        x0 = max(0, int(math.floor((bounds[0] - ox) / pitch)))
+        y0 = max(0, int(math.floor((bounds[1] - oy) / pitch)))
+        x1 = min(w - 1, int(math.ceil((bounds[2] - ox) / pitch)))
+        y1 = min(h - 1, int(math.ceil((bounds[3] - oy) / pitch)))
+        if x0 < x1 and y0 < y1 and (x1 - x0 + 1) * (y1 - y0 + 1) < w * h:
+            ox, oy = ox + x0 * pitch, oy + y0 * pitch
+            w, h = x1 - x0 + 1, y1 - y0 + 1
+            windowed = True
+            say(f"Scoped grid: {w} x {h} cells per layer ({w * h * len(layers) / full_grid_cells:.1%} of full board); "
+                f"{options.shove_margin_mm:g} mm routing margin")
     grid = Grid(ox, oy, pitch, w, h, len(layers))
+    window = (ox, oy, grid.nm_x(w - 1), grid.nm_y(h - 1))
 
     # Copper zones: a net with a pour on some layer is a plane net; its pads
     # on other layers can be tied to the plane with a via instead of a track.
@@ -1646,6 +1687,10 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             if region is not None and code not in region[0] and not item.IsLocked():
                 bb = item.GetBoundingBox()
                 far = not region[1]((bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()))
+                far_kept += far
+            if windowed and not far:
+                box = _bbox(item)
+                far = box[0] < window[0] or box[1] < window[1] or box[2] > window[2] or box[3] > window[3]
                 far_kept += far
             if far or item.IsLocked() or code in scope_frozen or \
                     (locked_items and str(item.m_Uuid.AsString()) in locked_items):
@@ -3108,14 +3153,18 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 points = [item.GetPosition()] if item.GetClass() == "PCB_VIA" else [item.GetStart(), item.GetEnd()]
                 for point in points:
                     xy = (grid.cell_x(point.x), grid.cell_y(point.y))
-                    if xy not in ends:
+                    if grid.inside(*xy) and xy not in ends:
                         ends.append(xy)
             cells = {c for c in cells if c not in pad_owned or pad_owned[c] in reached}
             if not cells:
                 continue
             for ci in reached:
                 net.clusters[ci].cells.update(cells)
+                if windowed:
+                    net.clusters[ci].anchors = [xy for xy in net.clusters[ci].anchors if grid.inside(*xy)]
                 net.clusters[ci].anchors += [xy for xy in ends if xy not in net.clusters[ci].anchors]
+                if not net.clusters[ci].anchors:
+                    net.clusters[ci].anchors.append(grid.unpack(min(cells))[1:])
 
     # plane-net pads to route as strays whatever the pour's outline says (the
     # pipeline's pass for pads the job's copper cut off their pour)
@@ -3377,6 +3426,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     problem.stats = {"groups": dict(Counter(n.group for n in nets.values() if n.route)),
                      "net_groups": {n.name: n.group for n in nets.values() if n.route},
                      "extract_seconds": time.time() - t0, "cells": grid.size,
+                     "scoped_grid": windowed, "full_grid_cells": full_grid_cells,
+                     "grid_window_nm": list(window) if windowed else None,
                      "nets": len(nets), "connections": len(connections), "movable_paths": len(existing), "shove_far_kept": far_kept,
                      "all_connections": all_connections, "owner_maps": len(owners),
                      "fanout_vias": len(fanout), "stranded_pads": stranded_pads, "plane_nets": len(plane_codes), "stitch_spots": sum(len(v) for v in stitch.values()),

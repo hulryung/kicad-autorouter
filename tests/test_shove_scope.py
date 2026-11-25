@@ -241,7 +241,7 @@ def main():
                                         ("whole-board job", SCOPE_BOARD, True, False)):
         board, nets = pair_board()
         opts = NativeOptions(pitch_mm=0.1, shove=True, scope=scope, scope_nets=["SIG"] if scope != SCOPE_BOARD else [],
-                             scope_locks_pairs=locks)
+                             scope_locks_pairs=locks, scoped_grid=False)  # isolate pair-lock policy from the optional grid boundary
         problem = extract.extract(board, opts)
         pair_codes = {nets[n].GetNetCode() for n in names}
         movable = [ex for ex in problem.existing if ex.path.net in pair_codes]
@@ -258,7 +258,7 @@ def main():
     for margin, far_moves in ((5.0, False), (0.0, True)):
         board, nets = far_board()
         opts = NativeOptions(pitch_mm=0.1, shove=True, scope=SCOPE_SELECTION, scope_nets=["SIG"],
-                             shove_margin_mm=margin)
+                             shove_margin_mm=margin, scoped_grid=False)  # test movement radius independently of raster cropping
         problem = extract.extract(board, opts)
         moving = {problem.nets[ex.path.net].name for ex in problem.existing}
         check(f"margin {margin:g}: the near track is movable", "NEAR" in moving, str(moving))

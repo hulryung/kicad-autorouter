@@ -388,6 +388,8 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
     out.cancelled = result.cancelled
     out.timed_out = result.timed_out
     out.failed = sorted({problem.nets[c.net].name for c in result.failed})
+    if out.failed and problem.stats.get("scoped_grid") and status:
+        status(f"Scoped window left {len(out.failed)} net(s) open; a wider routing margin or full-board grid may allow longer detours.")
     out.pair_exceptions = list(getattr(result, "pair_exceptions", []))
     out.pair_loose = list(getattr(result, "pair_loose", []))
     out.stats["budget_cuts"] = getattr(result, "budget_cuts", 0)
