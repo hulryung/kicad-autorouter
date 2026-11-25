@@ -20,6 +20,8 @@ import logging
 import math
 import time
 from array import array
+from bisect import bisect_left
+from itertools import chain
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import os
@@ -27,7 +29,7 @@ import os
 from . import astar
 from . import watchdog
 from .grid import BLOCKED, BODY_LANE, WIDE_NM, Grid, jog
-from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem
+from .problem import Cluster, Connection, NetInfo, RoutedPath, RoutingProblem, SCOPE_BOARD
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +93,59 @@ class RouteResult:
         self.direct_links = 0                            # connections joined pad to pad before the search
 
 
+class _ClaimCells:
+    """Retain wide clearance footprints as row intervals, not boxed integers."""
+    def __init__(self):
+        self.spans = []
+        self.loose = array("Q")
+        self.count = 0
+
+    def add(self, piece):
+        spans = getattr(piece, "spans", None)
+        if spans is None:
+            self.loose.extend(piece)
+        else:
+            self.spans.extend(spans)
+        self.count += len(piece)
+
+    def __len__(self):
+        return self.count
+
+    def __iter__(self):
+        return chain.from_iterable(chain((range(a, b) for a, b in self.spans), (self.loose,)))
+
+    def intersection(self, touched, ordered):
+        common = touched.intersection(self.loose)
+        for a, b in self.spans:
+            start = bisect_left(ordered, a)
+            end = bisect_left(ordered, b, start)
+            common.update(ordered[start:end])
+        return common
+
+    def bounds(self, grid):
+        # Every span occupies one row on one layer. Endpoints suffice.
+        points = (i for a, b in self.spans for i in (a, b - 1))
+        x0 = y0 = 1 << 62
+        x1 = y1 = -1
+        for cell in points:
+            y, x = divmod(cell % grid.plane, grid.w)
+            if x < x0: x0 = x
+            if y < y0: y0 = y
+            if x > x1: x1 = x
+            if y > y1: y1 = y
+        if self.loose:
+            rows = [c % grid.plane for c in self.loose]
+            xs = [r % grid.w for r in rows]
+            x0, x1 = min(x0, min(xs)), max(x1, max(xs))
+            y0, y1 = min(y0, min(rows) // grid.w), max(y1, max(rows) // grid.w)
+        return (x0, y0, x1, y1) if self.count else (1, 1, 0, 0)
+
+
 class _Path:
     """A routed connection and everything needed to undo it."""
     def __init__(self, pid: int, conn: Connection, path: RoutedPath, cells: List[int], paired: bool = False):
         self.pid, self.conn, self.path, self.cells = pid, conn, path, cells
-        self.claims: Dict[Tuple[int, int], List[int]] = {}      # owner-map key -> claimed cells
+        self.claims: Dict[Tuple[int, int], _ClaimCells] = {}      # owner-map key -> claimed cells
         self.boxes: Dict[Tuple[int, int], Tuple[int, int, int, int]] = {}   # key -> cell box of those claims
         self.via_cells: List[int] = []
         self.joins: List[Tuple[int, int]] = [(conn.a, conn.b)]  # cluster pairs this path connects
@@ -461,6 +511,7 @@ class Router:
         self.routed = {key: array("i", [0]) * self.grid.size for key in problem.owners}
         self.paths: Dict[int, _Path] = {}
         self.next_pid = 1
+        self.search_outcomes = {}
         self.rips: Dict[Tuple[int, int, int], int] = {}        # (net, a, b) -> times ripped
         # cell -> extra cost, grown on the cells where a rip-up took one net's
         # route through another's: the next searches of both nets steer clear,
@@ -538,9 +589,9 @@ class Router:
         """Make a path's copper an obstacle (and remember what it claimed)."""
         grid, p, net = self.grid, self.p, self.p.nets[path.conn.net]
         rp = path.path
-        shared: Dict[int, List[int]] = {}       # maps with the same clearance + half width share the cells
-        boxes: Dict[int, Tuple[int, int, int, int]] = {}
-        parts: Dict[int, Tuple[list, list]] = {}  # grow -> (row spans, the other cells)
+        shared: Dict[tuple, _ClaimCells] = {}       # maps with the same clearance + half width share the cells
+        boxes: Dict[tuple, Tuple[int, int, int, int]] = {}
+        parts: Dict[tuple, Tuple[list, array]] = {}  # grow -> (row spans, the other cells)
         code, pid = net.code, path.pid
         for key, owners in p.owners.items():
             width, clearance = key
@@ -552,15 +603,11 @@ class Router:
                 grow = ("ring", key)                    # cut back per piece: not shared
             cells = shared.get(grow)
             if cells is None:
-                cells, spans, loose = [], [], []
+                cells = _ClaimCells()
                 for kind, piece in self._pieces(key, net, rp, ringed):
-                    cells += piece
-                    if getattr(piece, "spans", None) is not None:
-                        spans += piece.spans            # a wide (isolation) claim: written by rows
-                    else:
-                        loose += piece
+                    cells.add(piece)
                 shared[grow] = cells
-                parts[grow] = (spans, loose)
+                parts[grow] = (cells.spans, cells.loose)
                 boxes[grow] = self._cell_box(cells)
             path.claims[key] = cells
             path.boxes[key] = boxes[grow]
@@ -601,10 +648,12 @@ class Router:
         for idx in path.via_cells:
             p.via_block[idx] = 1
 
-    def _cell_box(self, cells: List[int]) -> Tuple[int, int, int, int]:
+    def _cell_box(self, cells) -> Tuple[int, int, int, int]:
         """(x0, y0, x1, y1) of cells on any layer: _unclaim skips paths whose
         box misses the cells being freed (an isolation rule's wide claims
         made checking every surviving path's cells the cost of a rip-up)."""
+        if isinstance(cells, _ClaimCells):
+            return cells.bounds(self.grid)
         if not cells:
             return (1, 1, 0, 0)
         plane, w = self.grid.plane, self.grid.w
@@ -664,6 +713,7 @@ class Router:
                     tx0, ty0, tx1, ty1 = min(tx0, bx0), min(ty0, by0), max(tx1, bx1), max(ty1, by1)
             if not touched:
                 continue
+            ordered = sorted(touched)
             fixed, routed = self.fixed[key], self.routed[key]
             for idx in touched:
                 owners[idx] = fixed[idx]
@@ -675,7 +725,7 @@ class Router:
                 box = path.boxes.get(key)
                 if box is not None and (box[2] < tx0 or box[0] > tx1 or box[3] < ty0 or box[1] > ty1):
                     continue
-                common = touched.intersection(cells)
+                common = cells.intersection(touched, ordered)
                 if not common:
                     continue
                 code, pid = p.nets[path.conn.net].code, path.pid
@@ -706,6 +756,15 @@ class Router:
         net = self.p.nets[conn.net]
         return (conn.width or net.rules.width, net.rules.clearance)
 
+    def _record_search(self, conn, outcome=None):
+        key = (conn.net, min(conn.a, conn.b), max(conn.a, conn.b))
+        old = self.search_outcomes.get(key, {})
+        self.search_outcomes[key] = {
+            "attempts": old.get("attempts", 0) + 1,
+            "expansions": old.get("expansions", 0) + (0 if outcome else astar.LAST["expansions"]),
+            "outcome": outcome or astar.LAST.get("outcome", "unknown"),
+        }
+
     def _search(self, conn: Connection, via_cost: int, cap: int, soft: bool, cancelled,
                 only_layer: Optional[int] = None):
         net = self.p.nets[conn.net]
@@ -713,6 +772,7 @@ class Router:
         a_cells, a_anchors = self._component(conn.net, conn.a)
         b_cells, b_anchors = self._component(conn.net, conn.b)
         if not a_cells or not b_cells:
+            self._record_search(conn, "no_exit_cells")
             return None
         # The search leaves from the fine-pitch end (a CM5 row pin, a QFN pin)
         # when only one end is one: the hard part of the route, out of the
@@ -760,12 +820,14 @@ class Router:
             if soft:
                 kwargs["neck_routed"] = self.routed.get(neck_key)
                 kwargs["neck_fixed"] = self.fixed.get(neck_key)
-        return astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
+        cells = astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
                            history=self.history, layer_extra=self._layer_extra(net.code),
                            site_guard=self.p.site_guard, relief=self.p.plane_relief.get(net.code),
                            via_owners=self.p.owners.get((net.rules.via_diameter, net.rules.clearance)), **kwargs)
+        self._record_search(conn)
+        return cells
 
     def _ringed(self, key, net, layer: Optional[int] = None) -> bool:
         """Does this net keep an isolation gap (a wide custom rule) from the
@@ -1862,6 +1924,8 @@ class Router:
                                 also_ok=cb.net, source_costs=s_costs, routable=self.routable, via_guard=p.via_guard,
                                 lane_guard=guard, via_lead=int(math.ceil(lead_nm / grid.pitch)),
                                 lead_from=lead_from, layer_extra=self._layer_extra(ca.net))
+            self._record_search(ca)
+            self._record_search(cb)
             if not cells or len(cells) < 2:
                 if _DEBUG:
                     print(f"[pair-path] {na.name} vias {allow}: no path after {astar.LAST['expansions']} expansions"
@@ -2564,7 +2628,7 @@ class Router:
         self._commit(conn, cells, on_path)
         return True
 
-    def _why_failed(self, conn: Connection) -> dict:
+    def _why_failed(self, conn: Connection, interruption=None) -> dict:
         """What surrounds a failed connection's ends: how much room there is
         and which nets (or fixed copper) own the cells around each exit."""
         p, grid = self.p, self.grid
@@ -2594,7 +2658,15 @@ class Router:
                          "layer": p.layers[layer].name,
                          "free_cells_around": f"{free}/{total}",
                          "blocked_by": dict(sorted(around.items(), key=lambda kv: -kv[1])[:5])})
-        return {"net": net.name, "width_mm": round((conn.width or net.rules.width) / 1e6, 3), "ends": ends}
+        search = self.search_outcomes.get((conn.net, min(conn.a, conn.b), max(conn.a, conn.b)), {})
+        outcome = search.get("outcome", "not_attempted_" + interruption if interruption else "not_attempted")
+        verdicts = {
+            "search_exhausted": "no_path_at_current_rules",
+            "enclosed_goal": "enclosed_at_current_rules",
+            "found": "candidate_not_retained",
+        }
+        return {"net": net.name, "width_mm": round((conn.width or net.rules.width) / 1e6, 3),
+                "ends": ends, "verdict": verdicts.get(outcome, outcome), "search": dict(search)}
 
     def _cells_of_exit(self, rp: RoutedPath) -> List[int]:
         """The exit cell a fanout path started from (its first segment ends there)."""
@@ -2608,7 +2680,7 @@ class Router:
                     out.append(grid.index(layer, cx, cy))
         return out
 
-    def _tie_to_net(self, code: int, cell: int, cancelled) -> Optional[RoutedPath]:
+    def _tie_to_net(self, code: int, cell: int, cancelled, short_only=False) -> Optional[RoutedPath]:
         """Route from a pad exit to the nearest copper of the same net within
         a few millimetres: what a designer does when a GND pad has no room
         for its own via."""
@@ -2616,7 +2688,7 @@ class Router:
         net = p.nets[code]
         owners = p.owners[net.rules.key]
         layer, cx, cy = grid.unpack(cell)
-        reach = int(6_000_000 / grid.pitch)                    # 6 mm
+        reach = int((3_000_000 if short_only else 6_000_000) / grid.pitch)
         x0, x1 = max(0, cx - reach), min(grid.w - 1, cx + reach)
         y0, y1 = max(0, cy - reach), min(grid.h - 1, cy + reach)
         # Real copper of the net within reach (not its clearance zone). Copper
@@ -2637,6 +2709,11 @@ class Router:
         # a big pad with vias in it (an exposed pad's array) is tied to the
         # plane all over: a GND pin or capacitor beside it may end anywhere on it
         wired |= getattr(self, "tied_pads", {}).get(code, set())
+        wired |= p.plane_tie_cells.get(code, set())
+        if short_only:
+            # Before replacing a plane via, require a target known to reach
+            # the plane. An arbitrary signal path can still be an island.
+            wired = p.plane_tie_cells.get(code, set()) | getattr(self, "tied_pads", {}).get(code, set())
         own_cluster: Set[int] = set()
         others: Set[int] = set()
         for cl in net.clusters:
@@ -2657,7 +2734,8 @@ class Router:
 
         cells = None
         self._tie_wired = False
-        for stage, goals in enumerate((in_reach(wired), in_reach(others))):
+        candidates = (in_reach(wired),) if short_only else (in_reach(wired), in_reach(others))
+        for stage, goals in enumerate(candidates):
             if not goals:
                 continue
             self._tie_wired = stage == 0
@@ -2677,6 +2755,8 @@ class Router:
         segments = _with_pad_entries(grid, net, cells, segments, int(self.opts.neck_length_mm * 1_000_000))
         if self.opts.cut_acute:
             segments = _cut_acute(grid, segments, lambda idx: idx in own_cells or owners[idx] in (0, code))
+        if short_only and sum(math.hypot(s[3] - s[1], s[4] - s[2]) for s in segments) > 3_000_000:
+            return None
         rp = RoutedPath(code, net.rules.width, segments, [], net.rules.via_diameter, net.rules.via_drill,
                         pid=self.next_pid)
         self.next_pid += 1
@@ -2885,6 +2965,7 @@ class Router:
         queue = sorted(self.p.connections,
                        key=lambda c: (0 if c.pair else 1 if c.priority == 0 else 2, c.rank,
                                       -c.estimate if c.pair else c.priority, c.estimate))
+        requested_nets = {c.net for c in queue}
         total = len(queue)
         failed: List[Connection] = []
         done = 0
@@ -2930,7 +3011,13 @@ class Router:
             return halted() or watchdog.overdue()
 
         def stop():
-            return halted() or late()
+            if halted():
+                stop.reason = "cancelled"
+                return True
+            if late():
+                stop.reason = "wall_time_limit" if result.wall_capped else "job_time_limit"
+                return True
+            return False
 
         # The searches check this every few thousand expansions: the time
         # limit then also ends a long rip-up or last-chance search midway,
@@ -2948,8 +3035,12 @@ class Router:
             def over():
                 if astar.clock() > until:
                     self.budget_cuts += 1
+                    over.reason = "connection_time_limit"
                     return True
-                return stop()
+                stopped = stop()
+                if stopped:
+                    over.reason = stop.reason
+                return stopped
             return over
 
         self.budget_cuts = 0
@@ -3104,9 +3195,12 @@ class Router:
                     if not ok:
                         lost.append(other)
                 lost = [c for c in lost if self._find(c.net, c.a) != self._find(c.net, c.b)]
-                if (0 if won else 1) + len(lost) > 1 and all(len(self.p.nets[n].clusters) == k for n, k in sizes.items()):
+                outside_loss = opts.scope != SCOPE_BOARD and any(c.net not in requested_nets for c in lost)
+                if ((0 if won else 1) + len(lost) > 1 or outside_loss) and all(len(self.p.nets[n].clusters) == k for n, k in sizes.items()):
                     # more open than before: put the board back as it was (a
-                    # reshuffle that costs nothing stays, it may make room)
+                    # reshuffle that costs nothing stays, it may make room).
+                    # Scoped repair may not exchange its target for a broken
+                    # existing net outside the requested connection set.
                     self._undo_rip(before, marks, on_path, on_remove)
                     self.undone += 1
                     still.append(conn)
@@ -3138,6 +3232,7 @@ class Router:
         # 4. fanout vias for pour nets, in whatever room is left (the time
         # limit does not cut the pour stages: they are bounded and quick)
         fanout_paths: List[RoutedPath] = []
+        tied_paths: List[RoutedPath] = []
         fanned: Set[int] = set()                       # primary exit cells of pads that got a via
         # the pads a rip-up took the via from come after the fanout list
         wanted = list(self.p.fanout) + [rc for rc in self.restore if rc not in self.p.fanout]
@@ -3161,6 +3256,17 @@ class Router:
                 if cell in self.p.fanout_tie_only:
                     continue                    # tied to its part's exposed pad below, no via
                 strict = cell in self.p.fanout_strict
+                if not strict and cell not in self.p.fanout_array:
+                    for exit_cell in [cell] + self.p.fanout_alt.get(cell, []):
+                        rp = self._tie_to_net(code, exit_cell, user_cancel, short_only=True)
+                        if rp is not None:
+                            tied_paths.append(rp)
+                            fanned.add(cell)
+                            if on_path:
+                                on_path(rp)
+                            break
+                    if cell in fanned:
+                        continue
                 spots = getattr(self.p, "fanout_array", {}).get(cell)
                 if spots and not strict:
                     placed = [rp for rp in (self._stitch_via(code, cx, cy) for cx, cy in spots) if rp is not None]
@@ -3280,7 +3386,6 @@ class Router:
 
         # 6. pour-net pads that got no via: a short track to the nearest
         # copper of their net (a via, another pad, a stub) instead
-        tied_paths: List[RoutedPath] = []
         if not pour_halt():
             for code, cell in wanted:
                 if cell in fanned:
@@ -3344,7 +3449,8 @@ class Router:
         # the same connection may be queued twice (a pair member that failed twice)
         seen: Set[int] = set()
         result.failed = [c for c in result.failed if not (id(c) in seen or seen.add(id(c)))]
-        result.failed_detail = [self._why_failed(c) for c in result.failed]
+        result.failed_detail = [self._why_failed(c, "cancelled" if result.cancelled else "wall_time_limit" if result.wall_capped else
+                                               "job_time_limit" if result.timed_out else None) for c in result.failed]
         if _DEBUG:
             for d in result.failed_detail:
                 print(f"[failed] {d}", flush=True)
@@ -3369,7 +3475,8 @@ class Router:
                 on_path(path.path)
         if restored:
             result.failed = [c for c in result.failed if self._find(c.net, c.a) != self._find(c.net, c.b)]
-            result.failed_detail = [self._why_failed(c) for c in result.failed]
+            result.failed_detail = [self._why_failed(c, "cancelled" if result.cancelled else "wall_time_limit" if result.wall_capped else
+                                               "job_time_limit" if result.timed_out else None) for c in result.failed]
         new_paths = [self.paths[pid] for pid in sorted(self.paths) if not self.paths[pid].existing]
         revived = {path.pid: path.path for path in self.revived if self.paths.get(path.pid) is path}
         result.paths = [path.path for path in new_paths] + fanout_paths + stitch_paths + restored + list(revived.values())

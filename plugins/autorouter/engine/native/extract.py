@@ -56,6 +56,72 @@ def _poly_rings(poly) -> List[Tuple[List[Tuple[int, int]], List[List[Tuple[int, 
     return out
 
 
+def protected_pour_regions(board, layer_of):
+    """Zone territories, with higher-priority foreign zones and fill keepouts cut out.
+
+    Use outlines rather than current fills: a new track must not exploit a
+    clearance cut in an old fill to sever a power corridor. Polygon failures
+    propagate rather than silently disabling an explicitly requested guard.
+    """
+    zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
+    keepouts = rule_areas(board)
+    for zone in zones:
+        for lid in zone.GetLayerSet().CuStack():
+            if lid not in layer_of:
+                continue
+            area = pcbnew.SHAPE_POLY_SET(zone.Outline())
+            for other in zones:
+                if (other.IsOnLayer(lid) and other.GetNetCode() != zone.GetNetCode()
+                        and other.HigherPriority(zone)):
+                    area.BooleanSubtract(pcbnew.SHAPE_POLY_SET(other.Outline()))
+            for other in keepouts:
+                forbids_fill = (other.GetDoNotAllowZoneFills() if hasattr(other, "GetDoNotAllowZoneFills")
+                                else other.GetDoNotAllowCopperPour())
+                if other.IsOnLayer(lid) and forbids_fill:
+                    area.BooleanSubtract(pcbnew.SHAPE_POLY_SET(other.Outline()))
+            yield layer_of[lid], zone.GetNetCode(), area
+
+
+def local_clearance_warnings(board, rules, net_items, probes):
+    """Report local pad/footprint overrides smaller than applicable custom rules.
+
+    This is an intent warning, not a DRC violation. Evaluate the winning
+    rule against real board net/item profiles and the pad's copper layers.
+    """
+    probes = set(probes) | {rules.normalise(dru.Item(n.netclass, n.netname, "", "Via"))
+                            for n in net_items.values()}
+    groups = {}
+    for pad in board.GetPads():
+        fp = pad.GetParentFootprint()
+        if fp is None or pad.GetNetCode() not in net_items:
+            continue
+        local = pad.GetLocalClearance()
+        source = "pad"
+        if local is None or local < 0:
+            local = fp.GetLocalClearance()
+            source = "footprint"
+        if local is None or local < 0:
+            continue
+        base = net_items[pad.GetNetCode()]
+        me = rules.normalise(dru.Item(base.netclass, base.netname, fp.GetReference(), "Pad"))
+        for lid in pad.GetLayerSet().CuStack():
+            layer = str(pcbnew.BOARD.GetStandardLayerName(lid))
+            for other in probes:
+                if other.netname == me.netname:
+                    continue
+                rule = rules.rule_between(me, other, layer)
+                if rule is None or rule.clearance <= local:
+                    continue
+                key = (fp.GetReference(), source, int(local), rule.name, rule.clearance)
+                pads, layers = groups.setdefault(key, (set(), set()))
+                pads.add(pad.GetNumber())
+                layers.add(layer)
+    return [f"{ref}: {source} local clearance {local / 1e6:g} mm is below custom rule "
+            f"'{name}' {clearance / 1e6:g} mm on {len(pads)} pad(s) "
+            f"({', '.join(sorted(pads))}; {', '.join(sorted(layers))}); review the local override"
+            for (ref, source, local, name, clearance), (pads, layers) in sorted(groups.items())]
+
+
 def _filled_goal_cells(grid, poly, keep, inset):
     """Rasterize the five-point landing margin once per connected fill.
 
@@ -1119,6 +1185,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             base = net_item.get(code, dru.Item())
             probes.add(rules.normalise(dru.Item(base.netclass, base.netname, fp.GetReference() if fp else "", "Pad")))
         probes = sorted(probes, key=lambda it: (it.netclass, it.netname, it.ref, it.kind))
+        for warning in local_clearance_warnings(board, rules, net_item, probes):
+            logger.warning("%s", warning)
+            say("Custom rules warning: " + warning)
         # (layer inner) / (layer outer) rules: one clearance per layer class.
         # Nets are told apart by what they ask on every routing layer.
         offsets: Dict[int, Dict[tuple, int]] = {}
@@ -1436,6 +1505,16 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 for idx in grid.polygon_cells(0, pts, zholes, 0):
                     via_block[idx] = 1
 
+    reserved_pours = []
+    if options.protect_pour_regions:
+        say("Reserving copper pour regions...")
+        reserved_pours = list(protected_pour_regions(board, layer_of))
+        for li, code, area in reserved_pours:
+            watchdog.tick()
+            for pts, holes in _poly_rings(area):
+                claim(li, code, lambda r, li=li, pts=pts, holes=holes:
+                      grid.polygon_cells(li, pts, holes, r))
+
     # Pads: obstacles for other nets, targets for their own.
     say("Rasterizing pads...")
     pad_cells: Dict[int, List[Tuple[object, Set[int], Tuple[int, int], str]]] = {}
@@ -1465,6 +1544,12 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             for by in range(box[1] // BUCKET, box[3] // BUCKET + 1):
                 out.extend(copper.get((layer, bx, by), ()))
         return out
+    # Escape necks use exact shapes rather than only the owner maps. Include
+    # the reserved territories here too, so a narrow pad stub cannot carve
+    # a route through a foreign pour's wall.
+    for li, code, area in reserved_pours:
+        if area.OutlineCount():
+            add_copper(li, area, code, clearance_of(code), _box(area))
     small_pad_r: List[Optional[int]] = [None]     # via radius + 50 µm round a small SMD pad (once)
     for pad in board.GetPads():
         watchdog.tick()                                  # the hard stop reaches into a long step
@@ -1541,6 +1626,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Existing tracks and vias.
     say("Rasterizing existing tracks...")
     existing_vias: Dict[int, List[Tuple[int, int]]] = {}     # net code -> via centres, for idempotent pours
+    fixed_vias: Dict[int, List] = {}
     movable: Dict[int, List] = {}      # shove mode: net code -> unlocked tracks and vias the router may move
     fixed_tracks: Dict[int, List] = {} # ...and the locked ones of those nets (they still join pads)
     for n_item, item in enumerate(board.GetTracks()):
@@ -1572,6 +1658,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             movable.setdefault(code, []).append(item)
             is_movable = True
         if cls == "PCB_VIA":
+            if not is_movable:
+                fixed_vias.setdefault(code, []).append(item)
             vl = [layer_of[l] for l in item.GetLayerSet().CuStack() if l in layer_of]
             hole = item.GetDrillValue() // 2
             for li in vl:
@@ -3000,6 +3088,35 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             # a piece of route with no pad: a cluster of its own, to be joined
             net.clusters.append(Cluster(cells=cells, anchors=ends))
 
+    def _attach_fixed(net, fixed, find, cluster_index):
+        # In shove mode native connectivity includes movable tracks, so use
+        # only the components _fixed_links built from immovable copper.
+        groups = {}
+        for anchor in fixed.get("anchors", []):
+            item = anchor.get("item")
+            if item is not None:
+                groups.setdefault(anchor["group"], []).append(item)
+        pad_owned = {cell: ci for ci, cl in enumerate(net.clusters)
+                     for cell in cl.cells | cl.copper}
+        for group, items in groups.items():
+            reached = {cluster_index[find(i)] for i in fixed["pads"].get(group, [])}
+            if not reached:
+                continue  # no fixed connection to a pad cluster to extend
+            cells, ends = set(), []
+            for item in items:
+                cells.update(_wired_cells(item))
+                points = [item.GetPosition()] if item.GetClass() == "PCB_VIA" else [item.GetStart(), item.GetEnd()]
+                for point in points:
+                    xy = (grid.cell_x(point.x), grid.cell_y(point.y))
+                    if xy not in ends:
+                        ends.append(xy)
+            cells = {c for c in cells if c not in pad_owned or pad_owned[c] in reached}
+            if not cells:
+                continue
+            for ci in reached:
+                net.clusters[ci].cells.update(cells)
+                net.clusters[ci].anchors += [xy for xy in ends if xy not in net.clusters[ci].anchors]
+
     # plane-net pads to route as strays whatever the pour's outline says (the
     # pipeline's pass for pads the job's copper cut off their pour)
     forced_strays: Set[Tuple[int, int, int]] = set()
@@ -3076,6 +3193,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             _attach_wired(net, code, entries, find, cluster_index)
             if not net.partner and options.pour_goals:
                 _attach_pour(net, code, entries, find, cluster_index)
+        if options.shove and not options.pours_only and code not in user_skipped:
+            _attach_fixed(net, fixed, find, cluster_index)
         for piece in pieces:
             touched = sorted({cluster_index[find(i)] for i in piece["pads"]})
             rp = RoutedPath(code, piece["width"], piece["segments"], piece["vias"],
@@ -3235,6 +3354,22 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         problem.fanout = []
         problem.stitch = {}
         problem.island_stitch = island_stitch or []
+    # Existing through vias already landing in a main pour can take a short
+    # pad tie before another fanout via consumes more room. Only actual fills
+    # count; an outline over a foreign island is not an electrical target.
+    for code in {c for c, _ in fanout}:
+        zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() == code]
+        fills = [(lid, _main_fill(z, lid)) for z in zones for lid in z.GetLayerSet().CuStack() if lid in layer_of]
+        for via in fixed_vias.get(code, ()):
+            x, y = via.GetPosition().x, via.GetPosition().y
+            if not any(via.IsOnLayer(lid) and fill is not None and
+                       any(fill[0].Contains(pcbnew.VECTOR2I(x, y), i) for i in fill[1])
+                       for lid, fill in fills):
+                continue
+            cx, cy = grid.cell_x(x), grid.cell_y(y)
+            if grid.inside(cx, cy):
+                problem.plane_tie_cells.setdefault(code, set()).update(
+                    grid.index(layer_of[lid], cx, cy) for lid in via.GetLayerSet().CuStack() if lid in layer_of)
     problem.escape_sides = problem_escape_sides
     if far_kept:
         say(f"Shove: {far_kept} unlocked tracks and vias more than {options.shove_margin_mm:g} mm from the scope stay put")

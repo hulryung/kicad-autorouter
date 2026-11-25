@@ -7,7 +7,7 @@ finer grid (half the pitch), at the neck width, with cheaper vias, in a run
 scoped to just those nets. That is what a designer does by hand for the last
 few stubborn connections, and what the AI assistant found by itself.
 """
-from ..compat import zone_filler
+from ..compat import zone_filler, connected_items
 
 import copy
 import time
@@ -129,7 +129,7 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     cap = wall_cap(options)
     hard = time.time() + cap + post_cap_grace(cap) if cap else 0.0
     w = watchdog.start(status, hard_deadline=hard)
-    vias_before = _via_ids(board) if apply_paths and not options.via_in_small_pads else None
+    vias_before = _via_inventory(board) if apply_paths and not options.via_in_small_pads else None
     try:
         out = _run_job(board, options, status, progress, on_path, on_remove, cancelled, escalate,
                        apply_paths, extract_fn, on_layers, placed, on_board)
@@ -155,11 +155,24 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     return out
 
 
-def _via_ids(board) -> set:
-    return {str(t.m_Uuid.AsString()) for t in board.GetTracks() if t.GetClass() == "PCB_VIA"}
+def _via_geometry(via):
+    pos = via.GetPosition()
+    layers = tuple(via.GetLayerSet().CuStack())
+    try:
+        widths = tuple(via.GetWidth(lid) for lid in layers)
+    except TypeError:
+        widths = (via.GetWidth(),) * len(layers)
+    return (via.GetNetCode(), pos.x, pos.y, via.GetDrillValue(), layers, widths)
 
 
-def _vias_in_small_pads(board, before: set, min_nm: int) -> List[str]:
+def _via_inventory(board):
+    # Rip-up rollback can reconstruct unchanged copper with a fresh UUID.
+    # Count geometry so a restored via is exempt, but an extra identical via
+    # or a moved/resized original still gets audited.
+    return Counter(_via_geometry(t) for t in board.GetTracks() if t.GetClass() == "PCB_VIA")
+
+
+def _vias_in_small_pads(board, before, min_nm: int) -> List[str]:
     """'REF.PAD' of each small SMD pad a via this job added overlaps (its own net's)."""
     by_net: Dict[int, list] = {}
     for pad in board.GetPads():
@@ -168,8 +181,13 @@ def _vias_in_small_pads(board, before: set, min_nm: int) -> List[str]:
             if min(size.x, size.y) < min_nm:
                 by_net.setdefault(pad.GetNetCode(), []).append(pad)
     hits = []
+    remaining = before.copy()
     for v in board.GetTracks():
-        if v.GetClass() != "PCB_VIA" or str(v.m_Uuid.AsString()) in before:
+        if v.GetClass() != "PCB_VIA":
+            continue
+        shape = _via_geometry(v)
+        if remaining[shape]:
+            remaining[shape] -= 1
             continue
         pos = v.GetPosition()
         try:
@@ -938,16 +956,52 @@ def waived_skew(board, options: NativeOptions, pair_exceptions) -> set:
     return out
 
 
+def automatic_pair_groups(board, options: NativeOptions):
+    """Default skew intent for pairs not covered by explicit length groups."""
+    if not options.diff_pairs or options.pair_skew_tolerance_mm <= 0:
+        return []
+    from types import SimpleNamespace
+    nets = {c: SimpleNamespace(name=n.GetNetname()) for c, n in board.GetNetsByNetcode().items() if c > 0}
+    scoped = set(nets) if options.scope == SCOPE_BOARD else native_extract._scoped_codes(board, nets, options)[0]
+    explicit = {name for group in options.length_groups for name in group.get("nets", [])}
+    names = {n.name for c, n in nets.items() if c in scoped and not _skipped(n.name, options.skip_nets)}
+    board.BuildConnectivity()
+    copper = {}
+    for item in list(board.GetPads()) + list(board.GetTracks()):
+        if item.GetNetname() in names:
+            copper.setdefault(item.GetNetname(), []).append(item)
+    def complete(name):
+        items = copper.get(name, [])
+        if not items:
+            return False
+        seed = items[0]
+        linked = [seed] + list(connected_items(board.GetConnectivity(), seed))
+        reached = {str(item.m_Uuid.AsString()) for item in linked}
+        return all(str(item.m_Uuid.AsString()) in reached for item in items)
+    groups, seen = [], set()
+    for name in sorted(names):
+        other = native_extract.pair_partner(name, names)
+        if other is None or name in seen or other in seen:
+            continue
+        seen.update((name, other))
+        if {name, other} & explicit or not complete(name) or not complete(other):
+            continue
+        groups.append({"name": f"Pair skew: {name} / {other}", "nets": [name, other],
+                       "pair": True, "tolerance": int(options.pair_skew_tolerance_mm * 1e6), "target": 0})
+    return groups
+
+
 def tune_lengths(board, options: NativeOptions, status=None, pair_exceptions=None):
     """Length matching after routing (and after the overlap merge): the
     options' length groups get meanders, wrapped in KiCad tuning patterns.
     A pair whose coupling the router waived as unnecessary (ends too close)
     is not skew-tuned either. None when there is nothing to tune. Main thread
     only (it edits the board)."""
-    if not options.tune_lengths or not options.length_groups:
+    if not options.tune_lengths:
         return None
     waived = waived_skew(board, options, pair_exceptions)
-    groups = [g for g in options.length_groups if not (g.get("pair") and set(g["nets"]) & waived)]
+    groups = [g for g in list(options.length_groups) + automatic_pair_groups(board, options)
+              if not (g.get("pair") and set(g["nets"]) & waived)]
     if not groups:
         return None
     try:

@@ -704,6 +704,10 @@ signal-integrity intent stays beside the PCB, separate from global settings.
   job names each such pad (issue #23). Set `via_in_pad_last_resort=False` to
   forbid them in every pass (boards built without via filling), or
   `via_in_small_pads=True` to allow them everywhere.
+- Connected differential pairs without an explicit length group are matched
+  to 1 mm skew by default when pair routing and length tuning are enabled.
+  `NativeOptions.pair_skew_tolerance_mm` changes this limit (zero disables it).
+  Explicit groups, scope, skipped nets and locked copper remain respected.
 - AI edit commands respect locked copper and footprints, including `force`.
 - Candidate acceptance checks each net's unconnected count, length/skew groups,
   controlled widths and estimated pair coupling. Existing connected nets must
@@ -736,6 +740,14 @@ configured checks, not a claim that every platform has already passed. Ubuntu
 installation follows [KiCad's PPA instructions](https://www.kicad.org/download/details/ubuntu/).
 See the [reliability review](docs/reliability-review-20261125.md) for changes,
 matched board comparisons and remaining verification limits.
+
+For mixed power layers, headless jobs can set
+`NativeOptions(protect_pour_regions=True)` to reserve copper-zone polygons
+for their own nets. This includes higher-priority islands and polygon holes,
+and applies even with `plane_nets=False`. Foreign tracks must detour around
+the reserved region or use another layer; a fully enclosed endpoint can
+therefore remain unrouted. The option defaults to off. Unlike the existing
+whole-layer plane cost, this is a hard restriction at the zone boundary.
 
 ## Development
 

@@ -53,7 +53,8 @@ MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
 
 def route(*args, **kwargs) -> Optional[List[int]]:
     """_route, counting its work for clock()."""
-    LAST["expansions"], WORK[1] = 0, True
+    LAST.update(expansions=0, capped=False, outcome="search_exhausted")
+    WORK[1] = True
     try:
         return _route(*args, **kwargs)
     finally:
@@ -298,6 +299,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
                 path.append(prev)
                 prev = came[prev][0]
             path.reverse()
+            LAST["outcome"] = "found"
             TOTALS["expansions"] += expansions
             TOTALS["seconds"] += _time.time() - _t0
             return path
@@ -310,6 +312,7 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
             shut, steps = enclosed()
             expansions += steps
             if shut:
+                LAST["outcome"] = "enclosed_goal"
                 LAST["expansions"], LAST["capped"] = expansions, False
                 TOTALS["expansions"] += expansions
                 TOTALS["enclosed"] = TOTALS.get("enclosed", 0) + 1
@@ -317,12 +320,14 @@ def _route(grid: Grid, owners, via_block: bytearray, net: int,
                 return None
         LAST["expansions"], LAST["capped"] = expansions, False
         if expansions > max_expansions:
+            LAST["outcome"] = "expansion_limit"
             LAST["capped"] = True
             TOTALS["capped"] += 1
             TOTALS["expansions"] += expansions
             TOTALS["seconds"] += _time.time() - _t0
             return None
         if cancelled is not None and expansions % 20000 == 0 and cancelled():
+            LAST["outcome"] = getattr(cancelled, "reason", "interrupted")
             return None
 
         layer, rest = divmod(idx, plane)

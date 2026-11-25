@@ -127,6 +127,7 @@ class NativeOptions:
     stitch_pitch_mm: float = 4.0    # grid pitch of the candidate stitching spots (a via lands within 3/4 of it of a layer change)
     power_pours: bool = True        # routed nets with pours on 2+ layers: pad fanout vias and coarser stitching
     plane_nets: bool = True         # nets whose pour covers their pads are planes: vias to the pour, no tracks
+    protect_pour_regions: bool = False  # reserve zone polygons for their own net, including mixed-net layers
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
     repair_islands_only: bool = False  # final refill: join isolated copper, no other routing
     pours_only: bool = False          # the pipeline's last pass: fanout/stitch, no signal routing
@@ -204,6 +205,7 @@ class NativeOptions:
     route_groups: Dict[str, List[str]] = field(default_factory=dict)
     impedance: Dict[str, dict] = field(default_factory=dict)             # net name -> sizes per KiCad layer id
     length_groups: List[dict] = field(default_factory=list)              # tuned after routing
+    pair_skew_tolerance_mm: float = 1.0  # automatic pair matching without an explicit group; 0 disables
     tune_lengths: bool = True
     kicad_tuning_patterns: bool = True  # meanders become KiCad tuning patterns (the length tuner can retune them)
     pth_hole_clearance_mm: float = 0.0  # plated pad holes to other copper, when stricter than the hole clearance (fab rules)
@@ -248,6 +250,7 @@ class RoutingProblem:
     fanout_array: Dict[int, List[Tuple[int, int]]] = field(default_factory=dict)
     fanout_array_cells: Dict[int, Set[int]] = field(default_factory=dict)   # ...and that pad's copper cells
     tied_pad_cells: Dict[int, Set[int]] = field(default_factory=dict)       # net -> copper of big pads a via already ties
+    plane_tie_cells: Dict[int, Set[int]] = field(default_factory=dict)      # existing via centres on a main filled plane
     # exit cells of fine-pitch plane pins whose part has an exposed pad of the
     # same net: they join that pad with a short track instead of a via
     fanout_tie_only: Set[int] = field(default_factory=set)
