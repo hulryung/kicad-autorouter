@@ -132,6 +132,7 @@ class NativeOptions:
     protect_pour_regions: bool = False  # reserve zone polygons for their own net, including mixed-net layers
     power_trunks_first: bool = False  # routed power nets with 4+ clusters precede single-ended signals
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
+    preserve_plane_fanout: bool = True  # keep early fanout vias/stubs fixed through later signal passes
     repair_islands_only: bool = False  # final refill: join isolated copper, no other routing
     pours_only: bool = False          # the pipeline's last pass: fanout/stitch, no signal routing
     shove: bool = False             # existing (unlocked) tracks of routable nets may be ripped up and rerouted

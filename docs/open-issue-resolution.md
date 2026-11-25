@@ -12,7 +12,7 @@ Routing experiments use copies; private board inputs are not published.
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
-| #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Pending reproduction |
+| #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
@@ -20,7 +20,7 @@ Routing experiments use copies; private board inputs are not published.
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims implemented; synthetic differential/performance tests passed; reporter-board validation pending |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Main dc2bb2a implements budget/progress changes; cache and complete acceptance still pending |
-| #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Scoped windows implemented; native suite and private PIO memory comparison passed; CI pending |
+| #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
 
 Additional issue discovered during the real-board audit: #27, scoped shove
@@ -258,6 +258,24 @@ zone. This does not yet establish the result on every reporter-board rail.
 
 The outer-ring regression also retains valid local goals while blocking every
 nearby via site; local-only search fails and the outer fallback completes the
-connection after refill. An initial private PIO +3V3 comparison, before this
-second fallback, gave 15 to 14 pad components for both baseline and candidate;
+connection after refill. Private PIO +3V3 comparisons before and after this
+second fallback gave 15 to 14 pad components for both baseline and candidate;
 that experiment did not demonstrate an improvement on the reporter snapshot.
+
+### Retaining plane-pad outlets (#6)
+
+The early pour pass previously put all new plane vias/stubs in the movable job
+list. A later signal pass could remove them and the final pour pass had no
+guarantee of finding another site. `preserve_plane_fanout=True` now reserves
+that copper with per-job UUID locks across the signal passes. Opting out
+retains the prior rip-up/restore behavior. Native editor lock flags are not
+changed.
+
+The plane-job extraction branch also ignored existing editor/UUID locks when
+an item appeared in the job's movable list. The regression reproduced this
+before the fix. It now respects both forms of lock, including in legacy mode.
+`test_plane_fanout_reservation.py` runs a fine-pitch MSOP board through early
+fanout and actual signal routing, checks the extracted movable set and the
+original fanout UUID/geometry, and verifies final connectivity. Both reservation
+and legacy modes pass. This prevents a reserved site from being taken; it does
+not create an outlet for a pad that could not fan out in the early pass.

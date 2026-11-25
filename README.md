@@ -384,6 +384,13 @@ sampled at about 0.3 mm to bound the extra memory. This is a bounded fallback, n
 guarantee that a blocked plane pad can be connected. Scoped raster windows
 include this reach when fanout is enabled.
 
+Early plane-pad fanout vias and their stubs are reserved through later signal
+passes by default (`preserve_plane_fanout=True`). The reservation lasts for the
+job and does not change KiCad item lock flags. Set it to `false` to allow
+signals to rip up early fanout and let the final pour pass try to restore it;
+restoration can fail when signals consume the available via sites. Existing
+editor-locked copper remains fixed in either mode.
+
 ## Use with LCSC Manager
 
 [LCSC Manager](https://github.com/hulryung/kicad-lcsc-manager) imports component
