@@ -11,6 +11,7 @@ tests and documentation against baseline `ab45284` (0.5.13).
 | High | AI actions could modify locked copper or footprints | Reject affected actions before mutation, including remove-existing routing | `test_ai_locked.py` |
 | High | A failed Claude CLI exit could still supply valid-looking actions | Reject failed exits; reap children on cancellation, timeout and callback failure; retain logs | `test_ai_claude_process.py` |
 | High | Loading a reference board could replace the editor's active project | Learn guides in a separate KiCad process with the reference's own net classes | `test_guide_project_isolation.py` |
+| High | Temporary board saves could rename the active project on KiCad 9; saved rules omitted live net-class assignments | Save temporary boards without project side effects and explicitly copy live project rules, including unsaved assignments | `test_ai_board_copy.py`, `test_ai_optimize.py` |
 | High | Retention could delete a job another editor was still using | Cross-process OS leases protect active jobs; crashed processes release leases | `test_job_retention.py` |
 | High | PCM publishing could overwrite a version or damage a catalogue | Validate destination, branch, catalogue and immutable version hashes before writing | `test_publish_guards.py` |
 | Medium | Total open count could conceal a newly broken net; model score omitted SI regressions | Require complete per-net connectivity and deterministic length, width and pair-coupling checks | `test_ai_optimize.py`, `test_ai_quality.py` |
@@ -45,9 +46,11 @@ each board and previously connected net, including changes in DRC error types.
 
 - The full macOS native and opt-in GUI suite passed after the compatibility
   adapters. The installed KiCad version reports 10.0.8.
-- All six portable OS/Python combinations passed in GitHub Actions. Linux
-  KiCad 10 and Windows KiCad 10 board/dialog flows passed. KiCad 9 compatibility
-  fixes remain under CI verification on the review branch.
+- All nine jobs passed in [GitHub Actions run 45615961545](https://github.com/hulryung/kicad-autorouter/actions/runs/45615961545)
+  at code commit `8b2410a`: six portable OS/Python combinations, full Linux
+  KiCad 9/10 native and GUI suites, and Windows KiCad 10 board/dialog flows.
+  Focused macOS board-copy and optimizer tests also passed after the final
+  project-snapshot changes.
 - API tests use fake SDK transports in real child processes. No paid AI request
   or remote-service cancellation guarantee is implied.
 - Differential-pair coupling is a geometric estimate sampled at 0.1 mm; it is
@@ -55,5 +58,6 @@ each board and previously connected net, including changes in DRC error types.
   do not worsen.
 - Board-copy and dialog tests validate transfer, placement protection, groups
   and tuning patterns. Native editor Undo still requires manual observation;
-  the computer-control tool could not initialize in this environment.
+  the computer-control tool could not initialize in this environment, and the
+  user reported that the manual check has not yet been performed.
 - No release or PCM catalogue was published by this review.

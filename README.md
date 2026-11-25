@@ -706,6 +706,9 @@ signal-integrity intent stays beside the PCB, separate from global settings.
 - Learning a routing guide opens the reference project in a separate KiCad
   Python process. The reference's rules are used without replacing the editor
   project. `KICAD_AUTOROUTER_PYTHON` can specify that interpreter.
+- Candidate and DRC snapshots include live routing rules and unsaved net-class
+  assignments. Temporary board saves preserve the source project's name and
+  registration in the editor.
 - API requests run in a child process that is terminated on cancellation or
   timeout. SDK retries are disabled; transport timeout is at most 60 seconds.
   Cancelling locally does not undo work already accepted by a remote service.
