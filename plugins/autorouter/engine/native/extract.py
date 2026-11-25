@@ -1700,7 +1700,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 movable.setdefault(code, []).append(item)
                 is_movable = True
         elif job_items and code in nets and not nets[code].route and cls in ("PCB_TRACK", "PCB_VIA") \
-                and str(item.m_Uuid.AsString()) in job_items:
+                and str(item.m_Uuid.AsString()) in job_items and not item.IsLocked() \
+                and str(item.m_Uuid.AsString()) not in locked_items:
             movable.setdefault(code, []).append(item)
             is_movable = True
         if cls == "PCB_VIA":

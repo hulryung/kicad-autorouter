@@ -12,7 +12,7 @@ Routing experiments use copies; private board inputs are not published.
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Actual neck-width exits join the copied W5500 supply; no new DRC or connectivity regressions; full native/GUI suite passed |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
-| #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Pending reproduction |
+| #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Early-fanout reservation and locked-item regression pass; full native/GUI suite passed; CI pending |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
@@ -261,3 +261,21 @@ items fall from seven to four, all three gains on the selected supply.
 supply pins separated by ground pins, verifying complete supply connectivity,
 narrow emitted necks, wide trunks and adjacent-pad clearance. The decisive
 before/after crowded-board regression is retained privately.
+
+### Retaining plane-pad outlets (#6)
+
+The early pour pass previously put all new plane vias/stubs in the movable job
+list. A later signal pass could remove them and the final pour pass had no
+guarantee of finding another site. `preserve_plane_fanout=True` now reserves
+that copper with per-job UUID locks across the signal passes. Opting out
+retains the prior rip-up/restore behavior. Native editor lock flags are not
+changed.
+
+The plane-job extraction branch also ignored existing editor/UUID locks when
+an item appeared in the job's movable list. The regression reproduced this
+before the fix. It now respects both forms of lock, including in legacy mode.
+`test_plane_fanout_reservation.py` runs a fine-pitch MSOP board through early
+fanout and actual signal routing, checks the extracted movable set and the
+original fanout UUID/geometry, and verifies final connectivity. Both reservation
+and legacy modes pass. This prevents a reserved site from being taken; it does
+not create an outlet for a pad that could not fan out in the early pass.
