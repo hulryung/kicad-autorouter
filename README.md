@@ -703,6 +703,10 @@ signal-integrity intent stays beside the PCB, separate from global settings.
   (issue #23). Explicitly set `via_in_small_pads=True` for all passes, or
   `via_in_pad_last_resort=True` for the finer retry only. Both choices retain
   `via_in_pad_min_mm`; use them only with an appropriate assembly process.
+- Connected differential pairs without an explicit length group are matched
+  to 1 mm skew by default when pair routing and length tuning are enabled.
+  `NativeOptions.pair_skew_tolerance_mm` changes this limit (zero disables it).
+  Explicit groups, scope, skipped nets and locked copper remain respected.
 - AI edit commands respect locked copper and footprints, including `force`.
 - Candidate acceptance checks each net's unconnected count, length/skew groups,
   controlled widths and estimated pair coupling. Existing connected nets must

@@ -7,7 +7,7 @@ finer grid (half the pitch), at the neck width, with cheaper vias, in a run
 scoped to just those nets. That is what a designer does by hand for the last
 few stubborn connections, and what the AI assistant found by itself.
 """
-from ..compat import zone_filler
+from ..compat import zone_filler, connected_items
 
 import copy
 import time
@@ -938,16 +938,52 @@ def waived_skew(board, options: NativeOptions, pair_exceptions) -> set:
     return out
 
 
+def automatic_pair_groups(board, options: NativeOptions):
+    """Default skew intent for pairs not covered by explicit length groups."""
+    if not options.diff_pairs or options.pair_skew_tolerance_mm <= 0:
+        return []
+    from types import SimpleNamespace
+    nets = {c: SimpleNamespace(name=n.GetNetname()) for c, n in board.GetNetsByNetcode().items() if c > 0}
+    scoped = set(nets) if options.scope == SCOPE_BOARD else native_extract._scoped_codes(board, nets, options)[0]
+    explicit = {name for group in options.length_groups for name in group.get("nets", [])}
+    names = {n.name for c, n in nets.items() if c in scoped and not _skipped(n.name, options.skip_nets)}
+    board.BuildConnectivity()
+    copper = {}
+    for item in list(board.GetPads()) + list(board.GetTracks()):
+        if item.GetNetname() in names:
+            copper.setdefault(item.GetNetname(), []).append(item)
+    def complete(name):
+        items = copper.get(name, [])
+        if not items:
+            return False
+        seed = items[0]
+        linked = [seed] + list(connected_items(board.GetConnectivity(), seed))
+        reached = {str(item.m_Uuid.AsString()) for item in linked}
+        return all(str(item.m_Uuid.AsString()) in reached for item in items)
+    groups, seen = [], set()
+    for name in sorted(names):
+        other = native_extract.pair_partner(name, names)
+        if other is None or name in seen or other in seen:
+            continue
+        seen.update((name, other))
+        if {name, other} & explicit or not complete(name) or not complete(other):
+            continue
+        groups.append({"name": f"Pair skew: {name} / {other}", "nets": [name, other],
+                       "pair": True, "tolerance": int(options.pair_skew_tolerance_mm * 1e6), "target": 0})
+    return groups
+
+
 def tune_lengths(board, options: NativeOptions, status=None, pair_exceptions=None):
     """Length matching after routing (and after the overlap merge): the
     options' length groups get meanders, wrapped in KiCad tuning patterns.
     A pair whose coupling the router waived as unnecessary (ends too close)
     is not skew-tuned either. None when there is nothing to tune. Main thread
     only (it edits the board)."""
-    if not options.tune_lengths or not options.length_groups:
+    if not options.tune_lengths:
         return None
     waived = waived_skew(board, options, pair_exceptions)
-    groups = [g for g in options.length_groups if not (g.get("pair") and set(g["nets"]) & waived)]
+    groups = [g for g in list(options.length_groups) + automatic_pair_groups(board, options)
+              if not (g.get("pair") and set(g["nets"]) & waived)]
     if not groups:
         return None
     try:

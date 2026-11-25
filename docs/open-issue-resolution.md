@@ -11,7 +11,7 @@ Routing experiments use copies; private board inputs are not published.
 | #2 | Distinguish blocked exits, exhausted search and time budget in failure details; stop unchanged escalation when appropriate | Pending reproduction |
 | #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Pending reproduction |
-| #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Pending reproduction |
+| #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Automatic 1 mm matching implemented; native skew/scope/lock tests passed; CI pending |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Pending reproduction |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Reproduced missing inner-layer endpoint in shove mode; fixed and native regression passed; cross-platform verification pending |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Pending design and reproduction |
@@ -57,3 +57,17 @@ the connection with 9.9 mm of new track and retain every original locked
 item unchanged. `test_locked_route_ends.py`, existing partial-route tests and
 scoped-shove tests pass. Shove grouping uses fixed-only connectivity rather
 than connectivity through copper that may subsequently move.
+
+### Automatic pair skew (#5)
+
+With differential-pair routing and length tuning enabled, connected pairs
+without explicit length groups now receive a default 1 mm skew tolerance.
+`NativeOptions.pair_skew_tolerance_mm` configures it; zero disables the implicit
+groups. Explicit groups retain precedence, both nets must be in scope, and
+skip patterns and short-pair waivers remain effective. Disconnected copper
+is not automatically lengthened. Locked tracks remain unchanged and an
+unmet target is reported rather than treated as successful.
+
+`test_auto_pair_skew.py` reduces a 20/26 mm pair to 26/26 mm and verifies the
+scope, disabled-option, explicit-group, disconnected-copper and locked-track
+cases. Native end-to-end and SI tests pass locally.

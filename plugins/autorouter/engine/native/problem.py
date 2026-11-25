@@ -204,6 +204,7 @@ class NativeOptions:
     route_groups: Dict[str, List[str]] = field(default_factory=dict)
     impedance: Dict[str, dict] = field(default_factory=dict)             # net name -> sizes per KiCad layer id
     length_groups: List[dict] = field(default_factory=list)              # tuned after routing
+    pair_skew_tolerance_mm: float = 1.0  # automatic pair matching without an explicit group; 0 disables
     tune_lengths: bool = True
     kicad_tuning_patterns: bool = True  # meanders become KiCad tuning patterns (the length tuner can retune them)
     pth_hole_clearance_mm: float = 0.0  # plated pad holes to other copper, when stricter than the hole clearance (fab rules)
