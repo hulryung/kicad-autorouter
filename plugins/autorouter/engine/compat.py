@@ -8,3 +8,13 @@ def board_outline(board, polygon, infer=True):
     except TypeError:
         # KiCad 9 takes an optional OUTLINE_ERROR_HANDLER* instead.
         return board.GetBoardPolygonOutlines(polygon)
+
+
+def connected_items(connectivity, item):
+    """Return the whole connected copper component on KiCad 9 and 10."""
+    try:
+        return connectivity.GetConnectedItems(item)
+    except TypeError:
+        import pcbnew
+        return connectivity.GetConnectedItems(item, [pcbnew.PCB_PAD_T,
+            pcbnew.PCB_TRACE_T, pcbnew.PCB_ARC_T, pcbnew.PCB_VIA_T, pcbnew.PCB_ZONE_T])

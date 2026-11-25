@@ -1,4 +1,6 @@
 """Putting routed paths on the board as tracks and vias (main thread only)."""
+from ..compat import connected_items
+
 import math
 import os
 from collections import Counter, defaultdict
@@ -960,7 +962,7 @@ def _pad_groups(board, conn, code):
         group = [p]
         seen.add(uid)
         try:
-            linked = list(conn.GetConnectedItems(p))
+            linked = list(connected_items(conn, p))
         except Exception:
             linked = []
         for item in linked:
@@ -1042,7 +1044,7 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
         def pieces(group):
             """The pieces of fill a pad group is in: (layer, fill, outline index)."""
             pts, shapes = {}, {}
-            for item in group + [i for i in conn.GetConnectedItems(group[0])]:
+            for item in group + [i for i in connected_items(conn, group[0])]:
                 kind = item.GetClass()
                 if kind in ("PAD", "PCB_VIA"):
                     for lid in item.GetLayerSet().CuStack():
@@ -1097,7 +1099,7 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
         uid = str(main_pad.m_Uuid.AsString())
         try:
             together = any(i.GetClass() == "PAD" and str(i.m_Uuid.AsString()) == uid
-                           for i in conn.GetConnectedItems(group_pad))
+                           for i in connected_items(conn, group_pad))
         except Exception:
             together = False
         if together:

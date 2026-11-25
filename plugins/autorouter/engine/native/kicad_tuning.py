@@ -88,7 +88,8 @@ def attach(board, specs: List[dict]) -> int:
         return 0
     uids = [str(uuid.uuid4()) for _ in specs]
     dummies = [str(uuid.uuid4()) for _ in specs]
-    version = getattr(pcbnew, "SEXPR_BOARD_FILE_VERSION", 20260206)          # this KiCad's own file format
+    version = getattr(pcbnew, "SEXPR_BOARD_FILE_VERSION",
+                      20241229 if pcbnew.Version().startswith("9.") else 20260206)          # this KiCad's own file format
     text = (f"(kicad_pcb\n\t(version {version})\n\t(generator \"autorouter\")\n"
             + "".join(placeholder_sexpr(board, s, d) for s, d in zip(specs, dummies))
             + "".join(pattern_sexpr(board, s, u, d) for s, u, d in zip(specs, uids, dummies)) + ")\n")

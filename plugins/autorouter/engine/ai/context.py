@@ -1,4 +1,6 @@
 """The board as the model sees it: a compact JSON description."""
+from ..compat import connected_items
+
 import json
 import math
 import os
@@ -123,7 +125,7 @@ def unconnected_edges(board, limit: int = 60) -> List[dict]:
 
         for i, pad in enumerate(pads):
             try:
-                linked = conn.GetConnectedItems(pad)
+                linked = connected_items(conn, pad)
             except Exception:
                 linked = []
             for other in linked:

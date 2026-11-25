@@ -58,7 +58,7 @@ jobs:
           Invoke-WebRequest 'https://github.com/KiCad/kicad-source-mirror/releases/download/10.0.8/kicad-10.0.8-x86_64.exe' -OutFile $installer
           $signature = Get-AuthenticodeSignature $installer
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'KiCad Services Corporation') { throw 'Invalid KiCad installer signature' }
-          $install = Start-Process $installer -ArgumentList '/S', '/D=C:\KiCad' -Wait -PassThru
+          $install = Start-Process $installer -ArgumentList '/allusers', '/S', '/D=C:\KiCad' -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "KiCad installation failed: $($install.ExitCode)" }
           if (!(Test-Path 'C:\KiCad\bin\python.exe')) { throw 'KiCad Python not installed' }
           'C:\KiCad\bin' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
