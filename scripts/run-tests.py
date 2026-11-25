@@ -4,6 +4,7 @@
     python3 scripts/run-tests.py            # the offline tests pass with any Python 3.8+
     <KiCad's python3> scripts/run-tests.py  # also the pcbnew/wx ones (others skip themselves)
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,9 +20,16 @@ def main():
         print("No tests matched:", " ".join(words), file=sys.stderr)
         return 2
     failed = []
+    env = dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1")
+    timeout = float(os.environ.get("KICAD_AUTOROUTER_TEST_TIMEOUT", "300"))
     for test in tests:
-        result = subprocess.run([sys.executable, str(test)])
-        if result.returncode != 0:
+        print("RUN:", test.name, flush=True)
+        try:
+            result = subprocess.run([sys.executable, str(test)], env=env, timeout=timeout)
+            if result.returncode != 0:
+                failed.append(test.name)
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT: {test.name} exceeded {timeout:g} seconds", flush=True)
             failed.append(test.name)
     if failed:
         print("FAILED:", ", ".join(failed))

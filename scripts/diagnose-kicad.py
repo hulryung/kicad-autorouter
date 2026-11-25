@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Print native API/fixture diagnostics without swallowing pcbnew load errors."""
+import os
 import sys
 from pathlib import Path
 
+os.environ["KICAD_AUTOROUTER_NO_REGISTER"] = "1"
 import pcbnew
 
 ROOT = Path(__file__).resolve().parents[1]

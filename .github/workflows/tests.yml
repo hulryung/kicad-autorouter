@@ -69,6 +69,7 @@ jobs:
         env:
           KICAD_AUTOROUTER_GUI_TESTS: '1'
           KICAD_AUTOROUTER_PYTHON: C:\KiCad\bin\python.exe
+          KICAD_AUTOROUTER_TEST_TIMEOUT: '60'
         run: |
           & 'C:\KiCad\bin\python.exe' -c "import pcbnew, wx; print(pcbnew.Version()); assert pcbnew.Version().startswith('10.0')"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
