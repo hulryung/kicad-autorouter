@@ -26,6 +26,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import os
 
+from .constraints import via_blocks
 from . import astar
 from . import watchdog
 from .grid import BLOCKED, BODY_LANE, WIDE_NM, Grid, jog
@@ -825,7 +826,7 @@ class Router:
             if soft:
                 kwargs["neck_routed"] = self.routed.get(neck_key)
                 kwargs["neck_fixed"] = self.fixed.get(neck_key)
-        cells = astar.route(self.grid, owners, self.p.via_block, net.code, sources, goals, b_anchors,
+        cells = astar.route(self.grid, owners, via_blocks(self.p, net.code), net.code, sources, goals, b_anchors,
                            self.horizontal, via_cost, allow_vias, via_reach, cap,
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
                            history=self.history, layer_extra=self._layer_extra(net.code),
@@ -1786,7 +1787,7 @@ class Router:
 
         def via_ok(x, y, code):
             cx, cy = grid.cell_x(x), grid.cell_y(y)
-            if not grid.inside(cx, cy) or p.via_block[cy * grid.w + cx]:
+            if not grid.inside(cx, cy) or via_blocks(p, code)[cy * grid.w + cx]:
                 return False
             if p.via_guard is not None and p.via_guard[cy * grid.w + cx] not in (0, code):
                 return False
@@ -1939,7 +1940,7 @@ class Router:
                     mid += [(lay, a[0], a[1], b[0], b[1], w) for a, b in zip(pts, pts[1:])]
                 return heads[0] + [vs[0]], [vs[-1]] + heads[-1], mid, vs
 
-            cells = astar.route(grid, owners, p.via_block, ca.net, s_cells, goals_, anchors_,
+            cells = astar.route(grid, owners, via_blocks(p, ca.net, cb.net), ca.net, s_cells, goals_, anchors_,
                                 self.horizontal, pair_via_cost, allow, via_reach, pair_cap, self.opts.turn_cost, cancelled,
                                 also_ok=cb.net, source_costs=s_costs, routable=self.routable, via_guard=p.via_guard,
                                 lane_guard=guard, via_lead=int(math.ceil(lead_nm / grid.pitch)),
@@ -2762,7 +2763,7 @@ class Router:
                 continue
             self._tie_wired = stage == 0
             anchors = [grid.unpack(g)[1:] for g in list(goals)[:8]]
-            cells = astar.route(grid, owners, p.via_block, code, {cell}, goals, anchors, self.horizontal,
+            cells = astar.route(grid, owners, via_blocks(p, code), code, {cell}, goals, anchors, self.horizontal,
                                 self.opts.via_cost, False, 0, self.opts.max_expansions // 4, self.opts.turn_cost,
                                 cancelled, routable=self.routable, via_guard=p.via_guard, lane_guard=p.lane_guard)
             if cells and len(cells) >= 2:
@@ -2813,7 +2814,7 @@ class Router:
             arrive = (gx - px, gy - py)
 
         def fits(vx: int, vy: int, hairpin_ok: bool) -> bool:
-            if not grid.inside(vx, vy) or p.via_block[vy * grid.w + vx]:
+            if not grid.inside(vx, vy) or via_blocks(p, code)[vy * grid.w + vx]:
                 return False
             if p.via_guard is not None and p.via_guard[vy * grid.w + vx] not in (0, code):
                 return False
@@ -2913,7 +2914,7 @@ class Router:
                   max(x for x, y in xy), max(y for x, y in xy))
         anchors = [(cx, cy)]
         via_reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / grid.pitch))) + 1
-        cells = astar.route(grid, owners, p.via_block, code, starts or {cell}, goals, anchors, self.horizontal,
+        cells = astar.route(grid, owners, via_blocks(p, code), code, starts or {cell}, goals, anchors, self.horizontal,
                             max(5, self.opts.via_cost // 3), True, via_reach, self.opts.max_expansions // 4,
                             self.opts.turn_cost, cancelled, routable=self.routable,
                             via_guard=p.via_guard, lane_guard=p.lane_guard,
@@ -2945,7 +2946,7 @@ class Router:
         net = p.nets[code]
         own = p.owners[net.rules.key]
         reach = max(0, int(math.ceil((net.rules.via_diameter - net.rules.width) / 2 / grid.pitch))) + 1
-        if not grid.inside(cx, cy) or p.via_block[cy * grid.w + cx]:
+        if not grid.inside(cx, cy) or via_blocks(p, code)[cy * grid.w + cx]:
             return None
         if p.via_guard is not None and p.via_guard[cy * grid.w + cx] not in (0, code):
             return None
