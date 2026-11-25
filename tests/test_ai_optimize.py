@@ -12,8 +12,9 @@ from autorouter.engine.ai import context, headless, optimize, review
 
 def sample(score=50, opens=0, errors=(), length=100, vias=3):
     return {'score': score, 'drc': {'available': True, 'unconnected_total': opens,
-            'violation_identities': list(errors)},
-            'metrics': {'length_mm': length, 'vias': vias, 'angles': {'other': 0}}}
+            'violation_identities': list(errors), 'unconnected_by_net': {'fixture': opens} if opens else {},
+            'unconnected_by_net_complete': True},
+            'metrics': {'si': {'available': True, 'checks': {}}, 'length_mm': length, 'vias': vias, 'angles': {'other': 0}}}
 
 
 def offline():
@@ -28,6 +29,9 @@ def offline():
     assert optimize.decision(best, sample(score=51, length=98))[0] is True
     assert optimize.decision(sample(opens=2), sample(score=51, length=200))[0] is True
     assert optimize.decision(best, sample(score=49, length=50))[0] is False
+    swapped = sample(score=99, opens=1, length=50)
+    swapped['drc']['unconnected_by_net'] = {'previously-connected': 1}
+    assert not optimize.decision(sample(opens=2), swapped)[0]
     missing = sample(score=99, length=50)
     missing['drc']['available'] = False
     assert not optimize.decision(best, missing)[0]

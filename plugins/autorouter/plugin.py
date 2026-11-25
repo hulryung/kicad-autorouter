@@ -54,6 +54,8 @@ class AutorouterPlugin(pcbnew.ActionPlugin):
                 dialog.ShowModal()
             finally:
                 dialog.Destroy()
+                if dialog.job is not None:
+                    dialog.job.close()
             # KiCad records the board changes made during Run() as one undo
             # step and rebuilds connectivity once Run() returns.
             pcbnew.Refresh()

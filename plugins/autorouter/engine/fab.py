@@ -15,6 +15,7 @@ page before ordering; the fab changes them now and then.
 """
 from dataclasses import dataclass
 from pathlib import Path
+from .persistence import atomic_text
 from typing import Dict, List, Optional
 
 MM = 1_000_000
@@ -204,5 +205,5 @@ def write_drc_rules(board, name: str) -> Optional[Path]:
         new = old.rstrip("\n") + "\n\n" + text
     else:
         return None
-    p.write_text(new, encoding="utf-8")
+    atomic_text(p, new)
     return p

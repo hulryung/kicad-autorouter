@@ -61,11 +61,16 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
                       "items": [it.get("description", "")[:120] for it in v.get("items", [])],
                       "pos_mm": (v.get("items") or [{}])[0].get("pos")})
     unconnected = Counter()
+    net_of = {str(item.m_Uuid.AsString()): item.GetNetname()
+              for item in list(board.GetPads()) + list(board.GetTracks()) + list(board.Zones())}
+    unmapped = 0
     opens = []
     for u in data.get("unconnected_items", []):
-        desc = u["items"][0]["description"] if u.get("items") else ""
-        if "[" in desc:
-            unconnected[desc.split("[")[1].split("]")[0]] += 1
+        names = {net_of[it['uuid']] for it in u.get('items', []) if it.get('uuid') in net_of}
+        if len(names) == 1:
+            unconnected[next(iter(names))] += 1
+        else:
+            unmapped += 1
         if len(opens) < limit:
             opens.append({"items": [it.get("description", "")[:100] for it in u.get("items", [])],
                           "pos_mm": [[it.get("pos", {}).get("x"), it.get("pos", {}).get("y")]
@@ -79,7 +84,8 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
     return {"available": True, "violations_by_type": dict(kinds), "violations": items,
             "violation_identities": identities,
             "unconnected_total": len(data.get("unconnected_items", [])),
-            "unconnected_by_net": dict(unconnected.most_common(40)),
+            "unconnected_by_net": dict(unconnected),
+            "unconnected_by_net_complete": unmapped == 0,
             "unconnected": opens}
 
 

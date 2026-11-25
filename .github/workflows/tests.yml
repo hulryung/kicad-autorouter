@@ -1,0 +1,48 @@
+name: Tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ['3.9', '3.12']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Portable lifecycle, settings and publication tests
+        run: python scripts/run-tests.py runtime_reliability job_retention config_validation publish_guards package_build ai_api_process ai_claude_process ai_quality
+      - name: Build installable package
+        run: python scripts/build-package.py
+  kicad:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['9.0', '10.0']
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install KiCad and virtual display
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-${{ matrix.version }}-releases
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends kicad python3-wxgtk4.0 xvfb xauth
+      - name: Verify integration prerequisites
+        run: |
+          /usr/bin/python3 -c "import pcbnew, wx; print(pcbnew.Version()); assert pcbnew.Version().startswith('${{ matrix.version }}')"
+          kicad-cli version
+      - name: Run native and GUI integration tests
+        env:
+          KICAD_AUTOROUTER_GUI_TESTS: '1'
+          KICAD_AUTOROUTER_PYTHON: /usr/bin/python3
+        run: xvfb-run -a /usr/bin/python3 scripts/run-tests.py

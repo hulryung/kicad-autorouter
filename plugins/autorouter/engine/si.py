@@ -12,9 +12,11 @@ uses) and DRC rules for the per-layer widths, pair gap, skew and lengths
 import copy
 import fnmatch
 import json
+import math
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from .persistence import atomic_text
 from typing import Dict, List, Optional, Tuple
 
 from . import stackup as stk
@@ -89,7 +91,36 @@ class SiConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "SiConfig":
-        d = dict(d or {})
+        if not isinstance(d, dict):
+            raise ValueError('Design intent must be an object')
+        d = dict(d)
+        def numbers(row, fields):
+            for name in fields:
+                if name in row and (type(row[name]) not in (int, float) or not math.isfinite(row[name]) or row[name] < 0):
+                    raise ValueError(f'{name} must be finite and nonnegative')
+        for key, fields in (('impedance', ('single_ohm', 'diff_ohm', 'gap_mm', 'skew_mm')),
+                            ('length_groups', ('tolerance_mm', 'target_mm'))):
+            rows = d.get(key, [])
+            if not isinstance(rows, list):
+                raise ValueError(f'{key} must be a list')
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(row.get('name'), str):
+                    raise ValueError(f'{key} entries need a name')
+                if not isinstance(row.get('nets', []), list) or any(not isinstance(n, str) for n in row.get('nets', [])):
+                    raise ValueError('Net patterns must be a list of strings')
+                numbers(row, fields)
+        numbers(d, ('pair_min_span_mm', 'pair_uncoupled_max_mm', 'pair_skew_mm'))
+        for key in ('tune_lengths', 'kicad_patterns', 'rounded'):
+            if key in d and type(d[key]) is not bool:
+                raise ValueError(f'{key} must be boolean')
+        for key in ('stackup', 'fab'):
+            if key in d and not isinstance(d[key], str):
+                raise ValueError(f'{key} must be text')
+        if not isinstance(d.get('route_order', []), list):
+            raise ValueError('Routing order must be a list')
+        patterns = d.get('group_patterns', {})
+        if not isinstance(patterns, dict) or any(not isinstance(v, list) or any(not isinstance(n, str) for n in v) for v in patterns.values()):
+            raise ValueError('Group patterns must be lists of strings')
         cfg = cls()
         cfg.stackup = str(d.get("stackup") or stk.BOARD)
         cfg.impedance = [ImpedanceClass(**{k: v for k, v in x.items() if k in ImpedanceClass.__dataclass_fields__})
@@ -134,7 +165,8 @@ def save(board, cfg: SiConfig) -> Optional[Path]:
     p = config_path(board)
     if p is None:
         return None
-    p.write_text(json.dumps(cfg.to_dict(), indent=2) + "\n", encoding="utf-8")
+    SiConfig.from_dict(cfg.to_dict())
+    atomic_text(p, json.dumps(cfg.to_dict(), indent=2) + "\n")
     return p
 
 
@@ -405,5 +437,5 @@ def write_drc_rules(board, text: str) -> Optional[Path]:
         if not old.strip():
             old = "(version 1)\n"
         new = old.rstrip("\n") + "\n\n" + text
-    p.write_text(new, encoding="utf-8")
+    atomic_text(p, new)
     return p

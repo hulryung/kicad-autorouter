@@ -25,9 +25,18 @@ def decision(best, candidate, min_gain=1):
     old_open, new_open = before['unconnected_total'], after['unconnected_total']
     if new_open > old_open:
         return False, 'connectivity regressed'
+    if not before.get('unconnected_by_net_complete') or not after.get('unconnected_by_net_complete'):
+        return False, 'per-net connectivity unavailable'
+    if any(count > before['unconnected_by_net'].get(net, 0)
+           for net, count in after['unconnected_by_net'].items()):
+        return False, 'per-net connectivity regressed'
     if candidate['score'] < best['score'] + min_gain:
         return False, 'reviewer score did not improve enough'
     b, c = best['metrics'], candidate['metrics']
+    from .quality import regression
+    si_error = regression(b.get('si', {}), c.get('si', {}), before['unconnected_by_net'])
+    if si_error:
+        return False, si_error
     # Connectivity / DRC improvements can legitimately require more copper.
     electrical = (new_open < old_open or
                   len(after['violation_identities']) < len(before['violation_identities']))

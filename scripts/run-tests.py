@@ -13,10 +13,13 @@ TESTS = Path(__file__).resolve().parent.parent / "tests"
 
 def main():
     words = sys.argv[1:]
+    tests = [test for test in sorted(TESTS.glob("test_*.py"))
+             if not words or any(w in test.stem for w in words)]
+    if not tests:
+        print("No tests matched:", " ".join(words), file=sys.stderr)
+        return 2
     failed = []
-    for test in sorted(TESTS.glob("test_*.py")):
-        if words and not any(w in test.stem for w in words):
-            continue
+    for test in tests:
         result = subprocess.run([sys.executable, str(test)])
         if result.returncode != 0:
             failed.append(test.name)

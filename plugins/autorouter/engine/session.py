@@ -4,7 +4,9 @@ the rest of the engine stays importable without KiCad."""
 import re
 import shutil
 import time
-from dataclasses import dataclass
+import tempfile
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Tuple
 
@@ -16,6 +18,26 @@ KEEP_JOBS = 10
 @dataclass
 class JobFiles:
     directory: Path
+    _lease: object = field(default=None, repr=False)
+
+    def close(self):
+        if self._lease is not None:
+            self._lease.close()
+            self._lease = None
+
+    def __del__(self):
+        self.close()
+
+
+def _lock(stream):
+    """Nonblocking process lease, released by the OS even after a crash."""
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def new_job(board_name: str) -> JobFiles:
@@ -24,16 +46,29 @@ def new_job(board_name: str) -> JobFiles:
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", board_name or "board").strip("_") or "board"
     jobs = data_dir() / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
-    directory = jobs / f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}"
-    directory.mkdir()
+    directory = Path(tempfile.mkdtemp(prefix=f"{time.strftime('%Y%m%d-%H%M%S')}-{stem}-", dir=jobs))
+    lease = (directory / '.active.lock').open('w+b')
+    lease.write(b'1')
+    lease.flush()
+    _lock(lease)
+    job = JobFiles(directory, lease)
     _prune(jobs)
-    return JobFiles(directory)
+    return job
 
 
 def _prune(jobs: Path) -> None:
     old = sorted((p for p in jobs.iterdir() if p.is_dir()), key=lambda p: p.name)
     for path in old[:-KEEP_JOBS]:
-        shutil.rmtree(path, ignore_errors=True)
+        # Unmarked folders may belong to older plugin instances or a job
+        # being created. Never infer that they are safe to remove.
+        try:
+            with (path / '.active.lock').open('r+b') as lease:
+                _lock(lease)
+            # No job reopens a lease after releasing it. Close before deleting
+            # so Windows can remove the file as well.
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def copper_layers(board) -> List[Tuple[int, str]]:
