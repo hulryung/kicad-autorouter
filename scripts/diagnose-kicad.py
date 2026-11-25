@@ -14,12 +14,6 @@ from test_wired_pieces import new_board, add_pad, add_track
 print('KiCad:', pcbnew.Version(), flush=True)
 print('Connected API:', pcbnew.CONNECTIVITY_DATA.GetConnectedItems.__doc__, flush=True)
 print('Board version:', getattr(pcbnew, 'SEXPR_BOARD_FILE_VERSION', 'not exported'), flush=True)
-try:
-    board = pcbnew.PCB_IO_MGR.Load(pcbnew.PCB_IO_MGR.KICAD_SEXP,
-                                  str(ROOT / 'tests/fixtures/obd2-adapter.kicad_pcb'))
-    print('Fixture:', board, flush=True)
-except Exception as exc:
-    print('Fixture load error:', repr(exc), flush=True)
 board, nets = new_board(['SIG'])
 fp = pcbnew.FOOTPRINT(board)
 board.Add(fp)
@@ -33,3 +27,6 @@ try:
         board.GetConnectivity(), next(iter(board.GetPads())))], flush=True)
 except Exception as exc:
     print('Connectivity error:', repr(exc), flush=True)
+
+board = pcbnew.LoadBoard(str(ROOT / 'tests/fixtures/obd2-adapter.kicad_pcb'))
+print('Fixture:', board, flush=True)
