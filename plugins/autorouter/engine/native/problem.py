@@ -105,7 +105,6 @@ POWER_PATTERNS = ["+*", "V*", "*VCC*", "*VDD*", "*VBUS*", "*VIN*", "*VOUT*", "*3
 
 @dataclass
 class NativeOptions:
-    raster_cache_mb: float = 128.0    # shared raw geometry raster cache per job; 0 disables
     pitch_mm: float = 0.1
     # What to route: the whole board, only connections touching the given
     # footprints / nets (the editor selection), or footprints from the given
@@ -226,6 +225,8 @@ class NativeOptions:
     pair_loose_ends: bool = True       # an end the pair cannot enter side by side: finish it single-ended (noted)
     pair_via_swap: bool = True         # pins in opposite order at the two ends: one line crosses under the other through two vias
     protect_groups: bool = True        # rip-up may not move a pair/memory/high-speed route for a later group
+
+    raster_cache_mb: float = 128.0    # shared raw geometry raster cache per job; 0 disables
 
 
 @dataclass
