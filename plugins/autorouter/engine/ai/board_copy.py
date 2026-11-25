@@ -2,6 +2,8 @@
 
 Do not call pcbnew.LoadBoard from the editor: it can replace the active project.
 """
+from ..compat import resolve_item
+
 import shutil
 import json
 from pathlib import Path
@@ -130,7 +132,7 @@ def apply_copper(board, path):
     for group_members in members.values():
         for member in group_members:
             if member not in target:
-                item = board.ResolveItem(pcbnew.KIID(member))
+                item = resolve_item(board, pcbnew.KIID(member))
                 if item is None:
                     raise ValueError(f'Group references missing item {member}')
                 target[member] = item

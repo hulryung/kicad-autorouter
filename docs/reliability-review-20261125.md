@@ -41,8 +41,8 @@ each board and previously connected net, including changes in DRC error types.
 
 ## Verification boundaries
 
-- macOS KiCad 10.0.7 native and opt-in GUI tests passed for the initial changes;
-  compatibility changes are being checked again.
+- The full macOS native and opt-in GUI suite passed after the compatibility
+  adapters. The installed KiCad version reports 10.0.8.
 - All six portable OS/Python combinations passed in GitHub Actions. Native
   KiCad compatibility fixes remain under CI verification on the review branch.
 - API tests use fake SDK transports in real child processes. No paid AI request

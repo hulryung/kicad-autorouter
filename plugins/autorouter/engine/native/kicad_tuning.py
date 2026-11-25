@@ -13,6 +13,8 @@ members). In the PCB editor the plugin then asks KiCad to update all tuning
 patterns, so the final meanders are KiCad's own; in a saved board (headless
 runs) they stay the router's, owned by a pattern KiCad can retune.
 """
+from ..compat import resolve_item
+
 import os
 import tempfile
 import uuid
@@ -108,7 +110,7 @@ def attach(board, specs: List[dict]) -> int:
             pass
     done = 0
     for spec, uid in zip(specs, uids):
-        item = holder.ResolveItem(pcbnew.KIID(uid))
+        item = resolve_item(holder, pcbnew.KIID(uid))
         if item is None or item.Type() != pcbnew.PCB_GENERATOR_T:
             continue
         group = pcbnew.Cast_to_PCB_GROUP(item)           # a tuning pattern is a group underneath
@@ -118,7 +120,7 @@ def attach(board, specs: List[dict]) -> int:
         item.thisown = 0
         board.Add(item)
         for m in spec["members"]:
-            track = board.ResolveItem(pcbnew.KIID(m))
+            track = resolve_item(board, pcbnew.KIID(m))
             if track is not None:
                 group.AddItem(track)
         done += 1
