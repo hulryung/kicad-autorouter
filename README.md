@@ -699,10 +699,11 @@ signal-integrity intent stays beside the PCB, separate from global settings.
 
 ## Reliability changes in the current checkout
 
-- Vias in small SMD pads are disabled by default, including fine-grid retries
-  (issue #23). Explicitly set `via_in_small_pads=True` for all passes, or
-  `via_in_pad_last_resort=True` for the finer retry only. Both choices retain
-  `via_in_pad_min_mm`; use them only with an appropriate assembly process.
+- Vias in small SMD pads are disabled in the first pass; the finer retry may
+  still drill one as a last resort for a net that is otherwise open, and the
+  job names each such pad (issue #23). Set `via_in_pad_last_resort=False` to
+  forbid them in every pass (boards built without via filling), or
+  `via_in_small_pads=True` to allow them everywhere.
 - Connected differential pairs without an explicit length group are matched
   to 1 mm skew by default when pair routing and length tuning are enabled.
   `NativeOptions.pair_skew_tolerance_mm` changes this limit (zero disables it).
