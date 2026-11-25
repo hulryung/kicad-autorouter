@@ -102,8 +102,9 @@ def fine_options(options: NativeOptions, failed_nets: List[str], board) -> Nativ
     fine.scope_locks_pairs = options.scope_locks_pairs and options.scope != SCOPE_BOARD
     fine.fanout_vias = False
     fine.dual_escapes = True       # leave a stubborn pad by either end, whichever the search finds open
-    # Keep the user's fabrication constraint through escalation. A finer
-    # search may only use vias in small pads when the user opted in.
+    # Keep fabrication restrictions unless the user explicitly opts into
+    # vias in small pads for every pass or for the finer retry only.
+    fine.via_in_small_pads = options.via_in_small_pads or options.via_in_pad_last_resort
     fine.stitch_vias = False
     fine.rip_rounds = max(fine.rip_rounds, 12)
     fine.rip_limit = max(fine.rip_limit, 8)
@@ -144,7 +145,8 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
         if hits:
             out.stats["vias_in_small_pads"] = hits
             if status:
-                status(f"{len(hits)} via(s) violate the small-SMD-pad restriction: {', '.join(hits[:8])}"
+                reason = "used the enabled small-pad fallback" if options.via_in_pad_last_resort else "violate the small-SMD-pad restriction"
+                status(f"{len(hits)} via(s) {reason}: {', '.join(hits[:8])}"
                        + (" ..." if len(hits) > 8 else ""))
     out.stats["slow_stages"] = [list(t) for t in w.slow()]
     out.stats["stalls"] = [[n, round(sec), where] for n, sec, where in w.stalls]

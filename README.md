@@ -31,8 +31,10 @@ service or AI account is required.
 - No vias drilled into small SMD pads (0603 caps, SOT-23 pins: under 1.5 mm
   on the short side, `via_in_pad_min_mm`); exposed and thermal pads keep
   theirs. The finer second pass may still drill one as a last resort for a
-  net that is otherwise open, and the job names each such pad.
-  `via_in_small_pads` allows them everywhere, for fabs that fill vias.
+  net that is otherwise open, and the job names each such pad
+  (`via_in_pad_last_resort = False` turns that off, for boards built
+  without via filling). `via_in_small_pads` allows them everywhere, for
+  fabs that fill vias.
 - Keepouts drawn inside footprints (a battery's "no via under the cell", a
   card socket's) are honoured by routing, via placement and length tuning.
 - Plane-net pads a job cut off their pour are reported as failed, and routed
@@ -697,10 +699,10 @@ signal-integrity intent stays beside the PCB, separate from global settings.
 
 ## Reliability changes in the current checkout
 
-- Fine-grid retries preserve `via_in_small_pads` and `via_in_pad_min_mm`.
-  Unlike the 0.5.13 fallback described above, retries no longer override a
-  user's no-via-in-small-pads setting. Allowing these vias requires explicit
-  opt-in for the whole job (issue #23).
+- Vias in small SMD pads are disabled by default, including fine-grid retries
+  (issue #23). Explicitly set `via_in_small_pads=True` for all passes, or
+  `via_in_pad_last_resort=True` for the finer retry only. Both choices retain
+  `via_in_pad_min_mm`; use them only with an appropriate assembly process.
 - AI edit commands respect locked copper and footprints, including `force`.
 - Candidate acceptance checks each net's unconnected count, length/skew groups,
   controlled widths and estimated pair coupling. Existing connected nets must
