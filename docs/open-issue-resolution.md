@@ -158,3 +158,18 @@ exchange when the displaced connection is outside the requested set.
 `test_scoped_shove_preserves_connections.py` reproduces the impossible
 single-layer crossing and preserves the original path after rollback.
 Existing scoped-shove and ownership regressions pass. Real-board rerun pending.
+
+### Local clearance overrides (#26, newly reported)
+
+Custom-rule status now warns when an explicit pad override or inherited
+footprint override is below the winning custom rule for another actual board
+net/item profile on that pad's copper layer. It names the footprint, source,
+local/rule values, rule name, pad count/numbers and layers. This is an intent
+warning; geometry and clearance settings are not changed. Later rule
+exceptions and pad overrides take precedence; unset is distinct from zero.
+
+`test_local_clearance_warning.py` covers those cases and emitted extraction
+status. The private PIO snapshot produces the expected 0.2 mm vs 0.6 mm
+warnings for the 14 SO-4 relay footprints, four pads each. KiCad 9's
+[documented optional local-clearance API](https://docs.kicad.org/doxygen-python-9.0/classpcbnew_1_1PAD.html)
+is used to distinguish an unset override from an explicit zero.

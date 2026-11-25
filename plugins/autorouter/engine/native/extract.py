@@ -82,6 +82,44 @@ def protected_pour_regions(board, layer_of):
             yield layer_of[lid], zone.GetNetCode(), area
 
 
+def local_clearance_warnings(board, rules, net_items, probes):
+    """Report local pad/footprint overrides smaller than applicable custom rules.
+
+    This is an intent warning, not a DRC violation. Evaluate the winning
+    rule against real board net/item profiles and the pad's copper layers.
+    """
+    groups = {}
+    for pad in board.GetPads():
+        fp = pad.GetParentFootprint()
+        if fp is None or pad.GetNetCode() not in net_items:
+            continue
+        local = pad.GetLocalClearance()
+        source = "pad"
+        if local is None or local < 0:
+            local = fp.GetLocalClearance()
+            source = "footprint"
+        if local is None or local < 0:
+            continue
+        base = net_items[pad.GetNetCode()]
+        me = rules.normalise(dru.Item(base.netclass, base.netname, fp.GetReference(), "Pad"))
+        for lid in pad.GetLayerSet().CuStack():
+            layer = str(pcbnew.BOARD.GetStandardLayerName(lid))
+            for other in probes:
+                if other.netname == me.netname:
+                    continue
+                rule = rules.rule_between(me, other, layer)
+                if rule is None or rule.clearance <= local:
+                    continue
+                key = (fp.GetReference(), source, int(local), rule.name, rule.clearance)
+                pads, layers = groups.setdefault(key, (set(), set()))
+                pads.add(pad.GetNumber())
+                layers.add(layer)
+    return [f"{ref}: {source} local clearance {local / 1e6:g} mm is below custom rule "
+            f"'{name}' {clearance / 1e6:g} mm on {len(pads)} pad(s) "
+            f"({', '.join(sorted(pads))}; {', '.join(sorted(layers))}); review the local override"
+            for (ref, source, local, name, clearance), (pads, layers) in sorted(groups.items())]
+
+
 def _filled_goal_cells(grid, poly, keep, inset):
     """Rasterize the five-point landing margin once per connected fill.
 
@@ -1145,6 +1183,9 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             base = net_item.get(code, dru.Item())
             probes.add(rules.normalise(dru.Item(base.netclass, base.netname, fp.GetReference() if fp else "", "Pad")))
         probes = sorted(probes, key=lambda it: (it.netclass, it.netname, it.ref, it.kind))
+        for warning in local_clearance_warnings(board, rules, net_item, probes):
+            logger.warning("%s", warning)
+            say("Custom rules warning: " + warning)
         # (layer inner) / (layer outer) rules: one clearance per layer class.
         # Nets are told apart by what they ask on every routing layer.
         offsets: Dict[int, Dict[tuple, int]] = {}
