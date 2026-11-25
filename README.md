@@ -371,6 +371,13 @@ within 5 mm of the scope's nets and footprints (`shove_margin_mm`, 0 for the
 whole board), and coupled pairs and length-tuned nets outside the scope keep
 their tracks.
 
+Early plane-pad fanout vias and their stubs are reserved through later signal
+passes by default (`preserve_plane_fanout=True`). The reservation lasts for the
+job and does not change KiCad item lock flags. Set it to `false` to allow
+signals to rip up early fanout and let the final pour pass try to restore it;
+restoration can fail when signals consume the available via sites. Existing
+editor-locked copper remains fixed in either mode.
+
 ## Use with LCSC Manager
 
 [LCSC Manager](https://github.com/hulryung/kicad-lcsc-manager) imports component

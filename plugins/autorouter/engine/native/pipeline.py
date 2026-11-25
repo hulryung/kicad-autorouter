@@ -344,9 +344,13 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
             # the sides the pads were left by, decided before those vias existed
             options = copy.copy(options)
             options.escape_sides = dict(problem0.escape_sides)
-            # those vias are the job's own: a signal pass may rip one up that
-            # walls in a connection, and the pour pass drops it again if room is left
+            # Legacy mode lets signals rip up these vias and relies on the
+            # final pour pass to restore them; the default reserves their sites.
             options.movable_uuids = job_items()
+            if options.preserve_plane_fanout:
+                # These vias and their pad stubs reserve a usable plane outlet.
+                # Per-job locks preserve them without changing editor lock flags.
+                options.locked_uuids = list(dict.fromkeys(options.locked_uuids + options.movable_uuids))
         problem0 = result0 = None       # its owner maps (a GB at 0.1 mm) need not live on through the job
     first = copy.deepcopy(options)
     if pours_later:

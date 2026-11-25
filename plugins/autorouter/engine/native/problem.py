@@ -130,6 +130,7 @@ class NativeOptions:
     plane_nets: bool = True         # nets whose pour covers their pads are planes: vias to the pour, no tracks
     protect_pour_regions: bool = False  # reserve zone polygons for their own net, including mixed-net layers
     fanout_first: bool = True       # drop the plane nets' pad vias before the signals are routed (decoupling first)
+    preserve_plane_fanout: bool = True  # keep early fanout vias/stubs fixed through later signal passes
     repair_islands_only: bool = False  # final refill: join isolated copper, no other routing
     pours_only: bool = False          # the pipeline's last pass: fanout/stitch, no signal routing
     shove: bool = False             # existing (unlocked) tracks of routable nets may be ripped up and rerouted
