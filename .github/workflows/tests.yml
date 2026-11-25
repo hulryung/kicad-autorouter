@@ -45,6 +45,9 @@ jobs:
         env:
           KICAD_AUTOROUTER_GUI_TESTS: '1'
           KICAD_AUTOROUTER_PYTHON: /usr/bin/python3
+          KICAD_AUTOROUTER_TEST_TIMEOUT: '120'
+          KICAD_AUTOROUTER_TEST_TRACEBACK_AFTER: '45'
+          KICAD_AUTOROUTER_TEST_FAIL_FAST: '1'
         run: |
           xvfb-run -a /usr/bin/python3 scripts/diagnose-kicad.py
           xvfb-run -a /usr/bin/python3 scripts/run-tests.py
