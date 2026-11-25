@@ -2681,12 +2681,13 @@ class Router:
         search = self.search_outcomes.get((conn.net, min(conn.a, conn.b), max(conn.a, conn.b)), {})
         outcome = search.get("outcome", "not_attempted_" + interruption if interruption else "not_attempted")
         verdicts = {
-            "search_exhausted": "no_path_at_current_rules",
-            "enclosed_goal": "enclosed_at_current_rules",
+            "search_exhausted": "no_path_in_scope_window" if p.stats.get("scoped_grid") else "no_path_at_current_rules",
+            "enclosed_goal": "enclosed_in_scope_window" if p.stats.get("scoped_grid") else "enclosed_at_current_rules",
             "found": "candidate_not_retained",
         }
         return {"net": net.name, "width_mm": round((conn.width or net.rules.width) / 1e6, 3),
                 "ends": ends, "verdict": verdicts.get(outcome, outcome), "search": dict(search),
+                "grid_window_nm": p.stats.get("grid_window_nm"),
                 "candidate_rejected": self.rejected_candidates.get((conn.net, min(conn.a, conn.b), max(conn.a, conn.b)))}
 
     def _cells_of_exit(self, rp: RoutedPath) -> List[int]:

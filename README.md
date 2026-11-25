@@ -749,6 +749,13 @@ the reserved region or use another layer; a fully enclosed endpoint can
 therefore remain unrouted. The option defaults to off. Unlike the existing
 whole-layer plane cost, this is a hard restriction at the zone boundary.
 
+Scoped jobs use a local raster window around the selected nets' pads and
+existing copper, with `shove_margin_mm` as the routing margin. Foreign tracks
+crossing that boundary stay fixed. If a route needs a longer detour, increase
+the margin or set `NativeOptions(scoped_grid=False)` to use the full board;
+a zero margin also retains full-board behavior. Failure details distinguish
+an exhausted local window from an exhausted full-board search.
+
 ## Development
 
 ```bash

@@ -20,7 +20,7 @@ Routing experiments use copies; private board inputs are not published.
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims implemented; synthetic differential/performance tests passed; reporter-board validation pending |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Main dc2bb2a implements budget/progress changes; cache and complete acceptance still pending |
-| #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Pending implementation |
+| #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Scoped windows implemented; native suite and private PIO memory comparison passed; CI pending |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Pending reproduction |
 
 Additional issue discovered during the real-board audit: #27, scoped shove
@@ -205,3 +205,37 @@ that the remaining difficult row routes are solved. Those issues remain open.
 PR #25 is merged into main at d5dd4fb; issues #1, #2, #4, #5, #7, #26 and #27
 are closed. The root checkout is main; continuing experiments use an isolated
 worktree. Manual editor Undo remains unverified.
+
+
+### Scoped raster windows (#22)
+
+Selected-net/reference/sheet jobs now rasterize the scoped nets' pads, their
+footprint pin rings and all existing copper of those nets, plus
+`shove_margin_mm`. Grid origins remain aligned with the whole-board grid.
+All board obstacles are considered, but their cells are clipped to the
+window. Foreign tracks crossing its boundary stay fixed, preventing removal
+of copper that cannot be represented in the local grid. Fixed copper entering
+the window still supplies visible connection anchors.
+
+`scoped_grid=False` or `shove_margin_mm=0` restores full-board rasterization.
+A longer detour can require that mode or a larger margin: exhausted/enclosed
+window searches explicitly report `no_path_in_scope_window` or
+`enclosed_in_scope_window`, and include the window bounds. There is no silent
+full-board fine-grid allocation after a local failure.
+
+The native regression compares complete ownership samples to the full grid,
+checks boundary-crossing copper, selected locked-lane extent, reference
+selection and a detour that succeeds only in full-grid mode. The local full
+KiCad suite passes. Existing movement-radius/pair-lock tests explicitly use
+the full grid to test those controls independently of the window boundary.
+
+On a private PIO copy, a single-net scope at 0.15 mm with 143 owner maps used
+180,456 rather than 3,974,724 cells. Peak RSS fell from 2,415,132,672 to
+504,741,888 bytes (79%). Read plus claim preparation took 71.97 s versus
+43.03 s in one sequential comparison; claim preparation alone was slower.
+Movable paths changed from 61 to 56 because boundary-crossing pieces stay
+fixed. This is not the original 22-net report and does not establish a
+universal speedup. At 0.075 mm the same single-net local job used 715,040
+cells and peaked at 1,196,834,816 bytes (1.20 GB); read/claim preparation was
+16.14/12.32 s. Timing varies with concurrent machine load; the memory result
+is the main evidence. No full-board 0.075 mm allocation was needed.
