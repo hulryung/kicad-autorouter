@@ -165,7 +165,7 @@ class NativeOptions:
     allow_vias: bool = True
     via_in_small_pads: bool = False    # vias may be drilled into SMD pads smaller than via_in_pad_min_mm (fab fills them)
     via_in_pad_min_mm: float = 1.5     # SMD pads with both sides at least this big (exposed/thermal pads) may hold vias
-    via_in_pad_last_resort: bool = False   # the second pass may drill a small pad when nothing else routes the net (off: never, e.g. no via filling)
+    via_in_pad_last_resort: bool = True    # the second pass may drill a small pad when nothing else routes the net (off: never, e.g. no via filling)
     flat_first: bool = True            # a route with vias is tried on one outer layer alone; the flat route wins when nearly direct
     max_expansions: int = 400_000
     fine_budget_s: Optional[float] = None   # the finer second pass's own time budget; None = 60 s + 20 s per
