@@ -9,7 +9,7 @@ Routing experiments use copies; private board inputs are not published.
 | --- | --- | --- |
 | #1 | Other-net pour polygons incur a routing cost or block, including mixed-net layers; keep own-net pours usable | Merged in PR #25; native tests and all nine CI jobs passed |
 | #2 | Distinguish blocked exits, exhausted search and time budget in failure details; review optional unchanged-pass stopping | Merged in PR #25; verdicts and no-progress stopping verified |
-| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Pending reproduction |
+| #3 | Connect multi-pin fine-pitch supply nets with legal pin escapes and alternate-layer joins or a ring | Actual neck-width exits join the copied W5500 supply; no new DRC or connectivity regressions; full native/GUI suite passed |
 | #4 | Close short pad-to-track/via/pad gaps with clearance-checked direct/bent ties, including plane nets | Merged in PR #25; short-tie and obstacle regressions passed |
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Pending reproduction |
@@ -239,3 +239,25 @@ universal speedup. At 0.075 mm the same single-net local job used 715,040
 cells and peaked at 1,196,834,816 bytes (1.20 GB); read/claim preparation was
 16.14/12.32 s. Timing varies with concurrent machine load; the memory result
 is the main evidence. No full-board 0.075 mm allocation was needed.
+
+### Multi-pin supply escape geometry (#3)
+
+The neck width was already narrower than the supply trunk, but its escape
+position and first owner-map check still used the trunk width. On a crowded
+pin that could put both candidate exits into neighboring copper, even though
+a shorter narrow exit was legal. Exit offsets and checks now use the actual
+neck width; exact stub clearance checks and wide trunk routing remain active.
+
+On a copied Base-board W5500 supply, `/USB_ETH/+3V3A_ETH` had four pad components.
+The old default joined them into two; enabling both pad exits or a prototype
+via-first pass still left two. Setting the entire net to 0.25 mm joined all
+four, which identified the width-dependent failure. The corrected neck exits
+join all four with the original net width. Every other net retains its pad
+connectivity, and refilled DRC has exactly the same 14 violations (10 silk over
+copper, 4 silk overlaps), with no new or removed violation reports. Unconnected
+items fall from seven to four, all three gains on the selected supply.
+
+`test_supply_pin_necks.py` exercises a synthetic 48-pin, 0.5 mm-pitch IC with six
+supply pins separated by ground pins, verifying complete supply connectivity,
+narrow emitted necks, wide trunks and adjacent-pad clearance. The decisive
+before/after crowded-board regression is retained privately.
