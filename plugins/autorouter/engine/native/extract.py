@@ -88,6 +88,8 @@ def local_clearance_warnings(board, rules, net_items, probes):
     This is an intent warning, not a DRC violation. Evaluate the winning
     rule against real board net/item profiles and the pad's copper layers.
     """
+    probes = set(probes) | {rules.normalise(dru.Item(n.netclass, n.netname, "", "Via"))
+                            for n in net_items.values()}
     groups = {}
     for pad in board.GetPads():
         fp = pad.GetParentFootprint()

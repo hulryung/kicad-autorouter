@@ -160,7 +160,10 @@ single-layer crossing and preserves the original path after rollback.
 Existing scoped-shove and ownership regressions pass. On the same Cell8
 snapshot the protected rerun joins SC6 and SC7, with zero nets regressing
 in connected pad-component count. The remaining SD5/SD6 work stays open.
-Refilled custom-rule DRC comparison is pending.
+Refilled custom-rule DRC finds no new clearance violations, but dangling
+track reports rise from 8 to 15 (18 to 25 reports overall). Six of the seven
+newly dangling tracks are original copper. This separate remnant problem
+is tracked in #28; the experimental board is not accepted as a final result.
 
 ### Local clearance overrides (#26, newly reported)
 

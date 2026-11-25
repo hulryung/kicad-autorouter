@@ -34,6 +34,8 @@ assert not warnings(inner),'inner-only rule does not apply to front SMD pads'
 relaxed=dru.ClearanceRules.parse(text+' (rule "exception" (condition "A.Reference == \'U12\'") (constraint clearance (min 0.1mm)))',{'Default':200000})
 pad.SetLocalClearance(None)
 assert not warnings(relaxed),'later matching exception wins'
+via_rule=dru.ClearanceRules.parse(text.replace("B.NetName != 'HV'", "B.NetName != 'HV' && B.Type == 'Via'"),{'Default':200000})
+assert warnings(via_rule),'via-specific custom rules also need an override warning'
 messages=[]
 with patch.object(dru,'for_board',return_value=rules):
     extract.extract(b,NativeOptions(fanout_vias=False,stitch_vias=False),status=messages.append)
