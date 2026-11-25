@@ -18,7 +18,7 @@ Routing experiments use copies; private board inputs are not published.
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Pending reproduction |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
-| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims implemented; synthetic differential/performance tests passed; reporter-board validation pending |
+| #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Compressed claims and indexed intersections implemented; reporter-board hashes match; five-run timing and full native/GUI validation passed |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Budget/progress checks pass; bounded raw-geometry reuse implemented and validated; CI pending |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Power ordering and expanded plane-goal regressions pass; full validation in progress |
@@ -328,3 +328,33 @@ one sequential comparison; this does not establish a general whole-job speedup.
 A broad first cache candidate thrashed at its limit and was rejected. Raw-raster
 reuse reduces repeated geometry work, while map writes and rule/connectivity
 work still run on each pass.
+
+### Rip-up interval index (#19)
+
+On the current scoped PIO model (143 owner maps, 117 movable paths), profiling
+three removals showed 9.31 million binary searches inside claim intersections.
+The compact claims saved memory but still scanned every raw segment row for
+each surviving path/map pair. A lazy disjoint interval index now limits each
+intersection to the touched range and searches the smaller side. Raw row spans
+remain intact for ownership slices and geometric bounds; adding cells invalidates
+the index.
+
+The profiled removal fell from 1.512 s to 0.314 s, including index construction.
+Owner-map, first-claimer and via-block hashes match before and after removal.
+Peak RSS was 1.230 GB and 1.224 GB in these runs. These profile timings are not
+an uninstrumented whole-job speed claim. `test_claim_intersections.py` compares
+100 randomized overlapping claims against explicit sets, including sparse,
+dense and empty intersections and mutation after indexing; exact rip-up versus
+full-rebuild tests also pass.
+
+Five alternating uninstrumented runs rebuilt the same 117-path router before
+each removal (a cold index each time). Median removal time fell from 1.1913 s
+to 0.2584 s (78% lower). All ten resulting ownership/first-claimer/via-block
+hashes match. The full local native/GUI suite passed. This is a measured
+three-net scoped case, not a timing claim for the original full 22-net job.
+
+A full-board-grid extraction of the same private PIO scope reused all 18,488
+cacheable shapes on the second read, retaining about 67.1 MB. Cold, warm and
+disabled reads took 49.58, 46.39 and 49.26 seconds respectively; all owner and
+via-map hashes matched. This single comparison shows reuse and correctness,
+not a general routing speed guarantee.
