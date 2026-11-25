@@ -2,7 +2,7 @@
 
 Do not call pcbnew.LoadBoard from the editor: it can replace the active project.
 """
-from ..compat import resolve_item
+from ..compat import resolve_item, copy_design_settings
 
 import shutil
 import json
@@ -66,8 +66,9 @@ def load_copy(path, template):
         raise RuntimeError('Could not load candidate board')
     board.SetFileName(str(path))
     # Reference only: this board neither owns nor replaces the editor's project.
-    board.SetProject(template.GetProject(), True)
-    board.SetDesignSettings(template.GetDesignSettings())
+    if hasattr(board, "SetDesignSettings"):
+        board.SetProject(template.GetProject(), True)
+    copy_design_settings(board, template)
     return board
 
 

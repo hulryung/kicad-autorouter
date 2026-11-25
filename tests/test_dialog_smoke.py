@@ -23,7 +23,7 @@ def main():
         print("test_dialog_smoke: skipped (set KICAD_AUTOROUTER_GUI_TESTS=1 in a desktop session)")
         return
     board = pcbnew.LoadBoard(str(HERE / "fixtures" / "obd2-adapter.kicad_pcb"))
-    app = wx.App(False)
+    app = wx.GetApp() or wx.App(False)
     from autorouter.dialog import AutorouterDialog
     from autorouter.engine.options import RouteOptions
 

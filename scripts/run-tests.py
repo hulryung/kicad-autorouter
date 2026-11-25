@@ -20,13 +20,15 @@ def main():
         print("No tests matched:", " ".join(words), file=sys.stderr)
         return 2
     failed = []
-    env = dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1")
+    env = dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1", PYTHONFAULTHANDLER="1")
     timeout = float(os.environ.get("KICAD_AUTOROUTER_TEST_TIMEOUT", "300"))
     for test in tests:
         print("RUN:", test.name, flush=True)
+        command = [sys.executable, str(test)]
         try:
-            result = subprocess.run([sys.executable, str(test)], env=env, timeout=timeout)
+            result = subprocess.run(command, env=env, timeout=timeout)
             if result.returncode != 0:
+                print(f"FAIL: {test.name} exited {result.returncode}", flush=True)
                 failed.append(test.name)
         except subprocess.TimeoutExpired:
             print(f"TIMEOUT: {test.name} exceeded {timeout:g} seconds", flush=True)

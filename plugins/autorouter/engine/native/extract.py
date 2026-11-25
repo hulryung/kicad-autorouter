@@ -2530,7 +2530,8 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
                 if other is z or not other.IsOnLayer(lid):
                     continue
                 if other.GetIsRuleArea():
-                    if not other.GetDoNotAllowZoneFills():
+                    if not (other.GetDoNotAllowZoneFills() if hasattr(other, "GetDoNotAllowZoneFills")
+                            else other.GetDoNotAllowCopperPour()):
                         continue
                     cut = other.Outline()
                 elif other.GetNetCode() == z.GetNetCode() or not other.HigherPriority(z):

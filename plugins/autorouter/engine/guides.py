@@ -23,6 +23,7 @@ from a board, written by the model, edited) in the plugin's data folder.
 import json
 import math
 import re
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -201,7 +202,8 @@ def learn(path: str) -> dict:
                 "Path(sys.argv[3]).write_text(json.dumps(_learn_in_process(sys.argv[2])), encoding='utf-8')")
         result = subprocess.run([binary, '-c', code, str(Path(__file__).resolve().parents[2]),
                                  str(Path(path).resolve()), str(output)],
-                                capture_output=True, text=True, timeout=120)
+                                capture_output=True, text=True, timeout=120,
+                                env=dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1"))
         if result.returncode != 0 or not output.exists():
             raise RuntimeError(f"Reference board could not be read: {result.stderr[-1500:]}")
         return json.loads(output.read_text(encoding='utf-8'))
@@ -210,6 +212,8 @@ def learn(path: str) -> dict:
 def _learn_in_process(path: str) -> dict:
     """Worker only: pcbnew.LoadBoard must never run in the editor process."""
     import pcbnew
+    from .compat import native_app
+    native_app()
     board = pcbnew.LoadBoard(path)
     st = style_mod.learn(board)
     planes = [n for n, r in st["layers"].items() if r == "plane"]

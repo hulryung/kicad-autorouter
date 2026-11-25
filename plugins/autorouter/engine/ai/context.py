@@ -49,10 +49,22 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
                 target.unlink(missing_ok=True)
         if not pcbnew.SaveBoard(str(copy), board):
             raise RuntimeError("Could not save the DRC board copy")
-        result = subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error", "--refill-zones",
-                        "-o", str(report), str(copy)], capture_output=True, text=True, timeout=300)
+        refill = ["--refill-zones"]
+        if pcbnew.Version().startswith("9."):
+            from ..isolated import python_executable
+            code = ("import sys; sys.path.insert(0,sys.argv[1]); "
+                    "from autorouter.engine.compat import refill_file; refill_file(sys.argv[2])")
+            worker = subprocess.run([python_executable(), "-c", code,
+                        str(Path(__file__).resolve().parents[3]), str(copy)],
+                        env=dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1"),
+                        capture_output=True, text=True, timeout=120)
+            if worker.returncode:
+                raise RuntimeError(f"DRC refill failed: {worker.stderr[-1000:]}")
+            refill = []
+        result = subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error"] + refill +
+                        ["-o", str(report), str(copy)], capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            raise RuntimeError(f"kicad-cli DRC failed ({result.returncode}): {result.stderr[-1000:]}")
+            raise RuntimeError(f"kicad-cli DRC failed ({result.returncode}): {(result.stderr or result.stdout)[-1000:]}")
         data = json.loads(report.read_text(encoding="utf-8"))
     except Exception as e:
         return {"available": False, "error": str(e)}

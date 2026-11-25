@@ -28,7 +28,8 @@ def run(cmd, workdir, timeout, cancelled=None, poll=None):
     with (workdir / 'worker-stdout.log').open('w', encoding='utf-8') as stdout, \
             (workdir / 'worker-stderr.log').open('w', encoding='utf-8') as stderr:
         kwargs = {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0)} if os.name == 'nt' else {}
-        proc = subprocess.Popen(cmd, cwd=str(workdir), stdout=stdout, stderr=stderr, **kwargs)
+        proc = subprocess.Popen(cmd, cwd=str(workdir), stdout=stdout, stderr=stderr,
+                                env=dict(os.environ, KICAD_AUTOROUTER_NO_REGISTER="1"), **kwargs)
         started = time.monotonic()
         try:
             while proc.poll() is None:
