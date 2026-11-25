@@ -47,7 +47,9 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
                     shutil.copy2(original, target)
             else:
                 target.unlink(missing_ok=True)
-        if not pcbnew.SaveBoard(str(copy), board):
+        from .board_copy import _snapshot_rules
+        _snapshot_rules(board, copy.with_suffix(".kicad_pro"))
+        if not pcbnew.SaveBoard(str(copy), board, True):
             raise RuntimeError("Could not save the DRC board copy")
         refill = ["--refill-zones"]
         if pcbnew.Version().startswith("9."):

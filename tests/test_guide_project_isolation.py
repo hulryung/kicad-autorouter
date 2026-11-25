@@ -30,7 +30,7 @@ def main():
         track.SetLayer(pcbnew.F_Cu)
         track.SetNetCode(active.FindNet('/CANH').GetNetCode())
         active.Add(track)
-        pcbnew.SaveBoard(str(path), active)
+        pcbnew.SaveBoard(str(path), active, True)
         pro = path.with_suffix('.kicad_pro')
         def rules(width):
             pro.write_text(json.dumps({'meta': {'version': 1}, 'net_settings': {

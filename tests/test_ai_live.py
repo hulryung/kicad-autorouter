@@ -39,7 +39,7 @@ def main():
         rounds = rv.run(request if request != "--review" else "")
         print("scores:", [r["score"] for r in rounds])
         out = work / board_file.name
-        pcbnew.SaveBoard(str(out), board)
+        pcbnew.SaveBoard(str(out), board, True)
         print("saved", out)
         assert rounds, "no review rounds"
         print("test_ai_live: review ok")
@@ -52,7 +52,7 @@ def main():
             print("   ", r["type"], "ok" if r["ok"] else "FAILED", r.get("detail", "")[:160])
     print("unconnected now:", board.GetConnectivity().GetUnconnectedCount(True))
     out = work / board_file.name
-    pcbnew.SaveBoard(str(out), board)
+    pcbnew.SaveBoard(str(out), board, True)
     print("saved", out)
     assert history, "no rounds happened"
     print("test_ai_live: ok")

@@ -91,6 +91,12 @@ def native_app():
         _native_app = wx.GetApp() or wx.App(False)
 
 
+# KiCad 9 returns these by value without SWIG destructors; merely reading
+# them leaks a C++ allocation. They are not scalar routing constraints.
+_UNWRAPPED_SETTINGS = {'m_SingleTrackMeanderSettings', 'm_DiffPairMeanderSettings',
+                       'm_SkewMeanderSettings', 'm_TeardropParamsList'}
+
+
 def copy_design_settings(board, template):
     if hasattr(board, 'SetDesignSettings'):
         board.SetDesignSettings(template.GetDesignSettings())
@@ -99,7 +105,7 @@ def copy_design_settings(board, template):
     # Do not SetProject: its ClearProject can unlink the editor's settings.
     source, target = template.GetDesignSettings(), board.GetDesignSettings()
     for name in dir(source):
-        if name.startswith('m_'):
+        if name.startswith('m_') and name not in _UNWRAPPED_SETTINGS:
             value = getattr(source, name)
             if isinstance(value, (bool, int, float, str)):
                 setattr(target, name, value)
@@ -118,7 +124,7 @@ def refill_file(path):
         raise RuntimeError('Could not load DRC copy for refill')
     if list(board.Zones()):
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
-    if not pcbnew.SaveBoard(path, board):
+    if not pcbnew.SaveBoard(path, board, True):
         raise RuntimeError('Could not save refilled DRC copy')
 
 
@@ -145,7 +151,8 @@ def zone_filler(board):
             board._autorouter_settings_manager = manager
         settings = board.GetDesignSettings()
         scalar_rules = tuple((name, getattr(settings, name)) for name in dir(settings)
-                             if name.startswith('m_') and isinstance(getattr(settings, name), (bool, int, float, str)))
+                             if name.startswith('m_') and name not in _UNWRAPPED_SETTINGS
+                             and isinstance(getattr(settings, name), (bool, int, float, str)))
         net_rules = []
         for code, net in board.GetNetsByNetcode().items():
             if code > 0:

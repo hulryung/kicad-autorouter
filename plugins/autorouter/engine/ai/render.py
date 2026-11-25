@@ -77,7 +77,7 @@ def render_board(board, workdir: Path, name: str = "board.png", layers: str = "F
     copy = workdir / "render-copy.kicad_pcb"
     png = workdir / name
     try:
-        pcbnew.SaveBoard(str(copy), board)
+        pcbnew.SaveBoard(str(copy), board, True)
     except Exception:
         return None
     svg = workdir / "board.svg"

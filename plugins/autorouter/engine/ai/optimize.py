@@ -199,7 +199,7 @@ class Optimizer:
                     raise RuntimeError('Candidate changed placement, pad nets, zones or locked copper')
                 session.refill_zones(candidate)
                 candidate.BuildConnectivity()
-                if not pcbnew.SaveBoard(str(candidate_path), candidate):
+                if not pcbnew.SaveBoard(str(candidate_path), candidate, True):
                     raise RuntimeError('could not save candidate')
                 measured = self._assess(candidate, folder / 'review', request, candidate_options)
                 accepted, reason = decision(best, measured, self.min_gain)

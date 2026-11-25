@@ -21,7 +21,8 @@ def snapshot(board, destination):
         if path and path.exists():
             shutil.copy2(path, destination.with_suffix(suffix))
     _snapshot_rules(board, destination.with_suffix('.kicad_pro'))
-    if not pcbnew.SaveBoard(str(destination), board):
+    # KiCad 9 SaveBoard otherwise renames/saves the editor project as well.
+    if not pcbnew.SaveBoard(str(destination), board, True):
         raise RuntimeError('Could not snapshot the open board')
     return destination
 

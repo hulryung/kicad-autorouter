@@ -27,7 +27,7 @@ class SignalIslandPassTests(unittest.TestCase):
         self.assertEqual(calls.count(True), 1)
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "routed.kicad_pcb")
-            pcbnew.SaveBoard(path, board)
+            pcbnew.SaveBoard(path, board, True)
             saved = pcbnew.LoadBoard(path)
             self.assertEqual(saved.GetConnectivity().GetUnconnectedCount(True), 0)
 

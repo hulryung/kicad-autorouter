@@ -139,7 +139,7 @@ def test_tuning(tmp: Path):
     assert report.groups[0]["ok"], report.lines()
     # each tuned net's meander is a KiCad tuning pattern owning its tracks, and it survives a save/load
     assert report.kicad_patterns == 2, report.lines()
-    pcbnew.SaveBoard(str(path), board)
+    pcbnew.SaveBoard(str(path), board, True)
     text = path.read_text()
     assert text.count('tuning_pattern') == 2 and "(members" in text, text[-2000:]
     again = pcbnew.LoadBoard(str(path))
