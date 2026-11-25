@@ -52,7 +52,10 @@ def main():
             group = pcbnew.Cast_to_PCB_GROUP(item)
             for member in group.GetItems():
                 assert member.GetBoard() == board
-                assert board_copy.uid(pcbnew.Cast_to_PCB_GROUP(pcbnew.Cast_to_BOARD_ITEM(member.GetParentGroup().AsEdaItem()))) == board_copy.uid(group)
+                parent = member.GetParentGroup()
+                if not hasattr(parent, 'm_Uuid'):
+                    parent = pcbnew.Cast_to_PCB_GROUP(pcbnew.Cast_to_BOARD_ITEM(parent.AsEdaItem()))
+                assert board_copy.uid(parent) == board_copy.uid(group)
         # Transfer again with pre-existing groups to catch dangling memberships.
         board_copy.apply_copper(board, candidate_file)
         assert board.GetConnectivity().GetUnconnectedCount(True) == 0

@@ -7,6 +7,8 @@ finer grid (half the pitch), at the neck width, with cheaper vias, in a run
 scoped to just those nets. That is what a designer does by hand for the last
 few stubborn connections, and what the AI assistant found by itself.
 """
+from ..compat import zone_filler
+
 import copy
 import time
 from collections import Counter
@@ -595,7 +597,7 @@ def _pad_label(pad) -> str:
 
 
 def _refill(board) -> None:
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
 
 
@@ -814,7 +816,7 @@ def _open_pour_joins(board, joins: dict, result) -> List[str]:
     "pour_joins": pad groups before the run, connections in all and in
     scope), those the refilled board has in more groups than the routed
     connections leave."""
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     conn = board.GetConnectivity()
     failed = Counter(c.net for c in result.failed)

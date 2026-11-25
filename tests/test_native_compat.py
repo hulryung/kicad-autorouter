@@ -33,7 +33,10 @@ def main():
     board.Remove(next(iter(board.GetTracks())))
     board.BuildConnectivity()
     assert not ids(pads[1:]) & ids(_legacy_connected_items(board.GetConnectivity(), pads[0]))
+    source = pcbnew.LoadBoard(str(Path(__file__).parent / 'fixtures/obd2-adapter.kicad_pcb'))
+    project = int(source.GetProject())
     boards = [pour_board(True)[0], island_board()]
+    assert int(source.GetProject()) == project, 'refill replaced the source project'
     for board in boards:
         if isinstance(board, tuple):
             board = board[0]

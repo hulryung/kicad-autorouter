@@ -19,6 +19,7 @@ except ImportError:
     print("test_plane_foreign_pour: skipped (needs KiCad's Python)")
     sys.exit(0)
 
+from autorouter.engine.compat import zone_filler
 from autorouter.engine.native import pipeline
 from autorouter.engine.native.problem import NativeOptions
 
@@ -90,7 +91,7 @@ def make_board():
     fp.Add(p)
     zone(board, v33, pcbnew.In2_Cu, ((0.5, 0.5), (W - 0.5, 0.5), (W - 0.5, H - 0.5), (0.5, H - 0.5)), 0)
     zone(board, v12, pcbnew.In2_Cu, CORRIDOR, 1)
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     return board, v33.GetNetCode(), v12.GetNetCode()
 
@@ -105,7 +106,7 @@ def check(name, cond, detail=""):
 def main():
     board, v33, v12 = make_board()
     job = pipeline.run_job(board, NativeOptions(pitch_mm=0.1), apply_paths=True)
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     conn = board.GetConnectivity()
     check("every pad of both nets is joined", conn.GetUnconnectedCount(True) == 0,

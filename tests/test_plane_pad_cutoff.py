@@ -35,6 +35,7 @@ except ImportError:
     print("test_plane_pad_cutoff: skipped (needs KiCad's Python)")
     sys.exit(0)
 
+from autorouter.engine.compat import zone_filler
 from autorouter.engine.native import apply as native_apply, pipeline
 from autorouter.engine.native.problem import NativeOptions
 
@@ -113,7 +114,7 @@ def make_board():
     for x, y in ((0.3, 0.3), (W - 0.3, 0.3), (W - 0.3, H - 0.3), (0.3, H - 0.3)):
         o.Append(int(x * MM), int(y * MM))
     board.Add(z)
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     return board, nets
 
@@ -130,7 +131,7 @@ def options(layers):
 
 
 def pad_joined(board, gnd):
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     groups = native_apply._pad_groups(board, board.GetConnectivity(), gnd)
     return len(groups) == 1

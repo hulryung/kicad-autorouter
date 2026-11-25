@@ -1,4 +1,6 @@
 """Putting routed paths on the board as tracks and vias (main thread only)."""
+from ..compat import zone_filler
+
 from ..compat import connected_items
 
 import math
@@ -461,7 +463,7 @@ def prune_dangling_vias(board, items) -> int:
         return 0
     try:
         if any(not z.GetIsRuleArea() for z in board.Zones()):
-            pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+            zone_filler(board).Fill(board.Zones())
     except Exception:
         return 0                                   # no fresh fills: leave the vias
     collect()
@@ -988,7 +990,7 @@ def repair_islands(board, items=None, reach: int = 1_500_000, step: int = 50_000
     zones = [z for z in board.Zones() if not z.GetIsRuleArea() and z.GetNetCode() > 0]
     if not zones:
         return 0
-    filler = pcbnew.ZONE_FILLER(board)
+    filler = zone_filler(board)
     filler.Fill(board.Zones())
     board.BuildConnectivity()
     conn = board.GetConnectivity()

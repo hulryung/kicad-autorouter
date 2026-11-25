@@ -16,6 +16,7 @@ except ImportError:
     print("test_repair_islands: skipped (needs KiCad's Python)")
     sys.exit(0)
 
+from autorouter.engine.compat import zone_filler
 from autorouter.engine.native import apply
 
 MM = 1_000_000
@@ -137,7 +138,7 @@ def make_board(ring=True, extra=(), surface=True, thermal_pth=False, graphic=Fal
 
 
 def unconnected(board):
-    pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    zone_filler(board).Fill(board.Zones())
     board.BuildConnectivity()
     return board.GetConnectivity().GetUnconnectedCount(True)
 

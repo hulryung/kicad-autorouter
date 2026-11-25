@@ -1,6 +1,8 @@
 """The board side of a run: job folders and what the dialog needs to know
 about the board. Everything that touches pcbnew lives here, imported lazily so
 the rest of the engine stays importable without KiCad."""
+from .compat import zone_filler
+
 import re
 import shutil
 import time
@@ -124,6 +126,6 @@ def refill_zones(board) -> int:
     import pcbnew
     zones = [z for z in board.Zones() if not z.GetIsRuleArea()]
     if zones:
-        filler = pcbnew.ZONE_FILLER(board)
+        filler = zone_filler(board)
         filler.Fill(board.Zones())
     return len(zones)

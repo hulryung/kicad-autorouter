@@ -1,4 +1,6 @@
 """Reading the board into a RoutingProblem through pcbnew (main thread only)."""
+from ..compat import zone_filler
+
 from ..compat import connected_items
 
 from ..compat import board_outline
@@ -939,7 +941,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
         try:
             zones = [z for z in board.Zones() if not z.GetIsRuleArea()]
             if zones:
-                pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+                zone_filler(board).Fill(board.Zones())
                 board.BuildConnectivity()
                 refilled = True
         except Exception:

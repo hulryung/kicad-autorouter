@@ -120,3 +120,32 @@ def refill_file(path):
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     if not pcbnew.SaveBoard(path, board):
         raise RuntimeError('Could not save refilled DRC copy')
+
+
+def zone_filler(board):
+    """KiCad 9 requires an initialized DRC engine before any native refill."""
+    import pcbnew
+    if pcbnew.Version().startswith('9.'):
+        import tempfile
+        from pathlib import Path
+        if board.GetProject() is None:
+            # Own a separate settings manager; never load into the editor's.
+            manager = pcbnew.SETTINGS_MANAGER(True)
+            if board.GetFileName():
+                project_path = Path(board.GetFileName()).with_suffix('.kicad_pro')
+            else:
+                board._autorouter_project_dir = tempfile.TemporaryDirectory(prefix='autorouter-project-')
+                project_path = Path(board._autorouter_project_dir.name) / 'board.kicad_pro'
+                project_path.write_text('{}', encoding='utf-8')
+            manager.LoadProject(str(project_path), False)
+            project = manager.GetProject(str(project_path))
+            if project is None:
+                raise RuntimeError('Could not initialize an isolated refill project')
+            board.SetProject(project, True)
+            board._autorouter_settings_manager = manager
+        with tempfile.TemporaryDirectory(prefix='autorouter-drc-init-') as work:
+            # The scripting helper constructs and initializes the board's DRC
+            # engine. Calling ZONE_FILLER on a raw BOARD otherwise segfaults.
+            if not pcbnew.WriteDRCReport(board, str(Path(work) / 'init.rpt'), pcbnew.EDA_UNITS_MM, False):
+                raise RuntimeError('Could not initialize DRC for zone filling')
+    return pcbnew.ZONE_FILLER(board)
