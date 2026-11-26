@@ -424,6 +424,11 @@ component to one designated pad of its net, preserving force copper and pad
 assignments. A separate geometry check rejects same-net shortcuts that ordinary
 DRC would allow; accepted results are saved as a new project copy.
 
+Headless [channel template replication](docs/channel-templates.md) copies routed
+tracks, arcs and vias using reference/pad-based net mapping. Translation and
+rotation are supported; a new output project is published only after DRC and
+per-net connectivity checks pass. Shared board-wide nets are excluded.
+
 ## Use with LCSC Manager
 
 [LCSC Manager](https://github.com/hulryung/kicad-lcsc-manager) imports component

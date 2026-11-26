@@ -14,12 +14,12 @@ Routing experiments use copies; private board inputs are not published.
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
-| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Net/group via masks and layer keepouts implemented and tested; Kelvin/template work remains |
+| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Via/layer restrictions and templates merged; Kelvin native/private-board checks pass, CI pending |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Older sense snapshot and completed-refill hard stop tested; original nine-connection case still pending |
-| #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Pending reproduction |
-| #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Pending reproduction |
+| #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Cell8 reproduced; protected reroutes add no connections; joint row planning remains |
+| #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Existing inward/dual candidates tested; explicit staggered row plan remains |
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Merged in PR #34; reporter-board hashes match and five-run rip-up timing improved |
-| #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Budget/progress checks pass; bounded raw-geometry reuse implemented and validated; CI pending |
+| #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Merged in PR #36; bounded raster reuse, complete-job statistics and all nine CI jobs pass |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | PR #31 merged; synthetic cases pass, private PIO rail still incomplete |
 
