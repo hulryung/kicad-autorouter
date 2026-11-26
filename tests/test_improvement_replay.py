@@ -101,6 +101,17 @@ with tempfile.TemporaryDirectory() as tmp:
         else:
             raise AssertionError("published missing images")
     assert not (root / "failed").exists()
+    with patch.object(replay.render, "render_board") as renderer:
+        try:
+            replay.export_replay(
+                run, root / "cancelled", load_board=load, cancelled=lambda: True
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("ignored export cancellation")
+        renderer.assert_not_called()
+    assert not (root / "cancelled").exists()
     data["initial"] = {"board": "../outside.kicad_pcb"}
     (root / "outside.kicad_pcb").write_text("outside")
     manifest.write_text(json.dumps(data))

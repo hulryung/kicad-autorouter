@@ -468,17 +468,25 @@ class AutorouterDialog(wx.Dialog):
         run = getattr(self, "_replay_run", None)
         if run is None or not (run / 'optimization.json').is_file():
             return
+        self._cancel = False
         self._set_busy(True)
+
+        def cancelled():
+            wx.SafeYield(self, True)
+            return self._cancel
+
         try:
             target = run / 'replay'
             if not (target / 'index.html').is_file():
                 layers = ",".join(self.board.GetLayerName(l) for l in self.board.GetEnabledLayers().CuStack())
                 export_replay(run, target, layers=layers + ",Edge.Cuts", log=self._append_log,
-                              load_board=lambda path: ai_board_copy.load_copy(path, self.board))
+                              load_board=lambda path: ai_board_copy.load_copy(path, self.board),
+                              cancelled=cancelled)
             wx.LaunchDefaultBrowser((target / 'index.html').as_uri())
         except Exception as exc:
             self._append_log(f"[replay] Export failed: {exc}")
-            wx.MessageBox(str(exc), "Replay export", wx.OK | wx.ICON_ERROR, self)
+            if not self._cancel:
+                wx.MessageBox(str(exc), "Replay export", wx.OK | wx.ICON_ERROR, self)
         finally:
             self._set_busy(False)
 

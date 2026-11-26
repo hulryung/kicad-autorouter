@@ -71,12 +71,19 @@ def export_replay(
     video=False,
     load_board=None,
     log=print,
+    cancelled=None,
 ):
     """Publish a new directory atomically. Rendering failure cannot affect routing.
 
     Frames are accepted checkpoints, not invented intermediate routing states.
     ffmpeg is optional and only needed when video=True.
     """
+
+    def check_cancelled():
+        if cancelled and cancelled():
+            raise RuntimeError("Replay export cancelled")
+
+    check_cancelled()
     source, output = Path(directory).resolve(), Path(output).resolve()
     if output.exists():
         raise FileExistsError("Choose a new replay output directory")
@@ -104,6 +111,7 @@ def export_replay(
         bounds = None
         public = []
         for index, frame in enumerate(frames):
+            check_cancelled()
             log(f'[replay] Rendering {frame["label"]} ({index + 1}/{len(frames)})')
             board = load_board(str(frame["board"]))
             box = board.GetBoardEdgesBoundingBox()
@@ -115,6 +123,7 @@ def export_replay(
             png = render.render_board(
                 board, scratch, layers=layers, size=size, allow_3d=False
             )
+            check_cancelled()
             if png is None:
                 raise RuntimeError("Could not render a consistent 2-D checkpoint image")
             raw = png.read_bytes()
@@ -176,6 +185,7 @@ def export_replay(
             for f in public
         )
         (work / "description.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        check_cancelled()
         if video:
             log("[replay] Encoding MP4")
             subprocess.run(
@@ -205,5 +215,6 @@ def export_replay(
                 capture_output=True,
                 timeout=300,
             )
+        check_cancelled()
         work.rename(output)
     return output / "index.html"
