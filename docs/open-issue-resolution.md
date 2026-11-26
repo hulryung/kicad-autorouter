@@ -481,3 +481,15 @@ one pass and joined by a short In2 path. A narrower +12V-only replay does not
 reproduce the pair, so it is not claimed as a matched before/after fix of the
 original 87-net run. Native existing-hole and new-pair audit regressions cover
 the fabrication invariant independently of that private pass's ordering.
+
+### Suspend-aware job cap (#45)
+
+Routing and hard-stop deadlines now use the watchdog's epoch-based awake clock,
+using the same wall/monotonic difference as its existing macOS sleep diagnostic.
+System suspend therefore does not consume the job cap; awake CPU starvation and
+slow work still do. Wall-clock progress/elapsed reporting remains available.
+
+Controlled-clock tests advance wall time by 1000 seconds while awake time moves
+by one second: the pipeline completes its route without a false wall cap. A
+subsequent five awake seconds expires the cap. Native hard-stop tests still
+interrupt overdue routing, and the full local native/GUI suite passes.

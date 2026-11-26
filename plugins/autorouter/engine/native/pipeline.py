@@ -306,11 +306,11 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
     cap = wall_cap(options)
     if cap:
         options = copy.copy(options)
-        options.wall_deadline = time.time() + cap
+        options.wall_deadline = watchdog.wall_time() + cap
 
     def wall_over() -> bool:
         """Past the job's wall-clock cap (see NativeOptions.wall_limit_s)?"""
-        return bool(cap) and time.time() > options.wall_deadline
+        return bool(cap) and watchdog.wall_time() > options.wall_deadline
 
     def job_items() -> list:
         """UUIDs of the items this job has on the board now (ripped ones gone)."""
