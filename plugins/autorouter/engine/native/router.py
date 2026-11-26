@@ -3049,7 +3049,7 @@ class Router:
             if deadline is not None and astar.clock() > deadline:
                 result.timed_out = True
                 return True
-            if wall_deadline and time.time() > wall_deadline:
+            if wall_deadline and watchdog.wall_time() > wall_deadline:
                 # the job's wall-clock cap: the work clock (benchmarks) does
                 # not count board work such as claiming isolation rings
                 if not result.timed_out:

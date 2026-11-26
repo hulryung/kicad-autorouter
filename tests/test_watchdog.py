@@ -44,13 +44,15 @@ def test_stall_and_slow_steps():
 def test_hard_deadline():
     # Deterministic clock: a busy CI host can be descheduled for longer
     # than the old 100 ms window before the first assertion even executes.
-    with patch.object(watchdog.time, "time", return_value=100.0) as clock:
+    with patch.object(watchdog.time, "time", return_value=100.0) as clock, \
+            patch.object(watchdog.time, "monotonic", return_value=10.0) as awake:
         w = watchdog.start(None, hard_deadline=100.1)
         try:
             watchdog.stage("board read: tracks")
             watchdog.check()
             assert not watchdog.overdue()
             clock.return_value = 100.15
+            awake.return_value = 10.15
             try:
                 watchdog.check()
                 raise AssertionError("no Overrun past the hard deadline")
@@ -62,6 +64,55 @@ def test_hard_deadline():
     watchdog.check()                       # no watch: a no-op
     assert not watchdog.overdue()
     print("hard deadline: ok")
+
+
+def test_sleep_does_not_consume_cap():
+    with patch.object(watchdog.time, "time", return_value=100.0) as wall, \
+            patch.object(watchdog.time, "monotonic", return_value=10.0) as awake:
+        watch=watchdog.start(None,hard_deadline=105.0)
+        try:
+            watchdog.stage("pour refill")
+            wall.return_value=1100.0
+            awake.return_value=11.0
+            assert watchdog.wall_time()==101.0
+            watchdog.check()
+            assert not watchdog.overdue(), "suspend consumed the job cap"
+            # CPU starvation still consumes elapsed awake time; do not use
+            # process_time or grant extra time merely because CPU work is low.
+            wall.return_value=1105.0
+            awake.return_value=16.0
+            assert watchdog.wall_time()==106.0
+            assert watchdog.overdue()
+        finally:
+            watchdog.stop(watch)
+        assert watchdog.wall_time()==1105.0
+    print("sleep-adjusted wall cap: ok")
+
+
+def test_pipeline_resumes_after_sleep():
+    try:
+        import pcbnew
+    except ImportError:
+        print("pipeline resume: skipped (needs KiCad Python)")
+        return
+    from autorouter.engine.native import pipeline
+    from autorouter.engine.native.problem import NativeOptions
+    from test_native_grid import make_problem, add_net
+    options=NativeOptions(time_limit_s=30,wall_limit_s=5,fanout_vias=False,
+                          stitch_vias=False,diff_pairs=False,tune_lengths=False)
+    with patch.object(watchdog.time,"time",return_value=100.0) as wall, \
+            patch.object(watchdog.time,"monotonic",return_value=10.0) as awake:
+        def read(board,opts,status):
+            wall.return_value=1100.0
+            awake.return_value=11.0
+            problem=make_problem(layers=1,w=30,h=20)
+            add_net(problem,1,(5,10),(25,10))
+            problem.options=opts
+            return problem
+        result=pipeline.run_job(pcbnew.BOARD(),options,extract_fn=read,
+                                apply_paths=False,escalate=False)
+        assert result.routed==1 and not result.wall_capped and not result.timed_out,result
+    print("pipeline resumes after simulated sleep: ok")
 
 
 def test_pipeline_hard_stop():
@@ -106,5 +157,7 @@ def test_pipeline_hard_stop():
 if __name__ == "__main__":
     test_stall_and_slow_steps()
     test_hard_deadline()
+    test_pipeline_resumes_after_sleep()
+    test_sleep_does_not_consume_cap()
     test_pipeline_hard_stop()
     print("test_watchdog: ok")
