@@ -1,6 +1,7 @@
 # Open issue resolution
 
-Objective: verify and resolve every issue open on 2026-11-25. An issue is closed
+Objective: verify and resolve every issue open on 2026-11-25 and the follow-up
+reports from the same review. An issue is closed
 only after all its requested behaviors are implemented or disproved with
 reproducible evidence, relevant tests pass, and the change reaches main.
 Routing experiments use copies; private board inputs are not published.
@@ -15,17 +16,27 @@ Routing experiments use copies; private board inputs are not published.
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Merged in PRs #35, #41 and #42; native/private-board checks and all nine CI jobs passed |
-| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Older sense snapshot and completed-refill hard stop tested; original nine-connection case still pending |
-| #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Cell8 reproduced; protected reroutes add no connections; joint row planning remains |
-| #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Existing inward/dual candidates tested; explicit staggered row plan remains |
+| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | PR #51; recovered historical input completes all nine sense nets with no new DRC identities |
+| #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Merged in PR #48; reusable API/CLI, native regressions and private Cell8 joint reroute passed |
+| #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Merged in PR #48; inward staggered goals, QFP/rotation and outward-wall regressions passed |
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Merged in PR #34; reporter-board hashes match and five-run rip-up timing improved |
 | #21 | Periodic meaningful progress; reuse safe raster work across passes; count board-read cost in budget | Merged in PR #36; bounded raster reuse, complete-job statistics and all nine CI jobs pass |
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
-| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | PR #31 merged; synthetic cases pass, private PIO rail still incomplete |
+| #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Merged in PR #31; both requested modes verified; private PIO improves four joins but still has physical opens |
 
-Additional issue discovered during the real-board audit: #27, scoped shove
-trading a requested connection for a broken existing net. Synthetic rollback
-regression passes; reporter-snapshot validation is in progress.
+Additional issue #27 (scoped shove breaking an existing net) was resolved in
+PR #25 with protected-copper and rollback regressions. New reports from the
+continuing audit are tracked below.
+
+| Issue | Resolution |
+| --- | --- |
+| #45 | PR #49: suspend-aware job caps; controlled-clock and native hard-stop tests |
+| #46 | PR #52: explicit local endpoint reachability; joint row replanning in PR #48 |
+| #47 | PR #50: same-path via spacing retries and new-via hole audit |
+
+The native editor Undo check remains unverified: the computer-control runtime
+fails before attaching to KiCad. Headless/native test results do not substitute
+for that manual acceptance check. No private source board was modified.
 
 ## Evidence
 
@@ -435,7 +446,10 @@ violation reports; unconnected items decrease from 119 to 115. The run takes
 285.8 seconds with 2.48 GB peak RSS, including a hard stop during the island
 check. Settings differ from the earlier 0.2 mm single-pass experiment, so this
 is not an isolated algorithm speed/completion comparison. The remaining ten
-separated +3V3 groups keep #24 open.
+separated +3V3 groups are a limitation of this board result. A wider 12 mm
+probe makes no additional joins. Both requested feature behaviors in #24
+(power-first ordering and wider legal fanout search) are implemented and
+verified; this is not a claim of fully routing the private PIO board.
 
 ### Short-budget timeout reporting (#43)
 
@@ -451,7 +465,7 @@ refinement enabled/disabled, and actual expired budgets. Existing watchdog
 hard-cap tests remain; the 100 ms clock check now uses a controlled clock to
 avoid failure when a busy host deschedules the test before its first check.
 
-### Joint row experiment (#16 / #18, not yet a public API)
+### Joint row planning (#16 / #18)
 
 On a copy of the Cell8 board after the two checked Kelvin joins, local
 replanning restores 17 connections around U2 and creates inward staggered
@@ -463,8 +477,9 @@ blockers to restore.
 After removing one newly generated dangling SD5 tail, all four MUX nets
 improve from two pad components to one, and no other net regresses. Full
 refilled DRC retains the exact 18 baseline reports; airwires fall from five
-to one. The input board is unchanged. This is a private prototype and does
-not yet satisfy the reusable-feature requirement of either issue.
+to one. The input board is unchanged. PR #48 promotes the prototype to the public
+`replan_row` API and `scripts/replan-row.py`, with native boundary/lock,
+QFP/rotation and CLI publication tests. See `docs/row-replanning.md`.
 
 ### Consecutive new via holes (#47)
 
@@ -494,6 +509,21 @@ by one second: the pipeline completes its route without a false wall cap. A
 subsequent five awake seconds expires the cap. Native hard-stop tests still
 interrupt overdue routing, and the full local native/GUI suite passes.
 
+### Endpoint reachability diagnostics (#46)
+
+Failure details now include a 2 mm planar flood at each reported endpoint
+(capped at 64 cells of radius on very fine grids),
+with the applied width/neck/clearance, probe radius, legal seed count and
+reachable count. It distinguishes an enclosed endpoint from free pockets
+nearby, a blocked seed, a disabled layer, and an exit reaching the probe boundary. This is
+explicitly a local planar diagnostic: it does not claim a complete route or
+infer via feasibility. The existing whole-search verdict remains separate.
+
+The reporter corrected the original claim that all fixed-neighbour paths
+exist: their independent search closes only two, and most other ends are
+walled by adjacent escapes. Joint escape replanning is supplied by PR #48;
+the smaller-via explanations in the original report remain unverified guesses.
+
 ### Original nine-net sense reproduction (#13)
 
 The historical phase-F checkpoint and the original force/sense split were
@@ -514,3 +544,9 @@ Full refilled DRC introduces zero new violation identities (143 → 141 reports)
 and unconnected items fall from 81 to 41; the remaining opens are outside the
 requested sense nets. A separate native nine-line Kelvin test covers lengths
 30–90 mm, 1.5 mm domain clearance and a 0.15 mm force separation requirement.
+
+The copied PIO replay selects 21 open non-plane signal nets. Fixed-neighbour
+routing adds no connections; the exact 171 refilled DRC reports and all 43
+unconnected items remain, with no split of an existing pad group. A 0.5 mm
+probe was too short to distinguish these local pockets, so the diagnostic
+radius was widened. Its boundary verdict still does not prove a full route.
