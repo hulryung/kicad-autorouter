@@ -1,6 +1,7 @@
 # Open issue resolution
 
-Objective: verify and resolve every issue open on 2026-11-25. An issue is closed
+Objective: verify and resolve every issue open on 2026-11-25 and the follow-up
+reports from the same review. An issue is closed
 only after all its requested behaviors are implemented or disproved with
 reproducible evidence, relevant tests pass, and the change reaches main.
 Routing experiments use copies; private board inputs are not published.
@@ -15,7 +16,7 @@ Routing experiments use copies; private board inputs are not published.
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
 | #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Merged in PRs #35, #41 and #42; native/private-board checks and all nine CI jobs passed |
-| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Older sense snapshot and completed-refill hard stop tested; original nine-connection case still pending |
+| #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | PR #51; recovered historical input completes all nine sense nets with no new DRC identities |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Merged in PR #48; reusable API/CLI, native regressions and private Cell8 joint reroute passed |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Merged in PR #48; inward staggered goals, QFP/rotation and outward-wall regressions passed |
 | #19 | Profile custom-rule owner maps and rip-up; reduce claim memory/runtime without changing ownership, clearances or rollback | Merged in PR #34; reporter-board hashes match and five-run rip-up timing improved |
@@ -23,9 +24,19 @@ Routing experiments use copies; private board inputs are not published.
 | #22 | Bound scoped raster work to the routing region while retaining relevant obstacles, anchors and legal detours | Merged in PR #30; native suite, private PIO memory comparison and all nine CI jobs passed |
 | #24 | Route distributed multi-pad rails as a trunk/tree or prioritize them; widen legal plane-pad fanout search around fragmented pours | Merged in PR #31; both requested modes verified; private PIO improves four joins but still has physical opens |
 
-Additional issue discovered during the real-board audit: #27, scoped shove
-trading a requested connection for a broken existing net. Synthetic rollback
-regression passes; reporter-snapshot validation is in progress.
+Additional issue #27 (scoped shove breaking an existing net) was resolved in
+PR #25 with protected-copper and rollback regressions. New reports from the
+continuing audit are tracked below.
+
+| Issue | Resolution |
+| --- | --- |
+| #45 | PR #49: suspend-aware job caps; controlled-clock and native hard-stop tests |
+| #46 | PR #52: explicit local endpoint reachability; joint row replanning in PR #48 |
+| #47 | PR #50: same-path via spacing retries and new-via hole audit |
+
+The native editor Undo check remains unverified: the computer-control runtime
+fails before attaching to KiCad. Headless/native test results do not substitute
+for that manual acceptance check. No private source board was modified.
 
 ## Evidence
 
@@ -470,6 +481,22 @@ to one. The input board is unchanged. PR #48 promotes the prototype to the publi
 `replan_row` API and `scripts/replan-row.py`, with native boundary/lock,
 QFP/rotation and CLI publication tests. See `docs/row-replanning.md`.
 
+### Consecutive new via holes (#47)
+
+The existing-hole mask did not cover a second via created within the same A*
+path. A two-wall regression routed overlapping holes 0.2 mm apart where
+0.65 mm was required. Searches now check their own proposed via pairs and
+retry with a private exclusion mask, sharing the original expansion budget
+and cancellation callback. The regression still connects, with legal spacing.
+A geometry-counted post-job audit reports new same-net or different-net via
+hole violations without attributing pre-existing/restored pairs to this job.
+
+The archived PIO intermediate confirms both reported vias were introduced in
+one pass and joined by a short In2 path. A narrower +12V-only replay does not
+reproduce the pair, so it is not claimed as a matched before/after fix of the
+original 87-net run. Native existing-hole and new-pair audit regressions cover
+the fabrication invariant independently of that private pass's ordering.
+
 ### Suspend-aware job cap (#45)
 
 Routing and hard-stop deadlines now use the watchdog's epoch-based awake clock,
@@ -495,3 +522,24 @@ The reporter corrected the original claim that all fixed-neighbour paths
 exist: their independent search closes only two, and most other ends are
 walled by adjacent escapes. Joint escape replanning is supplied by PR #48;
 the smaller-via explanations in the original report remain unverified guesses.
+
+### Original nine-net sense reproduction (#13)
+
+The historical phase-F checkpoint and the original force/sense split were
+recovered locally. Replaying the split moves 405 force items, matching the
+recorded run. At 0.1 mm pitch and a 180 second search budget, the pre-fix
+router adds 17 partial connections but leaves every C0–C8 net open.
+
+Declared net-tie copper bridges were rasterized as netless obstacles across
+their own pads' exits. Extraction now retains only previously pad-owned cells
+within the attachment region of pads in a declared, touched net-tie group.
+Undeclared graphics, foreign blockers and unrelated-net crossings remain
+obstacles. Native tests cover these distinctions and compare DRC results.
+
+With this fix the same reconstructed input completes all 40 required joins:
+all nine C0–C8 nets become single pad components in 188.7 seconds including
+board reading and pour checks. No other net's component count increases.
+Full refilled DRC introduces zero new violation identities (143 → 141 reports),
+and unconnected items fall from 81 to 41; the remaining opens are outside the
+requested sense nets. A separate native nine-line Kelvin test covers lengths
+30–90 mm, 1.5 mm domain clearance and a 0.15 mm force separation requirement.

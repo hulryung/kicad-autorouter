@@ -11,6 +11,9 @@ service or AI account is required.
 
 **KiCad:** 9 and 10 · **License:** [MIT](LICENSE)
 
+The documentation below describes the current `main` branch. Changes after
+0.5.13 require a source installation until the next release.
+
 ## What is implemented
 
 | Area | Capabilities |
@@ -25,6 +28,19 @@ service or AI account is required.
 | Custom design rules | Clearance rules from the board's `.kicad_dru` (net class, net name and footprint conditions): an 8 mm HV-to-logic gap is kept while routing (cut back where the placement already puts pads closer, so they stay reachable), a fine-pitch part's relief lets its pins be reached. |
 | Board setup | A check of Board Setup and the project's net classes before routing (outline, minimums, fabrication rules, net class patterns that match no net, pairs and power nets left in Default, pre-defined sizes, unfilled zones) with fixes to tick and apply. |
 | Workflow | Live routing display, cancellation, undo through KiCad, persistent options, a pre-flight check before each run, per-board design intent and job logs. |
+
+### On main since 0.5.13
+
+- Protected scoped rerouting, faster bounded rasterization and reusable raster
+  geometry, power-first ordering and wider legal plane fanouts.
+- Headless [Kelvin joins](docs/kelvin-routing.md), channel templates and
+  [joint row replanning](docs/row-replanning.md), including inward staggered
+  escapes; each publishes a checked copy of the board.
+- Declared net-tie pad exits stay routable. Consecutive new vias respect
+  hole spacing. Failure details distinguish locally enclosed endpoints from
+  nearby free pockets, and macOS sleep does not consume routing wall caps.
+- See the [resolution evidence](docs/open-issue-resolution.md) for measured
+  results and remaining validation limits.
 
 ### New in 0.5.13
 
