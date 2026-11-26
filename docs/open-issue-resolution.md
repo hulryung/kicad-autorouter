@@ -34,9 +34,11 @@ continuing audit are tracked below.
 | #46 | PR #52: explicit local endpoint reachability; joint row replanning in PR #48 |
 | #47 | PR #50: same-path via spacing retries and new-via hole audit |
 
-The native editor Undo check remains unverified: the computer-control runtime
-fails before attaching to KiCad. Headless/native test results do not substitute
-for that manual acceptance check. No private source board was modified.
+On 2026-11-26 the user removed manual editor Undo verification from the
+acceptance requirements, preferring before/after comparison and improvement
+replay (#54). Undo is still unverified; it is no longer an open acceptance
+item. This supersedes the historical backlog references below. No private
+source board was modified.
 
 ## Evidence
 

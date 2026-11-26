@@ -66,7 +66,7 @@ def _svg_to_png(svg: Path, png: Path, size: int) -> bool:
 
 
 def render_board(board, workdir: Path, name: str = "board.png", layers: str = "F.Cu,F.SilkS,Edge.Cuts",
-                 size: int = 1600) -> Optional[Path]:
+                 size: int = 1600, allow_3d: bool = True) -> Optional[Path]:
     """Save a PNG of the board (2-D copper view where a converter exists, else
     KiCad's 3-D render), or None if nothing worked."""
     import pcbnew
@@ -81,6 +81,8 @@ def render_board(board, workdir: Path, name: str = "board.png", layers: str = "F
     except Exception:
         return None
     svg = workdir / "board.svg"
+    svg.unlink(missing_ok=True)
+    png.unlink(missing_ok=True)
     try:
         subprocess.run([cli, "pcb", "export", "svg", "--layers", layers, "--page-size-mode", "2",
                         "--exclude-drawing-sheet", "-o", str(svg), str(copy)], capture_output=True, timeout=120)
@@ -88,6 +90,8 @@ def render_board(board, workdir: Path, name: str = "board.png", layers: str = "F
             return png
     except Exception:
         pass
+    if not allow_3d:
+        return None
     try:
         subprocess.run([cli, "pcb", "render", "--side", "top", "--quality", "basic", "--width", str(size),
                         "--height", str(size), "-o", str(png), str(copy)], capture_output=True, timeout=300)
