@@ -411,6 +411,7 @@ class AutorouterDialog(wx.Dialog):
         if started is None:
             return
         binary, _, _ = started
+        self._replay_run = None  # A failed new run must not reopen an older comparison.
         self.applied = had_applied
         self._show_progress("Assistant: testing board copies; only the best verified result will be applied.", None)
         last_poll = [0.0]
