@@ -25,3 +25,27 @@ assert len(paths)==1,len(paths)
 assert paths[0].fixed_contacts=={(0,15000000,15000000),(0,25000000,15000000)},paths[0].fixed_contacts
 assert all(not t.IsLocked() for x in paths for t in x.items)
 print('test_fixed_contact_extract: passed')
+
+# A fixed T junction already supports the bridge end at x=15. Moving a
+# redundant unlocked branch cannot make that endpoint dangling.
+junction=add_track(b,n,pcbnew.B_Cu,(15,15),(15,20))
+junction.SetLocked(True)
+b.BuildConnectivity()
+p=extract.extract(b,NativeOptions(shove=True,fanout_vias=False,stitch_vias=False))
+contacts=set().union(*(x.fixed_contacts for x in p.existing if x.path.net==n.GetNetCode()))
+assert contacts=={(0,15000000,15000000),(0,25000000,15000000)},contacts
+junction.SetLayer(pcbnew.F_Cu)
+for t in b.GetTracks():
+    if t.GetStart().x==15000000:t.SetLocked(True)
+b.BuildConnectivity()
+p=extract.extract(b,NativeOptions(shove=True,fanout_vias=False,stitch_vias=False))
+contacts=set().union(*(x.fixed_contacts for x in p.existing if x.path.net==n.GetNetCode()))
+assert contacts=={(0,25000000,15000000)},contacts
+# A pad supports the remaining fixed endpoint even when its movable branch
+# is rerouted. No artificial contact requirement should keep that branch fixed.
+add_pad(f,3,25,15,n)
+b.BuildConnectivity()
+p=extract.extract(b,NativeOptions(shove=True,fanout_vias=False,stitch_vias=False))
+contacts=set().union(*(x.fixed_contacts for x in p.existing if x.path.net==n.GetNetCode()))
+assert not contacts,contacts
+print('test_fixed_contact_extract: fixed junctions and pads remain valid supports')

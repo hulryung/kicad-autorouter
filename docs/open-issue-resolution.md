@@ -202,6 +202,14 @@ seven new dangling tracks. The guarded run adds no new connections in this
 120-second configuration: it is a regression-prevention fix, not evidence
 that the remaining difficult row routes are solved. Those issues remain open.
 
+The guard also retained redundant contacts at fixed T junctions or pads (#39).
+A native regression fails on the previous extraction and passes when endpoints
+already supported by same-layer fixed copper or pads are excluded. Copper on
+another layer is not a support, and the original unsupported-bridge rollback
+regression still passes. This refinement adds no connections on the private
+Cell8 snapshot; #16/#18 remain open. A separate prototype adding contact points
+as routing targets also added no connections and was rejected.
+
 PR #25 is merged into main at d5dd4fb; issues #1, #2, #4, #5, #7, #26 and #27
 are closed. The root checkout is main; continuing experiments use an isolated
 worktree. Manual editor Undo remains unverified.

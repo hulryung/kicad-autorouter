@@ -3808,7 +3808,20 @@ def _movable_pieces(pads, items, fixed, layer_of: Dict[int, int]) -> List[dict]:
                 shape = item.GetEffectiveShape(lid)
                 for point in points:
                     if shape.Collide(point, 0):
-                        piece["fixed_contacts"].add((layer_of[lid], point.x, point.y))
+                        # An endpoint already joined by other fixed copper or
+                        # a pad cannot become dangling when this piece moves.
+                        point_box = (point.x, point.y, point.x, point.y)
+                        supported = any(pads[i].IsOnLayer(lid) and pads[i].GetEffectiveShape(lid).Collide(point, 0)
+                                        for i in _near(pad_buckets, point_box))
+                        if not supported:
+                            for j in _near(anchor_buckets, point_box):
+                                other = anchors[j].get("item")
+                                if other is not None and other != anchor and other.IsOnLayer(lid) \
+                                        and other.GetEffectiveShape(lid).Collide(point, 0):
+                                    supported = True
+                                    break
+                        if not supported:
+                            piece["fixed_contacts"].add((layer_of[lid], point.x, point.y))
         for i in _near(pad_buckets, box):
             if _boxes_meet(box, pad_boxes[i]) and _touches_pad(pads[i], item):
                 piece["pads"].add(i)
