@@ -413,6 +413,11 @@ Omitting `layers` selects every copper layer. Unknown layer/group names and
 invalid rectangles are rejected. These advanced controls currently use the
 headless options interface.
 
+Headless [channel template replication](docs/channel-templates.md) copies routed
+tracks, arcs and vias using reference/pad-based net mapping. Translation and
+rotation are supported; a new output project is published only after DRC and
+per-net connectivity checks pass. Shared board-wide nets are excluded.
+
 ## Use with LCSC Manager
 
 [LCSC Manager](https://github.com/hulryung/kicad-lcsc-manager) imports component
