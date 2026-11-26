@@ -391,6 +391,12 @@ signals to rip up early fanout and let the final pour pass try to restore it;
 restoration can fail when signals consume the available via sites. Existing
 editor-locked copper remains fixed in either mode.
 
+Repeated passes in one job share a bounded cache of board-outline and pad/arc
+raster geometry (`raster_cache_mb`, default 128 MB; zero disables it). Owner
+maps, clearances, connectivity and isolation-ring cuts are rebuilt from the
+current board. Geometry without a complete KiCad shape representation is
+recomputed. Cache hits and retained bytes are included in job statistics.
+
 Headless callers can also set per-job keepouts without creating temporary
 KiCad zones. Coordinates and margins are in nanometres:
 
