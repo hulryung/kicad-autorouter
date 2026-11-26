@@ -936,3 +936,8 @@ package. GitHub Releases are published separately; attach the same tested ZIP.
 ## License
 
 [MIT](LICENSE). The source and installable package are publicly available.
+
+For crowded two-row ICs, the headless [joint row replanner](docs/row-replanning.md)
+can replan selected escapes and crossing blockers within a bounded region,
+including inward staggered via goals. It publishes a new board copy only after
+full DRC and connectivity checks pass.
