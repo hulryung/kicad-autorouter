@@ -33,6 +33,7 @@ with tempfile.TemporaryDirectory() as folder:
     options=NativeOptions(pitch_mm=.1,allow_vias=False,routable_layers=[True,False],time_limit_s=10)
     result=route_kelvin(b,'J1.1','J1.2',root/'accepted',options=options,separation_mm=.15)
     assert result['after_opens'].get('SENSE_FORCE',0)==0,result
+    assert not result['timed_out'], 'successful short-budget job falsely reported a timeout'
     assert protected_state(b)==state and [track_signature(t) for t in b.GetTracks()]==copper
     output=pcbnew.LoadBoard(result['board'])
     added=[t for t in output.GetTracks() if t.m_Uuid.AsString() not in {x.m_Uuid.AsString() for x in b.GetTracks()}]
@@ -94,3 +95,27 @@ with tempfile.TemporaryDirectory() as folder:
     except ValueError as e:
         assert 'already connected' in str(e),str(e)
 print('test_kelvin_pad_join: isolated join, force-wall rejection and original preservation passed')
+
+# A blocked connection may skip optional refinement without exhausting time.
+from autorouter.engine.native import pipeline
+for escalation in (False,True):
+    b=pcbnew.BOARD();outline(b,30,20)
+    net=pcbnew.NETINFO_ITEM(b,'OPEN');b.Add(net)
+    wallnet=pcbnew.NETINFO_ITEM(b,'WALL');b.Add(wallnet)
+    fp=pcbnew.FOOTPRINT(b);fp.SetReference('J1');b.Add(fp)
+    add_pad(fp,1,5,10,net);add_pad(fp,2,25,10,net)
+    add_track(b,wallnet,pcbnew.F_Cu,(15,0),(15,20))
+    b.BuildConnectivity()
+    opts=NativeOptions(pitch_mm=.2,allow_vias=False,routable_layers=[True,False],
+        time_limit_s=30,fanout_vias=False,stitch_vias=False,shove=False,
+        diff_pairs=False,tune_lengths=False,pour_goals=False)
+    messages=[]
+    result=pipeline.run_job(b,opts,escalate=escalation,status=messages.append)
+    assert result.failed==['OPEN'],result.failed
+    assert not result.timed_out,(result,messages)
+    assert ('refinement_skipped' in result.stats)==escalation,result.stats
+    assert not any('Time limit reached' in message for message in messages),messages
+    opts.time_limit_s=1e-9
+    expired=pipeline.run_job(b,opts,escalate=escalation)
+    assert expired.timed_out and expired.failed,expired
+print('short-budget success, optional refinement and actual timeout: passed')

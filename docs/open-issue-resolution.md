@@ -14,7 +14,7 @@ Routing experiments use copies; private board inputs are not published.
 | #5 | Enforce a configurable intra-pair skew limit without requiring a user length group | Merged in PR #25; native skew/scope/lock tests passed |
 | #6 | Preserve or recover fine-pitch plane-pad via sites through whole-board signal routing | Merged in PR #32; native/GUI suite and all nine CI jobs passed |
 | #7 | Extend locked partial copper from free ends without duplicating the existing route | Merged in PR #25; endpoint/locked-copper regressions and CI passed |
-| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Via/layer restrictions and templates merged; Kelvin native/private-board checks pass, CI pending |
+| #8 | Net-group/layer-specific via restrictions; Kelvin joins only at a specified pad; repeat-channel template mapping | Merged in PRs #35, #41 and #42; native/private-board checks and all nine CI jobs passed |
 | #13 | Reproduce isolated long-sense-line failures with full clearance rules; measure search/read time and preserve refill results on hard stop | Older sense snapshot and completed-refill hard stop tested; original nine-connection case still pending |
 | #16 | Replan a whole IC pin row's escapes jointly, preserving locked and unrelated copper | Cell8 reproduced; protected reroutes add no connections; joint row planning remains |
 | #18 | Try inward, staggered via escapes when fine-pitch pins cannot escape outward | Existing inward/dual candidates tested; explicit staggered row plan remains |
@@ -436,3 +436,32 @@ violation reports; unconnected items decrease from 119 to 115. The run takes
 check. Settings differ from the earlier 0.2 mm single-pass experiment, so this
 is not an isolated algorithm speed/completion comparison. The remaining ten
 separated +3V3 groups keep #24 open.
+
+### Short-budget timeout reporting (#43)
+
+A 90 mm synthetic Kelvin connection with 1.5 mm domain clearance and
+0.15 mm same-net force separation completed in about two seconds, yet was
+reported as timed out with a 30 second budget. The optional refinement
+threshold (60 seconds remaining) was incorrectly treated as an expired
+job deadline, even with refinement disabled or no open connections.
+
+The pipeline now distinguishes skipped refinement from an expired deadline.
+Native tests cover successful short-budget routing, blocked connections with
+refinement enabled/disabled, and actual expired budgets. Existing watchdog
+hard-cap tests remain; the 100 ms clock check now uses a controlled clock to
+avoid failure when a busy host deschedules the test before its first check.
+
+### Joint row experiment (#16 / #18, not yet a public API)
+
+On a copy of the Cell8 board after the two checked Kelvin joins, local
+replanning restores 17 connections around U2 and creates inward staggered
+escape vias. The remaining MUX routes are then completed globally. Existing
+In1 connections require keeping all four copper layers available during
+this experiment. A crossing Q11 gate route is included among the local
+blockers to restore.
+
+After removing one newly generated dangling SD5 tail, all four MUX nets
+improve from two pad components to one, and no other net regresses. Full
+refilled DRC retains the exact 18 baseline reports; airwires fall from five
+to one. The input board is unchanged. This is a private prototype and does
+not yet satisfy the reusable-feature requirement of either issue.

@@ -7,6 +7,7 @@ import functools
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins"))
 print = functools.partial(print, flush=True)
@@ -41,20 +42,23 @@ def test_stall_and_slow_steps():
 
 
 def test_hard_deadline():
-    w = watchdog.start(None, hard_deadline=time.time() + 0.1)
-    try:
-        watchdog.stage("board read: tracks")
-        watchdog.check()                   # before the deadline: nothing
-        assert not watchdog.overdue()
-        time.sleep(0.15)
+    # Deterministic clock: a busy CI host can be descheduled for longer
+    # than the old 100 ms window before the first assertion even executes.
+    with patch.object(watchdog.time, "time", return_value=100.0) as clock:
+        w = watchdog.start(None, hard_deadline=100.1)
         try:
+            watchdog.stage("board read: tracks")
             watchdog.check()
-            raise AssertionError("no Overrun past the hard deadline")
-        except watchdog.Overrun:
-            pass
-        assert w.overrun == "board read: tracks"
-    finally:
-        watchdog.stop(w)
+            assert not watchdog.overdue()
+            clock.return_value = 100.15
+            try:
+                watchdog.check()
+                raise AssertionError("no Overrun past the hard deadline")
+            except watchdog.Overrun:
+                pass
+            assert w.overrun == "board read: tracks"
+        finally:
+            watchdog.stop(w)
     watchdog.check()                       # no watch: a no-op
     assert not watchdog.overdue()
     print("hard deadline: ok")
