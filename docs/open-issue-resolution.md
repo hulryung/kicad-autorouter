@@ -465,3 +465,15 @@ improve from two pad components to one, and no other net regresses. Full
 refilled DRC retains the exact 18 baseline reports; airwires fall from five
 to one. The input board is unchanged. This is a private prototype and does
 not yet satisfy the reusable-feature requirement of either issue.
+
+### Suspend-aware job cap (#45)
+
+Routing and hard-stop deadlines now use the watchdog's epoch-based awake clock,
+using the same wall/monotonic difference as its existing macOS sleep diagnostic.
+System suspend therefore does not consume the job cap; awake CPU starvation and
+slow work still do. Wall-clock progress/elapsed reporting remains available.
+
+Controlled-clock tests advance wall time by 1000 seconds while awake time moves
+by one second: the pipeline completes its route without a false wall cap. A
+subsequent five awake seconds expires the cap. Native hard-stop tests still
+interrupt overdue routing, and the full local native/GUI suite passes.
