@@ -57,6 +57,14 @@ def main():
                 assert len(calls) == 4
                 assert dialog.applied and board.GetConnectivity().GetUnconnectedCount(True) == 0
                 assert '10 -> 80' in dialog.status.GetLabel(), dialog.status.GetLabel()
+                assert dialog.ai_replay.IsEnabled()
+                with patch.object(wx, 'LaunchDefaultBrowser', return_value=True) as browser, \
+                     patch.object(pcbnew, 'LoadBoard', side_effect=AssertionError('Keep active project')):
+                    dialog._on_ai_replay(None)
+                assert browser.called
+                assert (dialog._replay_run / 'replay' / 'index.html').is_file()
+                assert int(board.GetProject()) == project
+                assert board.GetConnectivity().GetUnconnectedCount(True) == 0
             dialog.Destroy()
             if dialog.job:
                 dialog.job.close()  # Same cleanup as AutorouterPlugin.Run.

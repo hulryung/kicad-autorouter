@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Routing replay · KiCad Autorouter</title>
+<style>
+:root{color-scheme:dark;font:16px/1.5 system-ui,sans-serif;background:#10151d;color:#edf2f7;--accent:#71e3bd}
+*{box-sizing:border-box}body{margin:0}main{max-width:1280px;margin:auto;padding:32px 24px}h1{font-size:clamp(1.7rem,4vw,2.7rem);letter-spacing:-.04em;margin:0}h2{font-size:1.2rem}p{margin:8px 0}.eyebrow{color:var(--accent);letter-spacing:.16em;font-size:.75rem;font-weight:700}.muted{color:#b2becf}.top,.controls,.metrics{display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between}.top{margin-bottom:24px}.card{background:#192230;border:1px solid #344458;border-radius:16px;padding:20px;margin-top:16px}.metrics{justify-content:flex-start;gap:32px}.metrics strong{font-size:1.5rem;display:block}.metrics span{font-size:.8rem;color:#b2becf}.board{position:relative;max-height:65vh;aspect-ratio:var(--ratio);margin:auto;background:#202024;overflow:hidden}.board img{display:block;width:100%;height:100%;object-fit:contain}.divider{position:absolute;inset:0 auto 0 var(--wipe,50%);width:2px;background:#f8cf77;pointer-events:none}.board .current{position:absolute;inset:0;clip-path:inset(0 calc(100% - var(--wipe,100%)) 0 0)}.tag{position:absolute;top:12px;padding:4px 10px;background:#10151deb;border:1px solid #627087;border-radius:8px;font-size:.8rem}.left{left:12px}.right{right:12px}.controls{justify-content:flex-start;margin-top:16px}button,select,.download{font:inherit;padding:9px 15px;border:1px solid #627087;border-radius:9px;background:#233247;color:#edf2f7;min-height:42px}button{cursor:pointer}button.primary{background:var(--accent);color:#10251e;border-color:var(--accent);font-weight:700}button:disabled{opacity:.5;cursor:default}a{color:#8eeacb}a.download{text-decoration:none}input[type=range]{width:100%;min-height:32px;accent-color:var(--accent)}input[type=checkbox]{accent-color:var(--accent)}label{display:block}select{margin-left:8px}:focus-visible{outline:3px solid #f8cf77;outline-offset:4px}#wipe-controls{margin-top:12px}details{margin-top:24px}summary{cursor:pointer;padding:8px 0}li{margin:8px 0}footer{margin:28px 0;color:#b2becf;font-size:.85rem}[hidden]{display:none!important}@media(max-width:600px){main{padding:20px 12px}.card{padding:12px}.metrics{gap:18px}.board{max-height:none}.controls{gap:8px}}
+</style>
+<main>
+<header class="top"><div><p class="eyebrow">KICAD AUTOROUTER / IMPROVEMENT REPLAY</p><h1>From first route to better board.</h1><p class="muted">Compare the original. Replay the improvements that were retained.</p></div><a id="video" class="download" href="timelapse.mp4" download hidden>Download MP4</a></header>
+<div class="metrics" id="metrics"></div>
+<section class="card" aria-labelledby="stage-title">
+<div class="top"><h2 id="stage-title">Selected checkpoint</h2><label for="compare"><input id="compare" type="checkbox" checked> Compare with initial board</label></div>
+<div id="board" class="board"><img id="initial" alt="Initial routing"><div class="current"><img id="current" alt="Selected routing checkpoint"></div><div class="divider" id="divider" aria-hidden="true"></div><span class="tag left" id="stage-tag"></span><span class="tag right" id="initial-tag">Initial</span></div>
+<div id="wipe-controls"><label for="wipe">Before / after comparison</label><input id="wipe" type="range" min="0" max="100" value="50" aria-valuetext="50 percent selected checkpoint"></div>
+<div class="controls"><button id="play" class="primary" type="button" aria-pressed="false">Play improvements</button><button id="first" type="button">Initial</button><button id="last" type="button">Final retained</button><label for="speed">Step duration<select id="speed"><option value="1">1 second</option><option value="2" selected>2 seconds</option><option value="4">4 seconds</option></select></label><a id="image" class="download" download>Download frame</a></div>
+<label for="timeline" id="timeline-label">Accepted checkpoint</label><input id="timeline" type="range" min="0" max="0" value="0" step="1">
+<p id="description" class="muted"></p><p id="announcement" role="status"></p>
+</section>
+<details><summary>Checkpoint files and rejected attempts</summary><h2>Accepted checkpoints</h2><ol id="frames"></ol><h2>Not retained</h2><ul id="rejected"></ul></details>
+<footer><p id="run-status"></p><p>This is a replay of saved checkpoints, not a continuous recording of individual routing operations. Scores are reviewer assessments; routing metrics and DRC checks are recorded separately. Missing historical measurements are shown as “not recorded”.</p><a href="description.txt">Video description</a> · <a href="replay.json">Replay data</a></footer>
+</main>
+<script>
+'use strict';
+const data = /*REPLAY_DATA*/;
+const byId = id => document.getElementById(id);
+const frames = data.frames, timeline = byId('timeline'), wipe = byId('wipe'), compare = byId('compare');
+let selected = frames.length - 1, timer = null;
+function metric(value, suffix=''){return value == null ? 'not recorded' : (typeof value==='number' ? Math.round(value*10)/10 : value)+suffix;}
+function stop(){clearInterval(timer);timer=null;byId('play').textContent='Play improvements';byId('play').setAttribute('aria-pressed','false');}
+function comparison(){byId('board').style.setProperty('--wipe',compare.checked ? wipe.value+'%' : '100%');byId('wipe-controls').hidden=!compare.checked;byId('initial-tag').hidden=!compare.checked||Number(wipe.value)===100;byId('stage-tag').hidden=compare.checked&&Number(wipe.value)===0;byId('divider').hidden=!compare.checked;wipe.setAttribute('aria-valuetext',wipe.value+' percent selected checkpoint');}
+function show(index){
+ selected=index;const f=frames[index];timeline.value=index;timeline.setAttribute('aria-valuetext',f.label+'; score '+metric(f.score));
+ byId('current').src=f.image;byId('current').alt=f.label+' routing, '+data.layers;byId('stage-title').textContent=f.label;byId('stage-tag').textContent=f.label;
+ byId('image').href=f.image;byId('description').textContent=`Checkpoint ${index+1} of ${frames.length} · ${data.layers}`;
+ byId('metrics').replaceChildren();
+ for(const [label,key,unit] of [['Score','score',' / 100'],['Open connections','opens',''],['DRC reports','violations',''],['Track length','length_mm',' mm'],['Vias','vias','']]){
+  const box=document.createElement('div'),name=document.createElement('span'),value=document.createElement('strong');name.textContent=label;value.textContent=metric(frames[0][key],unit)+' → '+metric(f[key],unit);box.append(name,value);byId('metrics').append(box);
+ }
+ comparison();
+}
+byId('initial').src=frames[0].image;byId('initial').onload=()=>byId('board').style.setProperty('--ratio',byId('initial').naturalWidth+'/'+byId('initial').naturalHeight);
+byId('current').onerror=()=>{stop();byId('announcement').textContent='Could not load a frame. Keep the frames folder beside this page.';};
+timeline.max=frames.length-1;timeline.disabled=frames.length<2;byId('play').disabled=frames.length<2;
+timeline.addEventListener('input',()=>{stop();show(Number(timeline.value));});
+wipe.addEventListener('input',comparison);compare.addEventListener('change',comparison);
+byId('first').onclick=()=>{stop();show(0);};byId('last').onclick=()=>{stop();show(frames.length-1);};
+byId('speed').onchange=stop;
+byId('play').onclick=()=>{
+ if(timer){stop();return;} compare.checked=false;show(selected===frames.length-1 ? 0 : selected);
+ byId('play').textContent='Pause';byId('play').setAttribute('aria-pressed','true');
+ timer=setInterval(()=>{show(Math.min(selected+1,frames.length-1));if(selected===frames.length-1){stop();byId('announcement').textContent='Replay complete. Final retained checkpoint.';}},Number(byId('speed').value)*1000);
+};
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
+for(const f of frames){const li=document.createElement('li'),a=document.createElement('a');a.href=f.image;a.download='';a.textContent=f.label+' — score '+metric(f.score);li.append(a);byId('frames').append(li);}
+for(const r of data.rejected){const li=document.createElement('li');li.textContent='Attempt '+r.attempt+': '+r.reason;byId('rejected').append(li);}
+if(!data.rejected.length){const li=document.createElement('li');li.textContent='No rejected attempts recorded.';byId('rejected').append(li);}
+byId('video').hidden=!data.video;byId('run-status').textContent='Run status: '+data.status+' · '+(frames.length-1)+' retained improvement(s).';show(selected);
+</script>
+</html>

@@ -356,6 +356,11 @@ class AutorouterDialog(wx.Dialog):
         row2.Add(self.ai_ask, 0, wx.RIGHT, 6)
         row2.Add(self.ai_review, 0, wx.RIGHT, 6)
         row2.Add(self.ai_score, 0, wx.RIGHT, 12)
+        self.ai_replay = wx.Button(page, label="Compare / replay")
+        self.ai_replay.SetToolTip("Open a before/after comparison and replay retained improvement checkpoints.")
+        self.ai_replay.Enable(False)
+        self.ai_replay.Bind(wx.EVT_BUTTON, self._on_ai_replay)
+        row2.Add(self.ai_replay, 0)
         box.Add(row2, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         page.SetSizer(box)
         self._ai_provider_changed()
@@ -406,6 +411,7 @@ class AutorouterDialog(wx.Dialog):
         if started is None:
             return
         binary, _, _ = started
+        self._replay_run = None  # A failed new run must not reopen an older comparison.
         self.applied = had_applied
         self._show_progress("Assistant: testing board copies; only the best verified result will be applied.", None)
         last_poll = [0.0]
@@ -453,6 +459,35 @@ class AutorouterDialog(wx.Dialog):
         except Exception as exc:
             logger.exception("Codex optimization stopped")
             self._show_progress(f"Codex search stopped: {exc}. Results remain in the data folder.", 0.0)
+        finally:
+            if (self.job.directory / 'search' / 'optimization.json').is_file():
+                self._replay_run = self.job.directory / 'search'
+            self._set_busy(False)
+
+    def _on_ai_replay(self, event):
+        from .engine.ai.replay import export_replay
+        run = getattr(self, "_replay_run", None)
+        if run is None or not (run / 'optimization.json').is_file():
+            return
+        self._cancel = False
+        self._set_busy(True)
+
+        def cancelled():
+            wx.SafeYield(self, True)
+            return self._cancel
+
+        try:
+            target = run / 'replay'
+            if not (target / 'index.html').is_file():
+                layers = ",".join(self.board.GetLayerName(l) for l in self.board.GetEnabledLayers().CuStack())
+                export_replay(run, target, layers=layers + ",Edge.Cuts", log=self._append_log,
+                              load_board=lambda path: ai_board_copy.load_copy(path, self.board),
+                              cancelled=cancelled)
+            wx.LaunchDefaultBrowser((target / 'index.html').as_uri())
+        except Exception as exc:
+            self._append_log(f"[replay] Export failed: {exc}")
+            if not self._cancel:
+                wx.MessageBox(str(exc), "Replay export", wx.OK | wx.ICON_ERROR, self)
         finally:
             self._set_busy(False)
 
@@ -1134,6 +1169,9 @@ class AutorouterDialog(wx.Dialog):
         for b in (getattr(self, "ai_ask", None), getattr(self, "ai_review", None), getattr(self, "ai_score", None)):
             if b is not None:
                 b.Enable(not busy)
+        if getattr(self, "ai_replay", None) is not None:
+            run = getattr(self, "_replay_run", None)
+            self.ai_replay.Enable(not busy and run is not None and (run / 'optimization.json').is_file())
         self.cancel_btn.Enable(busy)
         self.notebook.Enable(not busy)
         if not busy:

@@ -114,6 +114,7 @@ class Optimizer:
         data = {'status': status, 'source': str(self.source),
                 'source_sha256': self.source_hash, 'best_board': str(best_path),
                 'initial_score': self.initial_score, 'best_score': best['score'],
+                'initial': self.initial_record,
                 'best_metrics': best['metrics'], 'best_drc': best['drc'],
                 'attempts': self.history}
         target = self.workdir / 'optimization.json'
@@ -147,6 +148,8 @@ class Optimizer:
         board.BuildConnectivity()
         best = self._assess(board, self.workdir / 'initial' / 'review', request, self.options)
         self.initial_score = best['score']
+        self.initial_record = {'board': best_path.relative_to(self.workdir).as_posix(),
+                               'metrics': best['metrics'], 'drc': best['drc']}
         self._write(best_path, best, 'running')
         proposal = best
         stalled = 0
@@ -203,6 +206,7 @@ class Optimizer:
                     raise RuntimeError('could not save candidate')
                 measured = self._assess(candidate, folder / 'review', request, candidate_options)
                 accepted, reason = decision(best, measured, self.min_gain)
+                record['board'] = candidate_path.relative_to(self.workdir).as_posix()
                 record.update(score=measured['score'], metrics=measured['metrics'],
                               drc=measured['drc'], accepted=accepted, reason=reason)
                 if accepted:

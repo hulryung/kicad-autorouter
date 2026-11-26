@@ -31,6 +31,10 @@ The documentation below describes the current `main` branch. Changes after
 
 ### On main since 0.5.13
 
+- **Improvement replay:** after **Score and improve**, open **Compare / replay**
+  to compare the original with retained checkpoints and play the sequence.
+  Export PNG frames and an optional MP4 with [the replay exporter](docs/improvement-replay.md).
+
 - Protected scoped rerouting, faster bounded rasterization and reusable raster
   geometry, power-first ordering and wider legal plane fanouts.
 - Headless [Kelvin joins](docs/kelvin-routing.md), channel templates and
