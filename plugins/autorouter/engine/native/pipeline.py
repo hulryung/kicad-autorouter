@@ -10,6 +10,7 @@ few stubborn connections, and what the AI assistant found by itself.
 from ..compat import zone_filler, connected_items
 
 import copy
+import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -132,13 +133,13 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
     cap = wall_cap(options)
     hard = time.time() + cap + post_cap_grace(cap) if cap else 0.0
     w = watchdog.start(status, hard_deadline=hard)
-    vias_before = _via_inventory(board) if apply_paths and not options.via_in_small_pads else None
+    vias_before = _via_inventory(board) if apply_paths else None
     try:
         out = _run_job(board, options, status, progress, on_path, on_remove, cancelled, escalate,
                        apply_paths, extract_fn, on_layers, placed, on_board)
     finally:
         watchdog.stop(w)
-    if vias_before is not None:
+    if vias_before is not None and not options.via_in_small_pads:
         # Defensive audit: every pass must respect the fabrication constraint.
         try:
             hits = _vias_in_small_pads(board, vias_before, int(options.via_in_pad_min_mm * 1_000_000))
@@ -151,6 +152,15 @@ def run_job(board, options: NativeOptions, status=None, progress=None, on_path=N
                 reason = "used the enabled small-pad fallback" if options.via_in_pad_last_resort else "violate the small-SMD-pad restriction"
                 status(f"{len(hits)} via(s) {reason}: {', '.join(hits[:8])}"
                        + (" ..." if len(hits) > 8 else ""))
+    if vias_before is not None:
+        try:
+            holes = _new_via_hole_violations(board, vias_before)
+            if holes:
+                out.stats["via_hole_violations"] = holes
+                if status:
+                    status(f"WARNING: {len(holes)} new via pair(s) violate hole-to-hole spacing.")
+        except Exception as e:
+            out.stats["via_hole_audit_error"] = repr(e)
     cache = options._raster_cache
     out.stats["raster_cache"] = {"hits": cache.hits, "misses": cache.misses,
                                  "bytes": cache.bytes, "limit_bytes": cache.max_bytes}
@@ -176,6 +186,44 @@ def _via_inventory(board):
     # Count geometry so a restored via is exempt, but an extra identical via
     # or a moved/resized original still gets audited.
     return Counter(_via_geometry(t) for t in board.GetTracks() if t.GetClass() == "PCB_VIA")
+
+
+def _new_via_hole_violations(board, before):
+    """Audit new via pairs, including same-net holes, without blaming old pairs.
+
+    Geometry counts exempt restored originals after rip-up. This diagnostic
+    complements planning masks; it does not replace the full native DRC.
+    """
+    minimum = board.GetDesignSettings().m_HoleToHoleMin
+    vias = [t for t in board.GetTracks() if t.GetClass() == "PCB_VIA"]
+    span = max((v.GetDrillValue() for v in vias), default=0) + minimum
+    if span <= 0:
+        return []
+    remaining = before.copy()
+    buckets = {}
+    hits = []
+    for via in vias:
+        shape = _via_geometry(via)
+        new = remaining[shape] == 0
+        if not new:
+            remaining[shape] -= 1
+        x, y, drill = shape[1:4]
+        bx, by = x // span, y // span
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for other, is_new in buckets.get((bx + dx, by + dy), ()):
+                    if not (new or is_new):
+                        continue
+                    # Disjoint blind/buried hole spans cannot collide.
+                    if not set(shape[4]).intersection(other[4]):
+                        continue
+                    gap = math.hypot(x - other[1], y - other[2]) - (drill + other[3]) / 2
+                    if gap < minimum - 1:
+                        hits.append({"at_mm": [[x / 1e6, y / 1e6],
+                                               [other[1] / 1e6, other[2] / 1e6]],
+                                     "gap_mm": gap / 1e6, "minimum_mm": minimum / 1e6})
+        buckets.setdefault((bx, by), []).append((shape, new))
+    return hits
 
 
 def _vias_in_small_pads(board, before, min_nm: int) -> List[str]:
