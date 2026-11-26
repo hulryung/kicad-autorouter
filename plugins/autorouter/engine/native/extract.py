@@ -1801,8 +1801,15 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     # Copper graphics and text (board and footprint level): netless obstacles.
     say("Rasterizing copper graphics...")
     items = list(board.GetDrawings())
+    tie_graphics = {}
     for fp in board.GetFootprints():
-        items.extend(fp.GraphicalItems())
+        graphics = list(fp.GraphicalItems())
+        items.extend(graphics)
+        if fp.IsNetTie():
+            groups = {frozenset([pad.GetNumber()] + [other.GetNumber() for other in fp.GetNetTiePads(pad)])
+                      for pad in fp.Pads()}
+            for item in graphics:
+                tie_graphics[str(item.m_Uuid.AsString())] = (list(fp.Pads()), groups)
     for item in items:
         watchdog.tick()                                  # the hard stop reaches into a long step
         for layer in layers:
@@ -1815,10 +1822,37 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
             box = _box(shape)
             if box[2] - box[0] > 50_000_000 and box[3] - box[1] > 50_000_000:
                 continue                                 # a huge frame: not a routing obstacle
+            # A declared net-tie bridge belongs to both of its pad nets
+            # inside their attachment area. Keep each pad's existing owner
+            # cells there; do not turn the bridge into free copper for other
+            # nets or erase obstacles already present before this graphic.
+            pad_exits = []
+            tie = tie_graphics.get(str(item.m_Uuid.AsString()))
+            if tie:
+                pads, groups = tie
+                touching = [pad for pad in pads if pad.IsOnLayer(layer.kicad_id)
+                            and shape.Collide(pad.GetEffectiveShape(layer.kicad_id), 0)]
+                allowed = {str(pad.m_Uuid.AsString()) for group in groups
+                           if len([pad for pad in touching if pad.GetNumber() in group]) >= 2
+                           for pad in touching if pad.GetNumber() in group}
+                for pad in touching:
+                    if str(pad.m_Uuid.AsString()) not in allowed or pad.GetNetCode() <= 0:
+                        continue
+                    pad_shape = pad.GetEffectiveShape(layer.kicad_id)
+                    pb = _box(pad_shape)
+                    for key, owner in owners.items():
+                        radius = key[0] // 2 + max(key[1], ds.m_MinClearance) + safety
+                        cells = grid.cells_where(layer.index,
+                            (pb[0]-radius,pb[1]-radius,pb[2]+radius,pb[3]+radius),
+                            lambda x,y: pad_shape.Collide(pcbnew.VECTOR2I(x,y),radius))
+                        pad_exits.extend((owner,idx,pad.GetNetCode()) for idx in cells
+                                         if owner[idx] == pad.GetNetCode())
             add_copper(layer.index, shape, 0, ds.m_MinClearance, box)
             claim(layer.index, 0, lambda r, shape=shape, box=box, li=layer.index:
                   grid.cells_where(li, (box[0] - r, box[1] - r, box[2] + r, box[3] + r),
                                    lambda x, y: shape.Collide(pcbnew.VECTOR2I(x, y), r)))
+            for owner, idx, code in pad_exits:
+                owner[idx] = code
 
     # Openings drawn on a solder mask layer (a logo, an exposed strip, a
     # custom pad's window): copper under one is bare, and DRC reports the
