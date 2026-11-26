@@ -857,7 +857,8 @@ class Router:
                            self.opts.turn_cost, cancelled, routable=routable, via_guard=self.p.via_guard, lane_guard=self.p.lane_guard,
                            history=self.history, layer_extra=self._layer_extra(net.code),
                            site_guard=self.p.site_guard, relief=self.p.plane_relief.get(net.code),
-                           via_owners=self.p.owners.get((net.rules.via_diameter, net.rules.clearance)), **kwargs)
+                           via_owners=self.p.owners.get((net.rules.via_diameter, net.rules.clearance)),
+                           min_via_spacing=net.rules.via_drill+self.p.hole_to_hole+self.p.safety, **kwargs)
         self._record_search(conn)
         return cells
 
@@ -2953,7 +2954,8 @@ class Router:
                             self.opts.turn_cost, cancelled, routable=self.routable,
                             via_guard=p.via_guard, lane_guard=p.lane_guard,
                             goal_bounds=bounds if cell in p.fanout_strict else None,
-                            via_goals_only=cell not in p.fanout_strict)
+                            via_goals_only=cell not in p.fanout_strict,
+                            min_via_spacing=net.rules.via_drill+p.hole_to_hole+p.safety)
         if not cells or len(cells) < 2:
             return fallback()
         segments, vias = _simplify(grid, cells)

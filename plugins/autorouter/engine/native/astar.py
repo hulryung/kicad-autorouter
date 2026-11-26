@@ -53,13 +53,88 @@ MOVES = ((1, 0, False), (-1, 0, False), (0, 1, False), (0, -1, False),
 
 def route(*args, **kwargs) -> Optional[List[int]]:
     """_route, counting its work for clock()."""
-    LAST.update(expansions=0, capped=False, outcome="search_exhausted")
+    spacing = kwargs.pop("min_via_spacing", 0)
+    if spacing > 0:
+        return _spaced_route(args, kwargs, spacing)
+    LAST.update(expansions=0, capped=False, outcome="search_exhausted", via_spacing_retries=0)
     WORK[1] = True
     try:
         return _route(*args, **kwargs)
     finally:
         WORK[0] += LAST["expansions"] + SEARCH_WORK
         WORK[1] = False
+
+
+def _spaced_route(args, kwargs, spacing):
+    """Retry a path whose own new holes violate the drill spacing.
+
+    The ordinary via mask covers existing holes. It cannot cover holes that
+    are still part of the current search. Reserve the first conflicting via's
+    surroundings before retrying, keeping that site's own cell available.
+    The retries share the original expansion budget and cancellation callback.
+    """
+    positional = list(args)
+    named = dict(kwargs)
+    grid = positional[0] if positional else named["grid"]
+    original = positional[2] if len(positional) > 2 else named["via_block"]
+    cap = positional[11] if len(positional) > 11 else named["max_expansions"]
+    cancelled = positional[13] if len(positional) > 13 else named.get("cancelled")
+    used = 0
+    blocked = None
+    for attempt in range(8):
+        if cancelled and cancelled():
+            LAST.update(
+                expansions=used,
+                capped=False,
+                outcome=getattr(cancelled, "reason", "interrupted"),
+            )
+            return None
+        remaining = max(0, cap - used)
+        if len(positional) > 11:
+            positional[11] = remaining
+        else:
+            named["max_expansions"] = remaining
+        path = route(*positional, **named)
+        used += LAST["expansions"]
+        if path is None:
+            LAST["expansions"] = used
+            return None
+        via_cells = list(
+            dict.fromkeys(
+                a % grid.plane
+                for a, b in zip(path, path[1:])
+                if a // grid.plane != b // grid.plane
+            )
+        )
+        conflict = None
+        for index, cell in enumerate(via_cells):
+            y, x = divmod(cell, grid.w)
+            for other in via_cells[index + 1 :]:
+                oy, ox = divmod(other, grid.w)
+                if ((x - ox) * grid.pitch) ** 2 + (
+                    (y - oy) * grid.pitch
+                ) ** 2 < spacing**2:
+                    conflict = (cell, x, y)
+                    break
+            if conflict is not None:
+                break
+        if conflict is None:
+            LAST.update(expansions=used, via_spacing_retries=attempt)
+            return path
+        if blocked is None:
+            blocked = bytearray(original[i] for i in range(grid.plane))
+            if len(positional) > 2:
+                positional[2] = blocked
+            else:
+                named["via_block"] = blocked
+        cell, x, y = conflict
+        for index in grid.disc_cells(0, grid.nm_x(x), grid.nm_y(y), spacing):
+            if index != cell:
+                blocked[index] = 1
+        if used >= cap:
+            break
+    LAST.update(expansions=used, capped=used >= cap, outcome="via_spacing_rejected")
+    return None
 
 
 def _route(grid: Grid, owners, via_block: bytearray, net: int,
