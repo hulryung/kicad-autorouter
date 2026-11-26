@@ -31,3 +31,18 @@ r = router.Router(p)
 r.routable = [False]
 probe = r._end_probe(p.connections[0], 1, p.grid.index(0, 50, 20))
 assert probe["reason"] == "layer_disabled" and not probe["layer_enabled"], probe
+# A 0.5 mm neighbourhood can be free while the surrounding exit is walled.
+p = make_problem(layers=1, w=60, h=40)
+add_net(p, 1, (10, 20), (50, 20))
+p.options.allow_vias = False
+p.options.rip_rounds = 0
+p.options.direct_links = False
+for x in range(3, 18):
+    for y in range(13, 28):
+        if x in (3, 17) or y in (13, 27):
+            p.owners[RULES.key][p.grid.index(0, x, y)] = BLOCKED
+result = router.run(p)
+a = result.failed_detail[0]["ends"][0]
+assert a["free_cells_around"] == "121/121", a
+assert a["escape_probe"]["reason"] == "enclosed_on_reported_layer", a
+assert a["escape_probe"]["radius_mm"] == 2.0

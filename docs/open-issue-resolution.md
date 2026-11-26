@@ -511,7 +511,8 @@ interrupt overdue routing, and the full local native/GUI suite passes.
 
 ### Endpoint reachability diagnostics (#46)
 
-Failure details now include a bounded planar flood at each reported endpoint,
+Failure details now include a 2 mm planar flood at each reported endpoint
+(capped at 64 cells of radius on very fine grids),
 with the applied width/neck/clearance, probe radius, legal seed count and
 reachable count. It distinguishes an enclosed endpoint from free pockets
 nearby, a blocked seed, a disabled layer, and an exit reaching the probe boundary. This is
@@ -543,3 +544,9 @@ Full refilled DRC introduces zero new violation identities (143 → 141 reports)
 and unconnected items fall from 81 to 41; the remaining opens are outside the
 requested sense nets. A separate native nine-line Kelvin test covers lengths
 30–90 mm, 1.5 mm domain clearance and a 0.15 mm force separation requirement.
+
+The copied PIO replay selects 21 open non-plane signal nets. Fixed-neighbour
+routing adds no connections; the exact 171 refilled DRC reports and all 43
+unconnected items remain, with no split of an existing pad group. A 0.5 mm
+probe was too short to distinguish these local pockets, so the diagnostic
+radius was widened. Its boundary verdict still does not prove a full route.

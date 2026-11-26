@@ -2685,7 +2685,7 @@ class Router:
         grid, net = self.grid, self.p.nets[conn.net]
         owners = self.p.owners[self._key(conn)]
         layer, cx, cy = grid.unpack(cell)
-        radius = 5
+        radius = min(64, max(5, int(math.ceil(2_000_000 / grid.pitch))))
         region = self._neck_region(conn)
         neck = self.p.owners.get((conn.neck, net.rules.clearance), owners)
 
