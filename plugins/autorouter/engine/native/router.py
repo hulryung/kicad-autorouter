@@ -2675,6 +2675,70 @@ class Router:
         self._commit(conn, cells, on_path)
         return True
 
+    def _end_probe(self, conn, cluster, cell):
+        """Bounded planar reachability at one reported end, not a path proof.
+
+        Count reachable cells, rather than disconnected free pockets around
+        a pin. Via feasibility and remote detours remain the search's job.
+        """
+        grid, net = self.grid, self.p.nets[conn.net]
+        owners = self.p.owners[self._key(conn)]
+        layer, cx, cy = grid.unpack(cell)
+        radius = 5
+        region = self._neck_region(conn)
+        neck = self.p.owners.get((conn.neck, net.rules.clearance), owners)
+
+        def legal(idx):
+            own = neck if region and idx in region else owners
+            return own[idx] in (0, net.code)
+
+        def inside(x, y):
+            return grid.inside(x, y) and abs(x - cx) <= radius and abs(y - cy) <= radius
+
+        component, _ = self._component(conn.net, cluster)
+        seeds = set()
+        for c in component:
+            li, x, y = grid.unpack(c)
+            if li == layer and inside(x, y) and legal(c):
+                seeds.add(c)
+        reached = set(seeds)
+        pending = list(seeds)
+        boundary = False
+        while pending:
+            current = pending.pop()
+            _, x, y = grid.unpack(current)
+            if abs(x - cx) == radius or abs(y - cy) == radius:
+                boundary = True
+            for dx, dy, diagonal in astar.MOVES:
+                nx, ny = x + dx, y + dy
+                if not inside(nx, ny):
+                    continue
+                dest = grid.index(layer, nx, ny)
+                if dest in reached or not legal(dest):
+                    continue
+                if diagonal and (
+                    not legal(grid.index(layer, nx, y))
+                    or not legal(grid.index(layer, x, ny))
+                ):
+                    continue
+                reached.add(dest)
+                pending.append(dest)
+        return {
+            "kind": "local_planar",
+            "radius_mm": radius * grid.pitch / 1e6,
+            "width_mm": (conn.width or net.rules.width) / 1e6,
+            "neck_width_mm": conn.neck / 1e6 if region else None,
+            "clearance_mm": net.rules.clearance / 1e6,
+            "legal_seed_cells": len(seeds),
+            "reachable_cells": len(reached),
+            "reason": (
+                "no_legal_seed_at_end"
+                if not seeds
+                else "reaches_probe_boundary" if boundary else "enclosed_on_reported_layer"
+            ),
+            "via_feasibility": "not_evaluated",
+        }
+
     def _why_failed(self, conn: Connection, interruption=None) -> dict:
         """What surrounds a failed connection's ends: how much room there is
         and which nets (or fixed copper) own the cells around each exit."""
@@ -2703,6 +2767,7 @@ class Router:
             ends.append({"refs": sorted(net.clusters[cluster].refs),
                          "at_mm": [round(grid.nm_x(cx) / 1e6, 3), round(grid.nm_y(cy) / 1e6, 3)],
                          "layer": p.layers[layer].name,
+                         "escape_probe": self._end_probe(conn, cluster, cell),
                          "free_cells_around": f"{free}/{total}",
                          "blocked_by": dict(sorted(around.items(), key=lambda kv: -kv[1])[:5])})
         search = self.search_outcomes.get((conn.net, min(conn.a, conn.b), max(conn.a, conn.b)), {})
