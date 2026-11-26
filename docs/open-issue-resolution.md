@@ -400,3 +400,39 @@ extraction and zone filling, injecting an Overrun at the next extraction stage
 after the final pour refill. The job reports `the pour pass` in its overrun
 list and retains the exact filled polygon representation. This verifies the
 completed-refill boundary; it does not interrupt KiCad's C++ fill mid-call.
+
+
+### Kelvin pad-only joins (#8)
+
+The headless Kelvin helper treats the source pad's existing connected component
+as the sense side and routes it to a single designated pad on the same net.
+Original force copper outside that pad is blocked with a separate spacing mask.
+An independent polygon/shape check validates emitted copper and separation on
+every layer, followed by per-net connectivity and KiCad DRC acceptance. Existing
+copper, pad assignments and the input project are preserved; only a validated
+new output project is published. This is a routing operation, not a permanent
+KiCad net-class rule. Zone-bearing nets and per-layer widths are explicitly
+unsupported; already connected sense/force inputs are rejected.
+
+Native regressions cover the nearer same-net shortcut, existing partial sense
+tracks, through-hole join pads, multilayer detours, blocked single-layer routes,
+independent rejection of a deliberately faulty router result, spacing checks,
+CLI invocation and unchanged input bytes.
+
+On the private Cell8 copy, U506.1's C4 component joins J5.5 with six new items,
+then U306.1's C2 component joins J5.3 with three. Both actual outputs pass the
+independent 0.15 mm force-separation check. Per-net DRC open counts decrease
+only on the requested nets, and existing copper is retained. These are the two
+remaining sense connections in this snapshot, not the original nine-connection
+input from #13. That issue's exact historical reproduction remains separate.
+
+### Full power-job experiment (#24)
+
+A 0.15 mm PIO +3V3 job with early/final fanout, stitching enabled and power-first
+ordering reduces pad components from 15 to 11, adding six fanouts. All other
+nets retain their pad-component counts. Refilled DRC has the exact same 411
+violation reports; unconnected items decrease from 119 to 115. The run takes
+285.8 seconds with 2.48 GB peak RSS, including a hard stop during the island
+check. Settings differ from the earlier 0.2 mm single-pass experiment, so this
+is not an isolated algorithm speed/completion comparison. The remaining ten
+separated +3V3 groups keep #24 open.

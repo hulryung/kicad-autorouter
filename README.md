@@ -419,6 +419,11 @@ Omitting `layers` selects every copper layer. Unknown layer/group names and
 invalid rectangles are rejected. These advanced controls currently use the
 headless options interface.
 
+Headless [Kelvin routing](docs/kelvin-routing.md) connects an isolated sense
+component to one designated pad of its net, preserving force copper and pad
+assignments. A separate geometry check rejects same-net shortcuts that ordinary
+DRC would allow; accepted results are saved as a new project copy.
+
 ## Use with LCSC Manager
 
 [LCSC Manager](https://github.com/hulryung/kicad-lcsc-manager) imports component
