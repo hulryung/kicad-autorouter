@@ -493,3 +493,24 @@ Controlled-clock tests advance wall time by 1000 seconds while awake time moves
 by one second: the pipeline completes its route without a false wall cap. A
 subsequent five awake seconds expires the cap. Native hard-stop tests still
 interrupt overdue routing, and the full local native/GUI suite passes.
+
+### Original nine-net sense reproduction (#13)
+
+The historical phase-F checkpoint and the original force/sense split were
+recovered locally. Replaying the split moves 405 force items, matching the
+recorded run. At 0.1 mm pitch and a 180 second search budget, the pre-fix
+router adds 17 partial connections but leaves every C0–C8 net open.
+
+Declared net-tie copper bridges were rasterized as netless obstacles across
+their own pads' exits. Extraction now retains only previously pad-owned cells
+within the attachment region of pads in a declared, touched net-tie group.
+Undeclared graphics, foreign blockers and unrelated-net crossings remain
+obstacles. Native tests cover these distinctions and compare DRC results.
+
+With this fix the same reconstructed input completes all 40 required joins:
+all nine C0–C8 nets become single pad components in 188.7 seconds including
+board reading and pour checks. No other net's component count increases.
+Full refilled DRC introduces zero new violation identities (143 → 141 reports),
+and unconnected items fall from 81 to 41; the remaining opens are outside the
+requested sense nets. A separate native nine-line Kelvin test covers lengths
+30–90 mm, 1.5 mm domain clearance and a 0.15 mm force separation requirement.
