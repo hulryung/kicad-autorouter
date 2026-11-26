@@ -466,6 +466,22 @@ refilled DRC retains the exact 18 baseline reports; airwires fall from five
 to one. The input board is unchanged. This is a private prototype and does
 not yet satisfy the reusable-feature requirement of either issue.
 
+### Consecutive new via holes (#47)
+
+The existing-hole mask did not cover a second via created within the same A*
+path. A two-wall regression routed overlapping holes 0.2 mm apart where
+0.65 mm was required. Searches now check their own proposed via pairs and
+retry with a private exclusion mask, sharing the original expansion budget
+and cancellation callback. The regression still connects, with legal spacing.
+A geometry-counted post-job audit reports new same-net or different-net via
+hole violations without attributing pre-existing/restored pairs to this job.
+
+The archived PIO intermediate confirms both reported vias were introduced in
+one pass and joined by a short In2 path. A narrower +12V-only replay does not
+reproduce the pair, so it is not claimed as a matched before/after fix of the
+original 87-net run. Native existing-hole and new-pair audit regressions cover
+the fabrication invariant independently of that private pass's ordering.
+
 ### Suspend-aware job cap (#45)
 
 Routing and hard-stop deadlines now use the watchdog's epoch-based awake clock,
