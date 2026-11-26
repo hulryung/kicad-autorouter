@@ -2730,10 +2730,13 @@ class Router:
             "width_mm": (conn.width or net.rules.width) / 1e6,
             "neck_width_mm": conn.neck / 1e6 if region else None,
             "clearance_mm": net.rules.clearance / 1e6,
+            "layer_enabled": bool(self.routable[layer]),
             "legal_seed_cells": len(seeds),
             "reachable_cells": len(reached),
             "reason": (
-                "no_legal_seed_at_end"
+                "layer_disabled"
+                if not self.routable[layer]
+                else "no_legal_seed_at_end"
                 if not seeds
                 else "reaches_probe_boundary" if boundary else "enclosed_on_reported_layer"
             ),

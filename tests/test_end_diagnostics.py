@@ -26,3 +26,8 @@ assert probe["reason"] == "no_legal_seed_at_end", probe
 print(
     "test_end_diagnostics: disconnected free pockets, open end and blocked seed distinguished"
 )
+# Geometry alone must not imply an exit on a disabled routing layer.
+r = router.Router(p)
+r.routable = [False]
+probe = r._end_probe(p.connections[0], 1, p.grid.index(0, 50, 20))
+assert probe["reason"] == "layer_disabled" and not probe["layer_enabled"], probe

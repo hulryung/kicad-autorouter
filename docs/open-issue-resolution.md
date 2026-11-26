@@ -514,7 +514,7 @@ interrupt overdue routing, and the full local native/GUI suite passes.
 Failure details now include a bounded planar flood at each reported endpoint,
 with the applied width/neck/clearance, probe radius, legal seed count and
 reachable count. It distinguishes an enclosed endpoint from free pockets
-nearby, a blocked seed, and an exit reaching the probe boundary. This is
+nearby, a blocked seed, a disabled layer, and an exit reaching the probe boundary. This is
 explicitly a local planar diagnostic: it does not claim a complete route or
 infer via feasibility. The existing whole-search verdict remains separate.
 
