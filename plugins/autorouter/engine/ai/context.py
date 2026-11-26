@@ -25,7 +25,7 @@ def kicad_cli() -> Optional[str]:
     return None
 
 
-def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
+def drc_summary(board, workdir: Path, limit: int = 40, *, all_severities: bool = False) -> dict:
     """KiCad's DRC on a saved copy of the board (zones refilled), condensed."""
     import pcbnew
     cli = kicad_cli()
@@ -63,7 +63,7 @@ def drc_summary(board, workdir: Path, limit: int = 40) -> dict:
             if worker.returncode:
                 raise RuntimeError(f"DRC refill failed: {worker.stderr[-1000:]}")
             refill = []
-        result = subprocess.run([cli, "pcb", "drc", "--format", "json", "--severity-error"] + refill +
+        result = subprocess.run([cli, "pcb", "drc", "--format", "json"] + ([] if all_severities else ["--severity-error"]) + refill +
                         ["-o", str(report), str(copy)], capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
             raise RuntimeError(f"kicad-cli DRC failed ({result.returncode}): {(result.stderr or result.stdout)[-1000:]}")

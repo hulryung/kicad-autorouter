@@ -43,6 +43,8 @@ class Watch:
         self.stall_s = stall_s
         self.slow_s = slow_s
         self.hard_deadline = hard_deadline
+        self._wall_origin = time.time()
+        self._awake_origin = time.monotonic()
         self.thread_id = threading.get_ident()
         self.totals: Dict[str, float] = {}
         self.stalls: List[Tuple[str, float, str]] = []     # (stage, seconds, where)
@@ -74,8 +76,16 @@ class Watch:
             for stage, secs, where in fresh:
                 self.status(f"Slow step: '{stage}' has taken {secs:.0f} s so far (in {where})")
 
+    def wall_time(self) -> float:
+        """Epoch-based job clock advanced only by monotonic awake time.
+
+        This uses the same clock difference as our existing sleep diagnostic.
+        It excludes suspend on macOS without extending caps for CPU starvation.
+        """
+        return self._wall_origin + max(0.0, time.monotonic() - self._awake_origin)
+
     def overdue(self) -> bool:
-        if self.hard_deadline and time.time() > self.hard_deadline:
+        if self.hard_deadline and self.wall_time() > self.hard_deadline:
             if not self.overrun:
                 self.overrun = self._name or "?"
                 logger.warning("hard deadline passed during '%s'", self.overrun)
@@ -193,3 +203,8 @@ def overdue() -> bool:
 def set_hard_deadline(t: float) -> None:
     if _active is not None:
         _active.hard_deadline = t
+
+
+def wall_time() -> float:
+    """Current job's sleep-adjusted wall clock; ordinary epoch time if idle."""
+    return _active.wall_time() if _active is not None else time.time()

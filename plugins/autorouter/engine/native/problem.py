@@ -184,7 +184,7 @@ class NativeOptions:
     # A wall-clock cap on the whole job on top of time_limit_s, which benchmarks count in search work
     # only: wide isolation rings, board reads and clean-up are not search work and once took a
     # "10-minute" run four hours. None = automatic (3x the time limit, at least limit + 20 min;
-    # none without a time limit), 0 = no cap. wall_deadline is the absolute time (time.time()) set by
+    # none without a time limit), 0 = no cap. wall_deadline is the epoch-based, sleep-adjusted time (watchdog.wall_time()) set by
     # the pipeline for every pass.
     wall_limit_s: Optional[float] = None
     wall_deadline: float = 0.0

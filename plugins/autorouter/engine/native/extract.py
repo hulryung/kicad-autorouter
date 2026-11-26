@@ -1010,7 +1010,7 @@ def _main_pad_components(board, conn) -> Dict[int, Set[Tuple[int, int, int]]]:
     return main_components
 
 
-def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
+def extract(board, options: NativeOptions, status=None, *, bounds_nm=None) -> RoutingProblem:
     t0 = time.time()
     shown = status or (lambda text: None)
 
@@ -1062,7 +1062,7 @@ def extract(board, options: NativeOptions, status=None) -> RoutingProblem:
     w = int(math.ceil((bb.GetWidth() + 2 * MARGIN_NM) / pitch)) + 1
     h = int(math.ceil((bb.GetHeight() + 2 * MARGIN_NM) / pitch)) + 1
     full_grid_cells = w * h * len(layers)
-    bounds = scoped_grid_bounds(board, options)
+    bounds = bounds_nm if bounds_nm is not None else scoped_grid_bounds(board, options)
     windowed = False
     if bounds is not None:
         x0 = max(0, int(math.floor((bounds[0] - ox) / pitch)))

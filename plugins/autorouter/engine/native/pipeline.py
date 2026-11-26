@@ -258,11 +258,11 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
     cap = wall_cap(options)
     if cap:
         options = copy.copy(options)
-        options.wall_deadline = time.time() + cap
+        options.wall_deadline = watchdog.wall_time() + cap
 
     def wall_over() -> bool:
         """Past the job's wall-clock cap (see NativeOptions.wall_limit_s)?"""
-        return bool(cap) and time.time() > options.wall_deadline
+        return bool(cap) and watchdog.wall_time() > options.wall_deadline
 
     def job_items() -> list:
         """UUIDs of the items this job has on the board now (ripped ones gone)."""
@@ -414,21 +414,28 @@ def _run_job(board, options: NativeOptions, status, progress, on_path, on_remove
         options = copy.copy(options)
         options.movable_uuids = job_items()
 
-    # the finer pass needs room in the time limit (its board read alone takes a while)
-    time_for_more = not limit or remaining() > 60.0
-    if not time_for_more:
+    # Reserve enough budget for the finer board read. Skipping optional
+    # refinement is not a timeout: a short-budget job may already be done.
+    wants_fine = (escalate and out.failed and not out.cancelled
+                  and options.pitch_mm > 0.04 and not (cancelled and cancelled()))
+    left = remaining()
+    time_for_more = not limit or left > 60.0
+    if limit and left <= 0:
         out.timed_out = True
         if status:
             status("Time limit reached: no finer second pass.")
-    elif wall_over():
+    elif wants_fine and not time_for_more:
+        out.stats["refinement_skipped"] = "insufficient_remaining_budget"
+        if status:
+            status("Less than 60 seconds remain: skipping optional finer second pass.")
+    if wall_over():
         time_for_more = False
         out.timed_out = out.wall_capped = True
         if status:
             status(f"Wall-clock cap reached ({cap / 60:.0f} min): no finer second pass.")
     if getattr(result, "wall_capped", False):
         out.wall_capped = True
-    if escalate and out.failed and not out.cancelled and time_for_more and options.pitch_mm > 0.04 \
-            and not (cancelled and cancelled()):
+    if wants_fine and time_for_more:
         if status:
             status(f"Second pass on {len(out.failed)} open connection(s): finer grid, neck width, cheaper vias...")
         fine = fine_options(options, out.failed, board)
